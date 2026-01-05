@@ -11,6 +11,7 @@ from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.sensors import ContactSensorCfg
 from .robot import G1_CFG
+from ..motion_lib import SamplerMod
 
 VELOCITY_RANGE = {
     "x": (-0.5, 0.5),
@@ -68,7 +69,7 @@ class EventCfg:
             "com_range": {"x": (-0.025, 0.025), "y": (-0.05, 0.05), "z": (-0.05, 0.05)},
         },
     )
-     
+    
     robot_joint_stiffness_and_damping = EventTerm(
         func=mdp.randomize_actuator_gains,
         min_step_count_between_reset=200,
@@ -108,6 +109,7 @@ class G1MotionTrackingEnvCfg(DirectRLEnvCfg):
     decimation = 4
 
     observation_space = 75
+    privilege_observation_space = 150
     action_space = 23
     state_space = 0
 
@@ -186,5 +188,6 @@ class G1MotionTrackingEnvCfg(DirectRLEnvCfg):
 
     contact_sensor = ContactSensorCfg(
         prim_path="/World/envs/env_.*/Robot/.*", history_length=3, track_air_time=True, force_threshold=10.0,
-        filter_prim_paths_expr=["/World/envs/env_.*/Robot/.*"]
     )
+
+    sampler_mod:SamplerMod = SamplerMod.Clamp

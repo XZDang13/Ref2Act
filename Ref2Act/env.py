@@ -9,7 +9,7 @@ from isaaclab.envs.mdp import undesired_contacts
 
 from .config.env_cfg import G1MotionTrackingEnvCfg, ActionMod
 from .action import ActionProcessor
-from .motion_lib import MotionLib, Sampler
+from .motion_lib import MotionLib, Sampler, SamplerMod
 from .observation import Observation
 from .scence_setter import InitialSetting
 from .rewards import Rewards, RewardsCfg
@@ -38,7 +38,6 @@ class G1MotionTrackingEnv(DirectRLEnv):
 
         collision_track_body_indices, _ = self.contact_sensor.find_bodies(self.cfg.collision_track_body_names)
         self.collision_track_body_indices = collision_track_body_indices
-        print(self.collision_track_body_indices)
 
         self.sampler = Sampler(self.cfg.scene.num_envs, self.motion_lib.duration,
                                self.step_dt, self.motion_lib.num_frames)
@@ -77,17 +76,18 @@ class G1MotionTrackingEnv(DirectRLEnv):
 
     def _apply_action(self):
         self.robot.set_joint_position_target(self.action_processer.target_joint_position)
+        #self.robot.set_joint_position_target(self.target_pos)
         
     def _get_observations(self):
         self.previous_actions = self.action_processer.applied_action.clone()
 
         default_obs = self.observation_model.default_robot_observation(self.robot, self.previous_actions,
                                                                        self.cfg.add_obs_noise)
-        previlege_obs = self.observation_model.default_robot_privilege_observation(self.robot)
-        times = self.sampler.sample_next("clamp")
+        privilege_obs = self.observation_model.default_robot_privilege_observation(self.robot)
+        times = self.sampler.sample_next(self.cfg.sampler_mod)
         self.reference_motion = self.motion_lib.sample_motion(times, self.scene.env_origins)
 
-        return {"default": default_obs, "previlege_obs": previlege_obs}
+        return {"default": default_obs, "privilege": privilege_obs}
     
     def _get_rewards(self) -> torch.Tensor:
         reward = self.reward_model.get_task_reward(self.robot, self.reference_motion, self.contact_sensor)

@@ -5,9 +5,10 @@ from .utils import IndexLike
 
 class ActionProcessor:
     
-    def __init__(self, robot: Articulation, action_buffer_length: int=1):
+    def __init__(self, robot: Articulation, action_buffer_length: int=1, noise_scale:float=0.0):
         self.scale: float|torch.Tensor = 0.0
         self.offset: float|torch.Tensor = 0.0
+        self.noise_scale = noise_scale
         self.device = robot.data.device
         self.num_env = robot.data.joint_pos.size(0)
         self.action_size = robot.data.joint_pos.size(1)
@@ -50,13 +51,16 @@ class ActionProcessor:
 
         self.delays.uniform_(ranges[0], ranges[1])
     
-    def pre_process_action(self, action: torch.Tensor):
+    def pre_process_action(self, action: torch.Tensor, add_noise:bool=False):
         self.action_buffer.append(action)
 
         if self.delays is None:
             self.applied_action = self.action_buffer.latest()
         else:
             self.applied_action = self.action_buffer.get(self.delays)
+
+        if add_noise:
+            self.applied_action += torch.rand_like(self.applied_action) * self.noise_scale
 
         self.target_joint_position = self.applied_action * self.scale + self.offset
         self.target_joint_position.clamp_(self.joint_low_limit, self.joint_up_limit)

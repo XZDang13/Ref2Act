@@ -1,3 +1,4 @@
+from enum import Enum
 import numpy as np
 import torch
 import matplotlib
@@ -8,6 +9,9 @@ from dataclasses import dataclass
 
 from .utils import interpolate, slerp, compute_frame_blend, IndexLike
 
+class SamplerMod(Enum):
+    Cycle = 0
+    Clamp = 1
 
 @dataclass
 class ReferenceMotions:
@@ -129,11 +133,11 @@ class Sampler:
 
         return times
     
-    def sample_next(self, on_end: str = "cycle") -> torch.Tensor:
+    def sample_next(self, on_end: SamplerMod=SamplerMod.Clamp) -> torch.Tensor:
         self.current_times += self.dt
-        if on_end == "cycle":
+        if on_end == SamplerMod.Cycle:
             self.current_times = torch.remainder(self.current_times, self.duration)
-        elif on_end == "clamp":
+        elif on_end == SamplerMod.Clamp:
             self.current_times = torch.clamp(self.current_times, max=self.duration)
         else:
             raise ValueError(f"Unknown on_end mode: {on_end}")
