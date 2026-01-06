@@ -108,8 +108,8 @@ class G1MotionTrackingEnvCfg(DirectRLEnvCfg):
 
     decimation = 4
 
-    observation_space = 75
-    privilege_observation_space = 150
+    observation_space = 124
+    privilege_observation_space = 199
     action_space = 23
     state_space = 0
 
@@ -191,3 +191,5 @@ class G1MotionTrackingEnvCfg(DirectRLEnvCfg):
     )
 
     sampler_mod:SamplerMod = SamplerMod.Clamp
+
+    action_noise = 0.01

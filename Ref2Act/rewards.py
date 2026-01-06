@@ -74,7 +74,7 @@ class RewardsCfg:
     mimic_key_ang_vel_weight:float = 1.0
     mimic_joint_position_weight:float = 1.0
     mimic_joint_vel_weight:float = 1.0
-    anchor_height_only:bool = True
+    anchor_height_only:bool = False
     # Penalty reward weights.
     joint_acc_weight:float = -2.5e-7
     joint_torque_wegiht:float = -1e-5
@@ -204,12 +204,13 @@ class MimicRewards:
         key_quaternion_reward = torch.exp(-key_quaternion_error / self.cfg.quaternion_std) * self.cfg.mimic_key_quaternion_weight
         key_linear_vel_reward = torch.exp(-key_linear_vel_error / self.cfg.linear_vel_std) * self.cfg.mimic_key_linear_vel_weight
         key_ang_vel_reward = torch.exp(-key_ang_vel_error / self.cfg.ang_vel_std) * self.cfg.mimic_key_ang_vel_weight
-        joint_position_reward = torch.exp(-joint_position_error / 1.0)
-        joint_vel_reward = torch.exp(-joint_vel_error / 1)
+        joint_position_reward = torch.exp(-joint_position_error / self.cfg.joint_position_std) * self.cfg.mimic_joint_position_weight
+        joint_vel_reward = torch.exp(-joint_vel_error / self.cfg.joint_vel_std) * self.cfg.mimic_joint_vel_weight
 
 
         reward = torch.stack([anchor_position_reward, anchor_quaternion_reward, key_position_reward,
-                                key_quaternion_reward, key_linear_vel_reward, key_ang_vel_reward],
+                                key_quaternion_reward, key_linear_vel_reward, key_ang_vel_reward,
+                                joint_position_reward, joint_vel_reward],
                                 dim=-1
                             )
         
@@ -234,29 +235,16 @@ class MimicRewards:
     
     def key_body_pose_error(self, robot: Articulation, reference_motion: ReferenceMotions):
 
-        robot_anchor_body_positions = robot.data.body_pos_w[:, self.cfg.robot_anchor_body_indices]
-        robot_anchor_body_quaternions = robot.data.body_quat_w[:, self.cfg.robot_anchor_body_indices]
-
         robot_key_body_positions = robot.data.body_pos_w[:, self.cfg.robot_key_body_indices]
         robot_key_body_quaternions = robot.data.body_quat_w[:, self.cfg.robot_key_body_indices]
         
-        robot_key_body_relative_positions, robot_key_body_relative_quaternions = relative_transform(
-            robot_anchor_body_positions, robot_anchor_body_quaternions,
-            robot_key_body_positions, robot_key_body_quaternions
-        ) 
 
-        reference_anchor_body_positions = reference_motion.body_positions[:, self.cfg.motion_anchor_body_indices]
-        reference_anchor_body_quaternions = reference_motion.body_quaternions[:, self.cfg.motion_anchor_body_indices]
         reference_key_body_positions = reference_motion.body_positions[:, self.cfg.motion_key_body_indices]
         reference_key_body_quaternions = reference_motion.body_quaternions[:, self.cfg.motion_key_body_indices]
 
-        reference_key_body_relative_positions, reference_key_body_relative_quaternions = relative_transform(
-            reference_anchor_body_positions, reference_anchor_body_quaternions,
-            reference_key_body_positions, reference_key_body_quaternions
-        )
 
-        position_error = (robot_key_body_relative_positions-reference_key_body_relative_positions).square().sum(-1).mean(-1)
-        quaternion_error = quat_error_magnitude(robot_key_body_relative_quaternions, reference_key_body_relative_quaternions).square().mean(-1)
+        position_error = (robot_key_body_positions-reference_key_body_positions).square().sum(-1).mean(-1)
+        quaternion_error = quat_error_magnitude(robot_key_body_quaternions, reference_key_body_quaternions).square().mean(-1)
         
 
         return position_error, quaternion_error

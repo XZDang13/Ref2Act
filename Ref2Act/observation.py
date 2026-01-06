@@ -1,6 +1,8 @@
 import torch
 
 from isaaclab.assets import Articulation
+from isaaclab.scene import InteractiveScene
+from isaaclab.utils.math import quat_apply_inverse
 from .motion_lib import ReferenceMotions
 from .math import relative_transform
 
@@ -17,7 +19,14 @@ class Observation:
         self.motion_anchor_body_indices = motion_anchor_body_indices
         self.motion_key_body_indices = motion_key_body_indices
     
-    def default_robot_observation(self, robot: Articulation, last_action: torch.Tensor, add_noise:bool=False) -> torch.Tensor:
+    def default_robot_observation(self, robot: Articulation, last_action: torch.Tensor,
+                                  reference_motion: ReferenceMotions, add_noise:bool=False) -> torch.Tensor:
+        reference_joint_pos = reference_motion.joint_pos
+        reference_joint_vel = reference_motion.joint_vel
+        reference_anchor_quaternions = reference_motion.body_quaternions[:, self.motion_anchor_body_indices]
+
+        reference_anchor_orient = quat_apply_inverse(reference_anchor_quaternions, robot.data.GRAVITY_VEC_W)
+        
         joint_pos = robot.data.joint_pos
         joint_vel = robot.data.joint_vel
         anchor_angular_vel = robot.data.root_ang_vel_w
@@ -31,6 +40,9 @@ class Observation:
 
         obs = torch.cat(
             [
+                reference_joint_pos,
+                reference_joint_vel,
+                reference_anchor_orient,
                 joint_pos,
                 joint_vel,
                 anchor_angular_vel,
@@ -45,11 +57,14 @@ class Observation:
     def default_robot_privilege_observation(
         self,
         robot: Articulation,
+        scene: InteractiveScene,
+        reference_motion: ReferenceMotions
     ) -> torch.Tensor:
         joint_pos = robot.data.joint_pos
         joint_vel = robot.data.joint_vel
         
-        body_positions = robot.data.body_link_pos_w
+        body_positions = robot.data.body_link_pos_w - scene.env_origins.unsqueeze(1)
+        
         body_quaternions = robot.data.body_link_quat_w
         body_linear_velocities = robot.data.body_lin_vel_w
         body_angular_velocities = robot.data.body_ang_vel_w
@@ -70,8 +85,17 @@ class Observation:
             key_quaternions,
         )
 
+        reference_joint_pos = reference_motion.joint_pos
+        reference_joint_vel = reference_motion.joint_vel
+        reference_anchor_quaternions = reference_motion.body_quaternions[:, self.motion_anchor_body_indices]
+
+        reference_anchor_orient = quat_apply_inverse(reference_anchor_quaternions, robot.data.GRAVITY_VEC_W)
+
         obs = torch.cat(
             [
+                reference_joint_pos,
+                reference_joint_vel,
+                reference_anchor_orient,
                 joint_pos,
                 joint_vel,
                 anchor_positions.flatten(start_dim=1),
@@ -88,12 +112,13 @@ class Observation:
     def default_motion_observation(
         self,
         motion_sample: ReferenceMotions,
+        scene: InteractiveScene
     ) -> torch.Tensor:
         
         joint_positions = motion_sample.joint_pos
         joint_velocities = motion_sample.joint_vel
 
-        anchor_positions = motion_sample.body_positions[:, self.motion_anchor_body_indices]
+        anchor_positions = motion_sample.body_positions[:, self.motion_anchor_body_indices] - scene.terrain.env_origins
         anchor_quaternions = motion_sample.body_quaternions[:, self.motion_anchor_body_indices]
 
         anchor_linear_velocities = motion_sample.body_linear_velocities[:, self.motion_anchor_body_indices]

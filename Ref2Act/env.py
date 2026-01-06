@@ -21,7 +21,7 @@ class G1MotionTrackingEnv(DirectRLEnv):
         super().__init__(cfg, render_mode, **kwargs)
 
 
-        self.action_processer = ActionProcessor(self.robot, self.cfg.action_buffer_length)
+        self.action_processer = ActionProcessor(self.robot, self.cfg.action_buffer_length, self.cfg.action_noise)
         if self.cfg.action_mod == ActionMod.Median:
             self.action_processer.set_median_scale_offset(self.robot)
         elif self.cfg.action_mod == ActionMod.Offset:
@@ -80,12 +80,18 @@ class G1MotionTrackingEnv(DirectRLEnv):
         
     def _get_observations(self):
         self.previous_actions = self.action_processer.applied_action.clone()
+        times = self.sampler.sample_next(self.cfg.sampler_mod)
+        next_reference_motion = self.motion_lib.sample_motion(times, self.scene.env_origins)
+
+        
 
         default_obs = self.observation_model.default_robot_observation(self.robot, self.previous_actions,
+                                                                       next_reference_motion,
                                                                        self.cfg.add_obs_noise)
-        privilege_obs = self.observation_model.default_robot_privilege_observation(self.robot)
-        times = self.sampler.sample_next(self.cfg.sampler_mod)
-        self.reference_motion = self.motion_lib.sample_motion(times, self.scene.env_origins)
+        privilege_obs = self.observation_model.default_robot_privilege_observation(self.robot, self.scene,
+                                                                                   next_reference_motion)
+        
+        self.reference_motion = next_reference_motion
 
         return {"default": default_obs, "privilege": privilege_obs}
     
