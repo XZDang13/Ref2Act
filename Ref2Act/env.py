@@ -5,6 +5,7 @@ import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation
 from isaaclab.envs import DirectRLEnv
 from isaaclab.sensors import ContactSensor
+from isaaclab.markers import VisualizationMarkers
 from isaaclab.envs.mdp import undesired_contacts
 
 from .config.env_cfg import G1MotionTrackingEnvCfg, ActionMod
@@ -13,6 +14,7 @@ from .motion_lib import MotionLib, Sampler, SamplerMod
 from .observation import Observation
 from .scence_setter import InitialSetting
 from .rewards import Rewards, RewardsCfg
+from .visualization import ReferenceMotionViewer
 
 class G1MotionTrackingEnv(DirectRLEnv):
     cfg:G1MotionTrackingEnvCfg
@@ -53,6 +55,7 @@ class G1MotionTrackingEnv(DirectRLEnv):
                                 self_collision_force_threshold=self.cfg.contact_sensor.force_threshold)
         
         self.reward_model = Rewards(reward_cfg)
+        self.reference_motion_viewer = ReferenceMotionViewer(motion_key_body_indices)
 
     def _setup_scene(self):
         self.robot = Articulation(self.cfg.robot)
@@ -83,17 +86,13 @@ class G1MotionTrackingEnv(DirectRLEnv):
         times = self.sampler.sample_next(self.cfg.sampler_mod)
         next_reference_motion = self.motion_lib.sample_motion(times, self.scene.env_origins)
 
-        
+        self.reference_motion_viewer.visualize(next_reference_motion, )
 
-        default_obs = self.observation_model.default_robot_observation(self.robot, self.previous_actions,
-                                                                       next_reference_motion,
-                                                                       self.cfg.add_obs_noise)
-        privilege_obs = self.observation_model.default_robot_privilege_observation(self.robot, self.scene,
-                                                                                   next_reference_motion)
+        teacher_obs = self.observation_model.default_teacher_observation(self.robot, self.scene, next_reference_motion)
         
         self.reference_motion = next_reference_motion
 
-        return {"default": default_obs, "privilege": privilege_obs}
+        return {"teacher": teacher_obs}
     
     def _get_rewards(self) -> torch.Tensor:
         reward = self.reward_model.get_task_reward(self.robot, self.reference_motion, self.contact_sensor)

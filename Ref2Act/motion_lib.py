@@ -52,6 +52,7 @@ class MotionLib:
         self.dt = 1.0 / self.fps
         self.num_frames = self.joint_pos.shape[0]
         self.duration = self.dt * self.num_frames
+        print(f"motion data loaded: {self.duration}")
 
     def get_body_indices(self, body_names: list[str]) -> list[int]:
         return [self.body_names.index(name) for name in body_names]

@@ -13,7 +13,7 @@ class PenaltyRewardCfg:
     collision_track_body_indices: list[int] = dataclasses.MISSING
     joint_acc_weight:float = -2.5e-7
     joint_torque_wegiht:float = -1e-5
-    joint_limit_weight:float = -1e-1
+    joint_limit_weight:float = -10.0
     self_collision_weight:float = -1.0
     self_collision_force_threshold:float = 10.0
 
@@ -138,14 +138,14 @@ class RegulationReward:
         joint_acc_penalty = self.joint_acc_l2(robot) * self.cfg.joint_acc_weight
         joint_torque_penalty = self.joint_torque_l2(robot) * self.cfg.joint_torque_wegiht
         joint_limit_penalty = self.joint_limit(robot) * self.cfg.joint_limit_weight
-        self_collision_penalty = self.self_collision_penalty(
-            contact_sensor,
-            self.cfg.collision_track_body_indices,
-            self.cfg.self_collision_force_threshold,
-        ) * self.cfg.self_collision_weight
+        #self_collision_penalty = self.self_collision_penalty(
+        #    contact_sensor,
+        #    self.cfg.collision_track_body_indices,
+        #    self.cfg.self_collision_force_threshold,
+        #) * self.cfg.self_collision_weight
         
         reward = torch.stack(
-            [joint_acc_penalty, joint_torque_penalty, joint_limit_penalty, self_collision_penalty],
+            [joint_acc_penalty, joint_torque_penalty, joint_limit_penalty],
             dim=-1
         )
 
@@ -206,7 +206,6 @@ class MimicRewards:
         key_ang_vel_reward = torch.exp(-key_ang_vel_error / self.cfg.ang_vel_std) * self.cfg.mimic_key_ang_vel_weight
         joint_position_reward = torch.exp(-joint_position_error / self.cfg.joint_position_std) * self.cfg.mimic_joint_position_weight
         joint_vel_reward = torch.exp(-joint_vel_error / self.cfg.joint_vel_std) * self.cfg.mimic_joint_vel_weight
-
 
         reward = torch.stack([anchor_position_reward, anchor_quaternion_reward, key_position_reward,
                                 key_quaternion_reward, key_linear_vel_reward, key_ang_vel_reward,

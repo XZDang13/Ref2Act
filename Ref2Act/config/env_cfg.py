@@ -10,6 +10,8 @@ from isaaclab.assets import ArticulationCfg
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.sensors import ContactSensorCfg
+from isaaclab.markers import VisualizationMarkersCfg
+from isaaclab.markers.config import FRAME_MARKER_CFG
 from .robot import G1_CFG
 from ..motion_lib import SamplerMod
 
@@ -109,7 +111,7 @@ class G1MotionTrackingEnvCfg(DirectRLEnvCfg):
     decimation = 4
 
     observation_space = 124
-    privilege_observation_space = 199
+    teacher_observation_space = 342
     action_space = 23
     state_space = 0
 

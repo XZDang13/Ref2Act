@@ -1,5 +1,5 @@
 import torch
-from isaaclab.utils.math import subtract_frame_transforms
+from isaaclab.utils.math import subtract_frame_transforms, quat_apply, quat_mul, quat_conjugate
 
 def relative_transform(
     anchor_pos: torch.Tensor,
@@ -26,6 +26,18 @@ def relative_transform(
     )
 
     return pos, quat
+
+def quaternion_to_tangent_and_normal(q: torch.Tensor) -> torch.Tensor:
+    ref_tangent = torch.zeros_like(q[..., :3])
+    ref_normal = torch.zeros_like(q[..., :3])
+    ref_tangent[..., 0] = 1
+    ref_normal[..., -1] = 1
+    tangent = quat_apply(q, ref_tangent)
+    normal = quat_apply(q, ref_normal)
+    return torch.cat([tangent, normal], dim=len(tangent.shape) - 1)
+
+def quat_diff(q1: torch.Tensor, q2: torch.Tensor):
+    return quat_mul(q1, quat_conjugate(q2))
 
 def exp_error(error: torch.Tensor, std:float):
     return torch.exp(-error / std**2)
