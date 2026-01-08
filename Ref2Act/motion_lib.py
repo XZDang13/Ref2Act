@@ -23,7 +23,7 @@ class ReferenceMotions:
     body_angular_velocities: torch.Tensor
 
 class MotionLib:
-    def __init__(self, motion_file: str, joint_names:list[str]|None=None, device: torch.device=torch.device("cpu")) -> None:
+    def __init__(self, motion_file: str, device: torch.device=torch.device("cpu")) -> None:
         
         motion_data = np.load(motion_file)
         self.device = device
@@ -33,32 +33,21 @@ class MotionLib:
         self.joint_names = motion_data["joint_names"].tolist()
         self.body_names = motion_data["body_names"].tolist()
 
-        if joint_names is None:
-            joint_names = self.joint_names
-        
-        self.joint_order = [self.joint_names.index(name) for name in joint_names]
-
-        self.joint_pos = torch.as_tensor(motion_data["joint_positions"], dtype=torch.float32, device=self.device)[:, self.joint_order]
-        self.joint_vel = torch.as_tensor(motion_data["joint_velocities"], dtype=torch.float32, device=self.device)[:, self.joint_order]
-        self.body_positions = torch.tensor(motion_data["body_positions"], dtype=torch.float32, device=self.device)
-        self.body_quaternions = torch.tensor(motion_data["body_quaternions"], dtype=torch.float32, device=self.device)
+        self.joint_pos = torch.as_tensor(motion_data["joint_pos"], dtype=torch.float32, device=self.device)
+        self.joint_vel = torch.as_tensor(motion_data["joint_vel"], dtype=torch.float32, device=self.device)
+        self.body_positions = torch.tensor(motion_data["body_pos_w"], dtype=torch.float32, device=self.device)
+        self.body_quaternions = torch.tensor(motion_data["body_quat_w"], dtype=torch.float32, device=self.device)
         self.body_linear_velocities = torch.tensor(
-            motion_data["body_linear_velocities"], dtype=torch.float32, device=self.device
+            motion_data["body_lin_vel_w"], dtype=torch.float32, device=self.device
         )
         self.body_angular_velocities = torch.tensor(
-            motion_data["body_angular_velocities"], dtype=torch.float32, device=self.device
+            motion_data["body_ang_vel_w"], dtype=torch.float32, device=self.device
         )
 
         self.dt = 1.0 / self.fps
         self.num_frames = self.joint_pos.shape[0]
         self.duration = self.dt * self.num_frames
         print(f"motion data loaded: {self.duration}")
-
-    def get_body_indices(self, body_names: list[str]) -> list[int]:
-        return [self.body_names.index(name) for name in body_names]
-    
-    def get_body_index(self, body_name: str) -> int:
-        return self.body_names.index(body_name)
 
     def sample_motion(
         self,

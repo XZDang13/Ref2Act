@@ -19,10 +19,8 @@ class PenaltyRewardCfg:
 
 @dataclasses.dataclass
 class MimicRewardsCfg:
-    robot_anchor_body_indices:list[int] = dataclasses.MISSING
-    robot_key_body_indices:list[int] = dataclasses.MISSING
-    motion_anchor_body_indices:list[int] = dataclasses.MISSING
-    motion_key_body_indices: list[int] = dataclasses.MISSING
+    anchor_body_indices:list[int] = dataclasses.MISSING
+    key_body_indices:list[int] = dataclasses.MISSING
 
     position_std:float = 0.3 ** 2
     quaternion_std:float = 0.4 ** 2
@@ -50,10 +48,8 @@ class AMPRewardsCfg:
 @dataclasses.dataclass
 class RewardsCfg:
     # Mimic reward indices.
-    robot_anchor_body_indices: list[int] = dataclasses.MISSING
-    robot_key_body_indices: list[int] = dataclasses.MISSING
-    motion_anchor_body_indices: list[int] = dataclasses.MISSING
-    motion_key_body_indices: list[int] = dataclasses.MISSING
+    anchor_body_indices: list[int] = dataclasses.MISSING
+    key_body_indices: list[int] = dataclasses.MISSING
     # Penalty reward indices.
     collision_track_body_indices: list[int] = dataclasses.MISSING
     # Shared options.
@@ -94,10 +90,8 @@ class Rewards:
             self_collision_force_threshold=cfg.self_collision_force_threshold,
         )
         mimic_cfg = MimicRewardsCfg(
-            robot_anchor_body_indices=cfg.robot_anchor_body_indices,
-            robot_key_body_indices=cfg.robot_key_body_indices,
-            motion_anchor_body_indices=cfg.motion_anchor_body_indices,
-            motion_key_body_indices=cfg.motion_key_body_indices,
+            anchor_body_indices=cfg.anchor_body_indices,
+            key_body_indices=cfg.key_body_indices,
             position_std=cfg.position_std,
             quaternion_std=cfg.quaternion_std,
             linear_vel_std=cfg.linear_vel_std,
@@ -207,11 +201,12 @@ class MimicRewards:
         joint_position_reward = torch.exp(-joint_position_error / self.cfg.joint_position_std) * self.cfg.mimic_joint_position_weight
         joint_vel_reward = torch.exp(-joint_vel_error / self.cfg.joint_vel_std) * self.cfg.mimic_joint_vel_weight
 
-        reward = torch.stack([anchor_position_reward, anchor_quaternion_reward, key_position_reward,
-                                key_quaternion_reward, key_linear_vel_reward, key_ang_vel_reward,
-                                joint_position_reward, joint_vel_reward],
-                                dim=-1
-                            )
+        reward = torch.stack(
+            [
+                anchor_position_reward, anchor_quaternion_reward, key_position_reward,
+                key_quaternion_reward, key_linear_vel_reward, key_ang_vel_reward,
+            ],dim=-1
+            )
         
         return reward
 
@@ -220,11 +215,11 @@ class MimicRewards:
         if self.cfg.anchor_height_only:
             position_slice = slice(2, 3)
 
-        robot_anchor_body_positions = robot.data.body_pos_w[:, self.cfg.robot_anchor_body_indices, position_slice]
-        robot_anchor_body_quaternions = robot.data.body_quat_w[:, self.cfg.robot_anchor_body_indices]
+        robot_anchor_body_positions = robot.data.body_pos_w[:, self.cfg.anchor_body_indices, position_slice]
+        robot_anchor_body_quaternions = robot.data.body_quat_w[:, self.cfg.anchor_body_indices]
 
-        reference_anchor_body_positions = reference_motion.body_positions[:, self.cfg.motion_anchor_body_indices, position_slice]
-        reference_anchor_body_quaternions = reference_motion.body_quaternions[:, self.cfg.motion_anchor_body_indices]
+        reference_anchor_body_positions = reference_motion.body_positions[:, self.cfg.anchor_body_indices, position_slice]
+        reference_anchor_body_quaternions = reference_motion.body_quaternions[:, self.cfg.anchor_body_indices]
 
         position_error = (robot_anchor_body_positions-reference_anchor_body_positions).square().sum(-1).mean(-1)
         quaternion_error = quat_error_magnitude(robot_anchor_body_quaternions, reference_anchor_body_quaternions).square().mean(-1)
@@ -234,12 +229,12 @@ class MimicRewards:
     
     def key_body_pose_error(self, robot: Articulation, reference_motion: ReferenceMotions):
 
-        robot_key_body_positions = robot.data.body_pos_w[:, self.cfg.robot_key_body_indices]
-        robot_key_body_quaternions = robot.data.body_quat_w[:, self.cfg.robot_key_body_indices]
+        robot_key_body_positions = robot.data.body_pos_w[:, self.cfg.key_body_indices]
+        robot_key_body_quaternions = robot.data.body_quat_w[:, self.cfg.key_body_indices]
         
 
-        reference_key_body_positions = reference_motion.body_positions[:, self.cfg.motion_key_body_indices]
-        reference_key_body_quaternions = reference_motion.body_quaternions[:, self.cfg.motion_key_body_indices]
+        reference_key_body_positions = reference_motion.body_positions[:, self.cfg.key_body_indices]
+        reference_key_body_quaternions = reference_motion.body_quaternions[:, self.cfg.key_body_indices]
 
 
         position_error = (robot_key_body_positions-reference_key_body_positions).square().sum(-1).mean(-1)
@@ -249,11 +244,11 @@ class MimicRewards:
         return position_error, quaternion_error
     
     def key_body_state_error(self, robot: Articulation, reference_motion: ReferenceMotions):
-        robot_key_body_lin_vel = robot.data.body_lin_vel_w[:, self.cfg.robot_key_body_indices]
-        robot_key_body_ang_vel = robot.data.body_ang_vel_w[:, self.cfg.robot_key_body_indices]
+        robot_key_body_lin_vel = robot.data.body_lin_vel_w[:, self.cfg.key_body_indices]
+        robot_key_body_ang_vel = robot.data.body_ang_vel_w[:, self.cfg.key_body_indices]
 
-        reference_key_body_lin_vel = reference_motion.body_linear_velocities[:, self.cfg.motion_key_body_indices]
-        reference_key_body_ang_vel = reference_motion.body_angular_velocities[:, self.cfg.motion_key_body_indices]
+        reference_key_body_lin_vel = reference_motion.body_linear_velocities[:, self.cfg.key_body_indices]
+        reference_key_body_ang_vel = reference_motion.body_angular_velocities[:, self.cfg.key_body_indices]
 
         lin_vel_error = (robot_key_body_lin_vel-reference_key_body_lin_vel).square().sum(-1).mean(-1)
         ang_vel_error = (robot_key_body_ang_vel-reference_key_body_ang_vel).square().sum(-1).mean(-1)
