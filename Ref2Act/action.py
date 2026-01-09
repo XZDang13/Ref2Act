@@ -30,13 +30,12 @@ class ActionProcessor:
     
     def set_robot_default_scale_offset(
         self,
-        robot: Articulation,
-        scale: float
+        robot: Articulation
     ):
-        self.joint_low_limit = robot.data.joint_pos_limits[0]
-        self.joint_up_limit = robot.data.joint_pos_limits[1]
-        self.scale = scale
+        self.joint_low_limit = robot.data.joint_pos_limits[0, :, 0]
+        self.joint_up_limit = robot.data.joint_pos_limits[0, :, 1]
         self.offset = robot.data.default_joint_pos
+        self.scale = 0.25 * (robot.data.joint_effort_limits[0] / robot.data.default_joint_stiffness[0])
 
     def reset_action_buffer(self, env_ids:IndexLike):
         self.action_buffer.reset(env_ids)

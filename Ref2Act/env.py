@@ -28,8 +28,7 @@ class G1MotionTrackingEnv(DirectRLEnv):
         if self.cfg.action_mod == ActionMod.Median:
             self.action_processer.set_median_scale_offset(self.robot)
         elif self.cfg.action_mod == ActionMod.Offset:
-            self.action_processer.set_robot_default_scale_offset(self.robot, self.cfg.action_scale)
-
+            self.action_processer.set_robot_default_scale_offset(self.robot)
 
         self.motion_lib = MotionLib(self.cfg.expert_motion_file, self.device)
 

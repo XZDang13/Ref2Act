@@ -1,6 +1,5 @@
 import torch
 from dataclasses import dataclass
-
 from isaaclab.assets import Articulation
 from isaaclab.scene import InteractiveScene
 from isaaclab.utils.math import quat_apply_inverse, quat_mul, quat_inv

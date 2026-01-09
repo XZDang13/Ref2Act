@@ -119,8 +119,6 @@ class G1MotionTrackingEnvCfg(DirectRLEnvCfg):
     action_buffer_length = 1
     action_mod = ActionMod.Median
 
-    action_scale = 1 #set action sacle if use Offet.
-
     root_link_name = "pelvis"
     anchor_body_names = ["pelvis"]
 
@@ -233,3 +231,7 @@ class MotionViewerCfg(InteractiveSceneCfg):
     )
 
     robot = G1_CFG.replace(prim_path="/World/Robot")
+
+    contact_sensor = ContactSensorCfg(
+        prim_path="/World/Robot/.*", history_length=3, track_air_time=True, force_threshold=10.0,
+    )

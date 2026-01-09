@@ -23,7 +23,6 @@ import numpy as np
 import torch
 import isaaclab.sim as sim_utils
 from isaaclab.scene import InteractiveScene
-from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 from isaaclab.utils.math import quat_mul, quat_conjugate, axis_angle_from_quat
 
 from .config.env_cfg import MotionViewerCfg, JOINT_ORDER
@@ -86,9 +85,19 @@ class GMRMotionData:
             reset_flag = True
         return motion, reset_flag
 
+def is_contact(net_contact_forces, body_ids):
+    is_contact = torch.max(torch.norm(net_contact_forces[:, :, body_ids], dim=-1), dim=1)[0] > 10.0
+
+    print(is_contact)
+
 def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene, motion_data:GMRMotionData):
     robot = scene["robot"]
+    contact_sensors = scene["contact_sensor"]
     joint_indices = robot.find_joints(motion_data.joint_order, preserve_order=True)[0]
+    contact_tracking_body_indices, _ = contact_sensors.find_bodies([
+        "left_ankle_roll_link",
+        "right_ankle_roll_link",
+    ])
 
     log = {
         "fps": motion_data.fps,
@@ -122,8 +131,11 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene, mot
         joint_vel[:, joint_indices] = reference_joint_vel
         robot.write_joint_state_to_sim(joint_pos, joint_vel)
 
-        sim.render()  # We don't want physic (sim.step())
+        sim.step()
+        #sim.render()  # We don't want physic (sim.step())
         scene.update(sim.get_physics_dt())
+        #net_force = contact_sensors.data.net_forces_w_history
+        #is_contact(net_force, contact_tracking_body_indices)
 
         pos_lookat = root_states[0, :3].cpu().numpy()
         sim.set_camera_view(pos_lookat + np.array([2.0, 2.0, 0.5]), pos_lookat)
@@ -147,6 +159,7 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene, mot
                     "body_ang_vel_w",
                 ):
                     log[k] = np.stack(log[k], axis=0)
+
 
                 np.savez(args_cli.output_file, **log)
                 print("[INFO]: Motion npz file saved to", args_cli.output_file)
