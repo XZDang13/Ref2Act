@@ -47,7 +47,7 @@ class MotionLib:
         self.dt = 1.0 / self.fps
         self.num_frames = self.joint_pos.shape[0]
         self.duration = self.dt * self.num_frames
-        print(f"motion data loaded: {self.duration}")
+        print(f"motion data loaded: {self.duration} s")
 
     def sample_motion(
         self,

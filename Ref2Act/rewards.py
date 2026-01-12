@@ -38,7 +38,7 @@ class MimicRewardsCfg:
     mimic_joint_position_weight:float = 1.0
     mimic_joint_vel_weight:float = 1.0
 
-    anchor_height_only:bool = True
+    anchor_height_only:bool = False
 
 @dataclasses.dataclass
 class AMPRewardsCfg:
@@ -74,7 +74,7 @@ class RewardsCfg:
     # Penalty reward weights.
     joint_acc_weight:float = -2.5e-7
     joint_torque_wegiht:float = -1e-5
-    joint_limit_weight:float = -1e-1
+    joint_limit_weight:float = -10.0
     self_collision_weight:float = -0.1
     self_collision_force_threshold:float = 1.0
 
@@ -132,14 +132,14 @@ class RegulationReward:
         joint_acc_penalty = self.joint_acc_l2(robot) * self.cfg.joint_acc_weight
         joint_torque_penalty = self.joint_torque_l2(robot) * self.cfg.joint_torque_wegiht
         joint_limit_penalty = self.joint_limit(robot) * self.cfg.joint_limit_weight
-        #self_collision_penalty = self.self_collision_penalty(
-        #    contact_sensor,
-        #    self.cfg.collision_track_body_indices,
-        #    self.cfg.self_collision_force_threshold,
-        #) * self.cfg.self_collision_weight
+        self_collision_penalty = self.self_collision_penalty(
+            contact_sensor,
+            self.cfg.collision_track_body_indices,
+            self.cfg.self_collision_force_threshold,
+        ) * self.cfg.self_collision_weight
         
         reward = torch.stack(
-            [joint_acc_penalty, joint_torque_penalty, joint_limit_penalty],
+            [joint_acc_penalty, joint_torque_penalty, joint_limit_penalty, self_collision_penalty],
             dim=-1
         )
 
@@ -165,13 +165,13 @@ class RegulationReward:
         is_contact = torch.max(torch.norm(net_contact_forces[:, :, body_ids], dim=-1), dim=1)[0] > threshold
         return torch.sum(is_contact, dim=1)
     
-    def joint_acc_l2(self, robot: Articulation):
+    def joint_acc_l2(self, robot: Articulation) -> torch.Tensor:
         return torch.sum(torch.square(robot.data.joint_acc), dim=1)
     
-    def joint_torque_l2(self, robot: Articulation):
+    def joint_torque_l2(self, robot: Articulation) -> torch.Tensor:
         return torch.sum(torch.square(robot.data.applied_torque), dim=1)
     
-    def joint_limit(self, robot: Articulation):
+    def joint_limit(self, robot: Articulation) -> torch.Tensor:
         out_of_limits = -(
             robot.data.joint_pos[:, :] - robot.data.soft_joint_pos_limits[:, :, 0]
         ).clip(max=0.0)
@@ -184,13 +184,35 @@ class RegulationReward:
 class MimicRewards:
     def __init__(self, cfg:MimicRewardsCfg) -> None:
         self.cfg = cfg
+        self.anchor_position_error = 0
+        self.anchor_quaternion_error = 0
+        self.key_position_error = 0
+        self.key_ang_vel_error = 0
+
+    def get_errors(self) -> dict[str, torch.Tensor]:
+        return {
+            "anchor_position_error": self.anchor_position_error,
+            "anchor_quaternion_error": self.anchor_quaternion_error,
+            "key_position_error": self.key_position_error,
+            "key_quaternion_error": self.key_quaternion_error,
+            "key_linear_vel_error": self.key_linear_vel_error,
+            "key_ang_vel_error": self.key_ang_vel_error
+        }
 
     def get_reward(self, robot: Articulation, reference_motion: ReferenceMotions) -> torch.Tensor:
         
         anchor_position_error, anchor_quaternion_error = self.anchor_body_pose_error(robot, reference_motion)
         key_position_error, key_quaternion_error = self.key_body_pose_error(robot, reference_motion,)
         key_linear_vel_error, key_ang_vel_error = self.key_body_state_error(robot, reference_motion)
-        joint_position_error, joint_vel_error = self.joint_state_error(robot, reference_motion)
+        #joint_position_error, joint_vel_error = self.joint_state_error(robot, reference_motion)
+
+        self.anchor_position_error = anchor_position_error.mean().item()
+        self.anchor_quaternion_error = anchor_quaternion_error.mean().item()
+        self.key_position_error = key_position_error.mean().item()
+        self.key_quaternion_error = key_quaternion_error.mean().item()
+        self.key_linear_vel_error = key_linear_vel_error.mean().item()
+        self.key_ang_vel_error = key_ang_vel_error.mean().item()
+
 
         anchor_position_reward = torch.exp(-anchor_position_error / self.cfg.position_std) * self.cfg.mimic_anchor_position_weight
         anchor_quaternion_reward = torch.exp(-anchor_quaternion_error / self.cfg.quaternion_std) * self.cfg.mimic_anchor_quaternion_weight
@@ -198,8 +220,8 @@ class MimicRewards:
         key_quaternion_reward = torch.exp(-key_quaternion_error / self.cfg.quaternion_std) * self.cfg.mimic_key_quaternion_weight
         key_linear_vel_reward = torch.exp(-key_linear_vel_error / self.cfg.linear_vel_std) * self.cfg.mimic_key_linear_vel_weight
         key_ang_vel_reward = torch.exp(-key_ang_vel_error / self.cfg.ang_vel_std) * self.cfg.mimic_key_ang_vel_weight
-        joint_position_reward = torch.exp(-joint_position_error / self.cfg.joint_position_std) * self.cfg.mimic_joint_position_weight
-        joint_vel_reward = torch.exp(-joint_vel_error / self.cfg.joint_vel_std) * self.cfg.mimic_joint_vel_weight
+        #joint_position_reward = torch.exp(-joint_position_error / self.cfg.joint_position_std) * self.cfg.mimic_joint_position_weight
+        #joint_vel_reward = torch.exp(-joint_vel_error / self.cfg.joint_vel_std) * self.cfg.mimic_joint_vel_weight
 
         reward = torch.stack(
             [
@@ -210,7 +232,7 @@ class MimicRewards:
         
         return reward
 
-    def anchor_body_pose_error(self, robot: Articulation, reference_motion: ReferenceMotions):
+    def anchor_body_pose_error(self, robot: Articulation, reference_motion: ReferenceMotions) -> tuple[torch.Tensor, torch.Tensor]:
         position_slice = slice(None)
         if self.cfg.anchor_height_only:
             position_slice = slice(2, 3)
@@ -227,7 +249,7 @@ class MimicRewards:
         return position_error, quaternion_error
 
     
-    def key_body_pose_error(self, robot: Articulation, reference_motion: ReferenceMotions):
+    def key_body_pose_error(self, robot: Articulation, reference_motion: ReferenceMotions) -> tuple[torch.Tensor, torch.Tensor]:
 
         robot_key_body_positions = robot.data.body_pos_w[:, self.cfg.key_body_indices]
         robot_key_body_quaternions = robot.data.body_quat_w[:, self.cfg.key_body_indices]
@@ -243,7 +265,7 @@ class MimicRewards:
 
         return position_error, quaternion_error
     
-    def key_body_state_error(self, robot: Articulation, reference_motion: ReferenceMotions):
+    def key_body_state_error(self, robot: Articulation, reference_motion: ReferenceMotions) -> tuple[torch.Tensor, torch.Tensor]:
         robot_key_body_lin_vel = robot.data.body_lin_vel_w[:, self.cfg.key_body_indices]
         robot_key_body_ang_vel = robot.data.body_ang_vel_w[:, self.cfg.key_body_indices]
 
@@ -255,7 +277,7 @@ class MimicRewards:
 
         return lin_vel_error, ang_vel_error 
     
-    def joint_state_error(self, robot: Articulation, reference_motion: ReferenceMotions):
+    def joint_state_error(self, robot: Articulation, reference_motion: ReferenceMotions) -> tuple[torch.Tensor, torch.Tensor]:
         robot_joint_pos = robot.data.joint_pos
         robot_joint_vel = robot.data.joint_vel
 

@@ -105,14 +105,16 @@ class Observation:
         robot_state = self.get_robot_state(robot, scene)
         reference_state = self.get_reference_motion_state(reference_motion, scene)
 
-        obs["policy"] = self.get_policy_observation(robot_state, reference_state, last_applied_actions)
+        obs["policy"] = self.get_policy_observation(robot_state, reference_state, robot.data.GRAVITY_VEC_W, last_applied_actions)
         obs["critic"] = self.get_critic_observation(robot_state, reference_state, last_applied_actions)
         
+
         return obs
     
     def get_policy_observation(self,
                                robot_state: MotionState,
                                reference_state: MotionState,
+                               gravity_vector: torch.Tensor,
                                last_applied_action:torch.Tensor) -> torch.Tensor:
         
         target_joint_pos = reference_state.joint_pos
@@ -121,27 +123,26 @@ class Observation:
         target_quat = reference_state.anchor_quat
         robot_quat = robot_state.anchor_quat
 
+        target_projected_gravity = quat_apply_inverse(target_quat, gravity_vector)
+        robot_projected_gravity = quat_apply_inverse(robot_quat, gravity_vector)
+
         robot_ang_vel = robot_state.anchor_ang_vel.flatten(1)
         robot_joint_pos = robot_state.joint_pos
         robot_joint_vel = robot_state.joint_vel
         last_action = last_applied_action.clone()
 
         if self.add_noise:
-            robot_quat += torch.rand_like(robot_quat) * 0.05
+            robot_projected_gravity += torch.rand_like(robot_projected_gravity) * 0.05
             robot_ang_vel += torch.rand_like(robot_ang_vel) * 0.3
             robot_joint_pos += torch.rand_like(robot_joint_pos) * 0.01
             robot_joint_vel += torch.rand_like(robot_joint_vel) * 0.5
-
-        robot_quat_inv = quat_inv(robot_quat)
-        relative_quat = quat_mul(robot_quat_inv, target_quat)
-
-        relative_tangent_and_normal = quaternion_to_tangent_and_normal(relative_quat).flatten(1)
 
         obs = torch.cat(
             [
                 target_joint_pos,
                 target_jiont_vel,
-                relative_tangent_and_normal,
+                target_projected_gravity,
+                robot_projected_gravity,
                 robot_ang_vel,
                 robot_joint_pos,
                 robot_joint_vel,

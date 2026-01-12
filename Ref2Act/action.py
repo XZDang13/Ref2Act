@@ -18,6 +18,7 @@ class ActionProcessor:
 
         self.delays: torch.Tensor|None = None
         self.applied_action = torch.zeros_like(robot.data.default_joint_pos)
+        self.offset_noise = torch.zeros_like(robot.data.default_joint_pos)
 
     def set_median_scale_offset(
         self,
@@ -27,6 +28,7 @@ class ActionProcessor:
         self.joint_up_limit = robot.data.joint_pos_limits[0, :, 1]
         self.scale = 0.5 * (self.joint_up_limit - self.joint_low_limit)
         self.offset = 0.5 * (self.joint_up_limit + self.joint_low_limit)
+
     
     def set_robot_default_scale_offset(
         self,
@@ -49,8 +51,12 @@ class ActionProcessor:
             self.delays = torch.empty(self.num_env, dtype=torch.long)
 
         self.delays.uniform_(ranges[0], ranges[1])
+
+    def set_random_offset_noise(self, env_ids:IndexLike):
+        noise = torch.empty_like(self.offset_noise[env_ids, :]).uniform_(-self.noise_scale, self.noise_scale)
+        self.offset_noise[env_ids, :] = noise
     
-    def pre_process_action(self, action: torch.Tensor, add_noise:bool=False):
+    def pre_process_action(self, action: torch.Tensor):
         self.action_buffer.append(action)
 
         if self.delays is None:
@@ -58,10 +64,7 @@ class ActionProcessor:
         else:
             self.applied_action = self.action_buffer.get(self.delays)
 
-        if add_noise:
-            self.applied_action += torch.rand_like(self.applied_action) * self.noise_scale
-
-        self.target_joint_position = self.applied_action * self.scale + self.offset
+        self.target_joint_position = self.applied_action * self.scale + self.offset + self.offset_noise
         self.target_joint_position.clamp_(self.joint_low_limit, self.joint_up_limit)
 
     

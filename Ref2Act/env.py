@@ -5,8 +5,6 @@ import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation
 from isaaclab.envs import DirectRLEnv
 from isaaclab.sensors import ContactSensor
-from isaaclab.markers import VisualizationMarkers
-from isaaclab.envs.mdp import undesired_contacts
 
 from .config.env_cfg import G1MotionTrackingEnvCfg, ActionMod
 from .action import ActionProcessor
@@ -17,12 +15,12 @@ from .rewards import Rewards, RewardsCfg
 from .termination import Termination
 from .visualization import ReferenceMotionViewer
 
+
 class G1MotionTrackingEnv(DirectRLEnv):
     cfg:G1MotionTrackingEnvCfg
 
     def __init__(self, cfg, render_mode = None, **kwargs):
         super().__init__(cfg, render_mode, **kwargs)
-
 
         self.action_processer = ActionProcessor(self.robot, self.cfg.action_buffer_length, self.cfg.action_noise)
         if self.cfg.action_mod == ActionMod.Median:
@@ -34,6 +32,7 @@ class G1MotionTrackingEnv(DirectRLEnv):
 
         anchor_body_indices = [self.robot.data.body_names.index(name) for name in self.cfg.anchor_body_names]
         key_body_indices = [self.robot.data.body_names.index(name) for name in self.cfg.key_body_names]
+        enf_effector_indices = [self.robot.data.body_names.index(name) for name in self.cfg.end_effector_body_names]
         self.root_link_index = self.robot.data.body_names.index(self.cfg.root_link_name)
 
         collision_track_body_indices, _ = self.contact_sensor.find_bodies(self.cfg.collision_track_body_names)
@@ -53,12 +52,12 @@ class G1MotionTrackingEnv(DirectRLEnv):
         self.reward_model = Rewards(reward_cfg)
         self.reference_motion_viewer = ReferenceMotionViewer(key_body_indices)
         self.termination_model = Termination(
-            termination_height=self.cfg.termination_height,
-            max_episode_length=self.max_episode_length,
-            motion_duration=self.motion_lib.duration,
-            motion_dt=self.motion_lib.dt,
-            sampler_mod=self.cfg.sampler_mod,
-            early_termination=self.cfg.early_termination,
+            anchor_body_indices=anchor_body_indices,
+            end_effector_body_indices=enf_effector_indices,
+            anchor_pos_error_threshold=self.cfg.anchor_pos_error_threshold,
+            anchor_ori_error_threshold=self.cfg.anchor_ori_error_threshold,
+            end_effector_pos_error_threshold=self.cfg.end_effector_pos_error_threshold,
+            height_only=self.cfg.height_only
         )
         
     def _setup_scene(self):
@@ -83,7 +82,6 @@ class G1MotionTrackingEnv(DirectRLEnv):
 
     def _apply_action(self):
         self.robot.set_joint_position_target(self.action_processer.target_joint_position)
-        #self.robot.set_joint_position_target(self.target_pos)
         
     def _get_observations(self):
         self.previous_actions = self.action_processer.applied_action.clone()
@@ -104,12 +102,16 @@ class G1MotionTrackingEnv(DirectRLEnv):
     
     def _get_rewards(self) -> torch.Tensor:
         reward = self.reward_model.get_task_reward(self.robot, self.reference_motion, self.contact_sensor)
+        mimic_error = self.reward_model.mimic_reward.get_errors()
+
+        self.extras.update(mimic_error)
 
         return reward
      
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
-        base_height = self.robot.data.root_state_w[:, 2]
-        return self.termination_model.get_dones(self.episode_length_buf, base_height, self.motion_times)
+        
+        return self.termination_model.get_dones(self.episode_length_buf, self.max_episode_length, self.robot,
+                                                self.reference_motion, self.sampler)
     
     def _reset_idx(self, env_ids: torch.Tensor | None):
         if env_ids is None or len(env_ids) == self.num_envs:
@@ -118,12 +120,19 @@ class G1MotionTrackingEnv(DirectRLEnv):
         self.robot.reset(env_ids)
         super()._reset_idx(env_ids)
         
-        self.action_processer.reset_action_buffer(env_ids)
 
-        if self.cfg.training:
+        #if len(env_ids) == self.num_envs and self.cfg.training:
+        #    self.episode_length_buf[:] = torch.randint_like(self.episode_length_buf, high=int(self.max_episode_length))
+
+        self.action_processer.reset_action_buffer(env_ids)
+        if self.cfg.add_action_noise:
+            self.action_processer.set_random_offset_noise(env_ids)
+
+        if self.cfg.random_start:
             times = self.sampler.sample_rand_times(env_ids)
         else:
             times = self.sampler.sample_start_times(env_ids)
+
         self.motion_times = self.sampler.current_times.clone()
 
         self.reference_motion = self.motion_lib.sample_motion(times, self.scene.env_origins[env_ids])

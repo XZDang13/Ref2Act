@@ -44,7 +44,7 @@ class EventCfg:
         },
     )
 
-    robot_mass = EventTerm(
+    rand_robot_mass = EventTerm(
         func=mdp.randomize_rigid_body_mass,
         mode="startup",
         params={
@@ -63,7 +63,7 @@ class EventCfg:
         },
     )
     
-    base_com = EventTerm(
+    rand_base_com = EventTerm(
         func=mdp.randomize_rigid_body_com,
         mode="startup",
         params={
@@ -72,7 +72,7 @@ class EventCfg:
         },
     )
     
-    robot_joint_stiffness_and_damping = EventTerm(
+    rand_robot_joint_stiffness_and_damping = EventTerm(
         func=mdp.randomize_actuator_gains,
         min_step_count_between_reset=200,
         mode="reset",
@@ -82,17 +82,6 @@ class EventCfg:
             "damping_distribution_params": (0.75, 1.5),
             "operation": "scale",
             "distribution": "uniform",
-        },
-    )
-
-    robot_joint_pos_limits = EventTerm(
-        func=mdp.randomize_joint_parameters,
-        min_step_count_between_reset=200,
-        mode="reset",
-        params={
-            "asset_cfg": SceneEntityCfg("robot", joint_names=".*"),
-            "friction_distribution_params": [0.0, 5.0],
-            "operation": "scale",
         },
     )
     
@@ -136,7 +125,7 @@ class G1MotionTrackingEnvCfg(DirectRLEnvCfg):
             "right_knee_link",
             "left_ankle_roll_link",
             "right_ankle_roll_link",
-        ]
+    ]
     
     collision_track_body_names = [
         "left_ankle_roll_link",
@@ -147,13 +136,23 @@ class G1MotionTrackingEnvCfg(DirectRLEnvCfg):
 
     expert_motion_file = None
 
-    early_termination = True
-    termination_height = 0.5
+    anchor_pos_error_threshold = 0.25
+    anchor_ori_error_threshold = 0.8
+    end_effector_pos_error_threshold = 0.25
+    height_only = False
+
+    end_effector_body_names = [
+        "left_ankle_roll_link",
+        "right_ankle_roll_link",
+        "left_rubber_hand",
+        "right_rubber_hand",
+    ]
 
     training = True
     add_obs_noise = True
     add_action_noise = True
     add_reset_noise = True
+    random_start = True
 
     sim: SimulationCfg = SimulationCfg(
         dt=1 / 200,

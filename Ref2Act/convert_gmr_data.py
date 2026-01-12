@@ -50,7 +50,7 @@ class GMRMotionData:
         self.root_rot = self.root_rot[:, [3, 0, 1, 2]]
         self.joint_pos = torch.from_numpy(motion_data["dof_pos"]).float().to(self.device)
         self.num_frames = self.joint_pos.size(0)
-        self.render_interval = 1
+        self.render_interval = 2
         self.physic_dt = 1 / (self.render_interval * self.fps)
         self.current_step = 0
 
@@ -131,8 +131,8 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene, mot
         joint_vel[:, joint_indices] = reference_joint_vel
         robot.write_joint_state_to_sim(joint_pos, joint_vel)
 
-        sim.step()
-        #sim.render()  # We don't want physic (sim.step())
+        #sim.step()
+        sim.render()  # We don't want physic (sim.step())
         scene.update(sim.get_physics_dt())
         #net_force = contact_sensors.data.net_forces_w_history
         #is_contact(net_force, contact_tracking_body_indices)
