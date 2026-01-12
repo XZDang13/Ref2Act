@@ -107,6 +107,12 @@ class G1MotionTrackingEnvCfg(DirectRLEnvCfg):
 
     action_buffer_length = 1
     action_mod = ActionMod.Median
+    action_noise = 0.01
+
+    expert_motion_file = None
+
+    bin_size = 0.25
+    sampler_mod:SamplerMod = SamplerMod.Clamp
 
     root_link_name = "pelvis"
     anchor_body_names = ["pelvis"]
@@ -134,19 +140,17 @@ class G1MotionTrackingEnvCfg(DirectRLEnvCfg):
         "right_rubber_hand",
     ]
 
-    expert_motion_file = None
-
-    anchor_pos_error_threshold = 0.25
-    anchor_ori_error_threshold = 0.8
-    end_effector_pos_error_threshold = 0.25
-    height_only = False
-
     end_effector_body_names = [
         "left_ankle_roll_link",
         "right_ankle_roll_link",
         "left_rubber_hand",
         "right_rubber_hand",
     ]
+
+    anchor_pos_error_threshold = 0.25
+    anchor_ori_error_threshold = 0.8
+    end_effector_pos_error_threshold = 0.25
+    height_only = False
 
     training = True
     add_obs_noise = True
@@ -189,10 +193,6 @@ class G1MotionTrackingEnvCfg(DirectRLEnvCfg):
     contact_sensor = ContactSensorCfg(
         prim_path="/World/envs/env_.*/Robot/.*", history_length=3, track_air_time=True, force_threshold=10.0,
     )
-
-    sampler_mod:SamplerMod = SamplerMod.Clamp
-
-    action_noise = 0.01
 
 
 JOINT_ORDER = [

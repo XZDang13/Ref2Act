@@ -38,8 +38,15 @@ class G1MotionTrackingEnv(DirectRLEnv):
         collision_track_body_indices, _ = self.contact_sensor.find_bodies(self.cfg.collision_track_body_names)
         self.collision_track_body_indices = collision_track_body_indices
 
-        self.sampler = Sampler(self.cfg.scene.num_envs, self.motion_lib.duration,
-                               self.step_dt, self.motion_lib.num_frames)
+        self.sampler = Sampler(
+            self.cfg.scene.num_envs,
+            self.motion_lib.duration,
+            self.step_dt,
+            self.motion_lib.num_frames,
+            bin_size=self.cfg.bin_size,
+            device=self.device,
+        )
+        
         self.motion_times = self.sampler.current_times.clone()
 
         self.observation_model = Observation(anchor_body_indices, key_body_indices, self.cfg.add_obs_noise)
@@ -102,16 +109,24 @@ class G1MotionTrackingEnv(DirectRLEnv):
     
     def _get_rewards(self) -> torch.Tensor:
         reward = self.reward_model.get_task_reward(self.robot, self.reference_motion, self.contact_sensor)
-        mimic_error = self.reward_model.mimic_reward.get_errors()
+        mimic_logs = self.reward_model.mimic_reward.get_logs()
 
-        self.extras.update(mimic_error)
+        self.extras["anchor_position_reward"] = mimic_logs["anchor_position_reward"]
+        self.extras["anchor_quaternion_reward"] = mimic_logs["anchor_quaternion_reward"]
+        self.extras["key_position_reward"] = mimic_logs["key_position_reward"]
+        self.extras["key_quaternion_reward"] = mimic_logs["key_quaternion_reward"]
+        self.extras["key_linear_vel_reward"] = mimic_logs["key_linear_vel_reward"]
+        self.extras["key_ang_vel_reward"] = mimic_logs["key_ang_vel_reward"]
 
         return reward
      
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         
-        return self.termination_model.get_dones(self.episode_length_buf, self.max_episode_length, self.robot,
+        terminate, time_out = self.termination_model.get_dones(self.episode_length_buf, self.max_episode_length, self.robot,
                                                 self.reference_motion, self.sampler)
+        self.sampler.record_failures(self.termination_model.terminated_env_ids)
+
+        return terminate, time_out
     
     def _reset_idx(self, env_ids: torch.Tensor | None):
         if env_ids is None or len(env_ids) == self.num_envs:
@@ -119,7 +134,6 @@ class G1MotionTrackingEnv(DirectRLEnv):
 
         self.robot.reset(env_ids)
         super()._reset_idx(env_ids)
-        
 
         #if len(env_ids) == self.num_envs and self.cfg.training:
         #    self.episode_length_buf[:] = torch.randint_like(self.episode_length_buf, high=int(self.max_episode_length))
@@ -129,7 +143,7 @@ class G1MotionTrackingEnv(DirectRLEnv):
             self.action_processer.set_random_offset_noise(env_ids)
 
         if self.cfg.random_start:
-            times = self.sampler.sample_rand_times(env_ids)
+            times = self.sampler.sample_failure_weighted_times(env_ids)
         else:
             times = self.sampler.sample_start_times(env_ids)
 

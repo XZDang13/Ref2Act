@@ -1,4 +1,5 @@
 from enum import Enum
+import math
 import numpy as np
 import torch
 import matplotlib
@@ -97,19 +98,58 @@ class MotionLib:
         return sampled_motion
     
 class Sampler:
-    def __init__(self, num_envs: int, duration: float, dt: float, num_frames: int) -> None:
+    def __init__(
+        self,
+        num_envs: int,
+        duration: float,
+        dt: float,
+        num_frames: int,
+        bin_size: float | None = None,
+        device: torch.device = torch.device("cpu")
+    ) -> None:
+        
         self.num_envs = num_envs
         self.duration = duration
         self.dt = dt
         self.num_frames = num_frames
+        self.device = device
 
-        self.current_times = torch.zeros(num_envs)
+        self.current_times = torch.zeros(num_envs).to(self.device)
+        self.bin_size: float | None = None
+        self.num_bins = 0
+        self.bin_fail_counts: torch.Tensor | None = None
+        self.bin_sample_counts: torch.Tensor | None = None
+        if bin_size is not None:
+            self.init_failure_bins(bin_size)
+
+    def init_failure_bins(self, bin_size: float) -> None:
+        if bin_size <= 0.0:
+            raise ValueError("bin_size must be > 0")
+        self.bin_size = float(bin_size)
+        self.num_bins = max(1, int(math.ceil(self.duration / self.bin_size)))
+        self.bin_fail_counts = torch.zeros(self.num_bins, dtype=torch.float32).to(self.device)
+        self.bin_sample_counts = torch.zeros(self.num_bins, dtype=torch.float32).to(self.device)
+
+    def reset_failure_stats(self) -> None:
+        self._check_failure_bins()
+        self.bin_fail_counts.zero_()
+        self.bin_sample_counts.zero_()
+
+    def record_failures(self, env_ids: IndexLike | None = None, times: torch.Tensor | None = None) -> None:
+        self._check_failure_bins()
+        if times is None:
+            if env_ids is None:
+                times = self.current_times
+            else:
+                times = self.current_times[env_ids]
+        bin_indices = self._times_to_bins(times)
+        self.bin_fail_counts += torch.bincount(bin_indices, minlength=self.num_bins).to(dtype=torch.float32)
 
     def sample_rand_times(self, env_ids:IndexLike|None=None) -> torch.Tensor:
         if env_ids is None:
             env_ids = [i for i in range(self.num_envs)]
         num_envs = len(env_ids)
-        times = torch.rand(num_envs) * self.duration
+        times = torch.rand(num_envs, device=self.device) * self.duration
         self.current_times[env_ids] = times
 
         return times
@@ -118,10 +158,59 @@ class Sampler:
         if env_ids is None:
             env_ids = [i for i in range(self.num_envs)]
         num_envs = len(env_ids)
-        times = torch.zeros(num_envs)
+        times = torch.zeros(num_envs, device=self.device)
         self.current_times[env_ids] = times
 
         return times
+
+    def sample_failure_weighted_times(
+        self,
+        env_ids: IndexLike | None = None,
+        min_weight: float = 0.05,
+        temperature: float = 1.0,
+    ) -> torch.Tensor:
+        self._check_failure_bins()
+        if env_ids is None:
+            env_ids = [i for i in range(self.num_envs)]
+        num_envs = len(env_ids)
+
+        if min_weight < 0.0:
+            raise ValueError("min_weight must be >= 0")
+        if temperature <= 0.0:
+            raise ValueError("temperature must be > 0")
+
+        fail_rate = self.bin_fail_counts / torch.clamp(self.bin_sample_counts, min=1.0)
+        weights = (fail_rate + min_weight).pow(1.0 / temperature)
+        if torch.sum(weights) <= 0:
+            weights = torch.ones_like(weights)
+
+        bin_indices = torch.multinomial(weights, num_envs, replacement=True)
+        bin_starts = bin_indices.to(dtype=torch.float32) * self.bin_size
+        duration_tensor = torch.tensor(self.duration, dtype=torch.float32)
+        bin_ends = torch.minimum(bin_starts + self.bin_size, duration_tensor)
+        times = bin_starts + torch.rand(num_envs, device=self.device) * (bin_ends - bin_starts)
+
+        self.bin_sample_counts += torch.bincount(bin_indices, minlength=self.num_bins).to(dtype=torch.float32)
+        self.current_times[env_ids] = times
+
+        return times
+
+    def get_bin_distributions(
+        self,
+        min_weight: float = 0.05,
+        temperature: float = 1.0,
+    ) -> torch.Tensor:
+        self._check_failure_bins()
+        if min_weight < 0.0:
+            raise ValueError("min_weight must be >= 0")
+        if temperature <= 0.0:
+            raise ValueError("temperature must be > 0")
+
+        fail_rate = self.bin_fail_counts / torch.clamp(self.bin_sample_counts, min=1.0)
+        weights = (fail_rate + min_weight).pow(1.0 / temperature)
+        weight_sum = torch.clamp(weights.sum(), min=1.0)
+        sample_prob = weights / weight_sum
+        return sample_prob
     
     def sample_next(self, on_end: SamplerMod=SamplerMod.Clamp) -> torch.Tensor:
         self.current_times += self.dt
@@ -134,6 +223,14 @@ class Sampler:
         times = self.current_times.clone()
 
         return times
+
+    def _check_failure_bins(self) -> None:
+        if self.bin_size is None or self.bin_fail_counts is None or self.bin_sample_counts is None:
+            raise RuntimeError("Failure bins not initialized. Call init_failure_bins(...) first.")
+
+    def _times_to_bins(self, times: torch.Tensor) -> torch.Tensor:
+        bin_indices = torch.floor(times / self.bin_size).to(dtype=torch.long)
+        return torch.clamp(bin_indices, min=0, max=self.num_bins - 1)
 
 class MotionViewer:
     """

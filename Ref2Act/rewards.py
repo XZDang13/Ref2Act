@@ -189,14 +189,20 @@ class MimicRewards:
         self.key_position_error = 0
         self.key_ang_vel_error = 0
 
-    def get_errors(self) -> dict[str, torch.Tensor]:
+    def get_logs(self) -> dict[str, torch.Tensor]:
         return {
             "anchor_position_error": self.anchor_position_error,
             "anchor_quaternion_error": self.anchor_quaternion_error,
             "key_position_error": self.key_position_error,
             "key_quaternion_error": self.key_quaternion_error,
             "key_linear_vel_error": self.key_linear_vel_error,
-            "key_ang_vel_error": self.key_ang_vel_error
+            "key_ang_vel_error": self.key_ang_vel_error,
+            "anchor_position_reward": self.anchor_position_reward,
+            "anchor_quaternion_reward": self.anchor_quaternion_reward,
+            "key_position_reward": self.key_position_reward,
+            "key_quaternion_reward": self.key_quaternion_reward,
+            "key_linear_vel_reward": self.key_linear_vel_reward,
+            "key_ang_vel_reward": self.key_ang_vel_reward,
         }
 
     def get_reward(self, robot: Articulation, reference_motion: ReferenceMotions) -> torch.Tensor:
@@ -222,6 +228,13 @@ class MimicRewards:
         key_ang_vel_reward = torch.exp(-key_ang_vel_error / self.cfg.ang_vel_std) * self.cfg.mimic_key_ang_vel_weight
         #joint_position_reward = torch.exp(-joint_position_error / self.cfg.joint_position_std) * self.cfg.mimic_joint_position_weight
         #joint_vel_reward = torch.exp(-joint_vel_error / self.cfg.joint_vel_std) * self.cfg.mimic_joint_vel_weight
+
+        self.anchor_position_reward = anchor_position_reward.mean().item()
+        self.anchor_quaternion_reward = anchor_quaternion_reward.mean().item()
+        self.key_position_reward = key_position_reward.mean().item()
+        self.key_quaternion_reward = key_quaternion_reward.mean().item()
+        self.key_linear_vel_reward = key_linear_vel_reward.mean().item()
+        self.key_ang_vel_reward = key_ang_vel_reward.mean().item()
 
         reward = torch.stack(
             [

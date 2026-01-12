@@ -22,6 +22,7 @@ class Termination:
         self.anchor_ori_error_threshold = anchor_ori_error_threshold
         self.end_effector_pos_error_threshold = end_effector_pos_error_threshold
         self.height_only = height_only
+        self.terminated_env_ids = torch.empty(0, dtype=torch.long)
 
     def time_out(self, episode_length_buf: torch.Tensor, max_episode_length: torch.Tensor) -> torch.Tensor:
         return episode_length_buf >= (max_episode_length - 1)
@@ -82,5 +83,11 @@ class Termination:
         end_effector_pos_terminate = self.end_effector_pos_error_terminate(robot, reference_motion)
 
         terminate = end_motiont_erminate | anchor_pose_terminate | anchor_ori_terminate | end_effector_pos_terminate
-        
+        self.track_terminated_env_ids(terminate)
+
         return terminate, time_out
+
+    def track_terminated_env_ids(self, terminate: torch.Tensor) -> torch.Tensor:
+        terminated_env_ids = torch.nonzero(terminate, as_tuple=False).squeeze(-1)
+        self.terminated_env_ids = terminated_env_ids
+        return terminated_env_ids
