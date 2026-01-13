@@ -113,6 +113,8 @@ class G1MotionTrackingEnv(DirectRLEnv):
 
         self.extras["anchor_position_reward"] = mimic_logs["anchor_position_reward"]
         self.extras["anchor_quaternion_reward"] = mimic_logs["anchor_quaternion_reward"]
+        self.extras["anchor_linear_vel_reward"] = mimic_logs["anchor_linear_vel_reward"]
+        self.extras["anchor_ang_vel_reward"] = mimic_logs["anchor_ang_vel_reward"]
         self.extras["key_position_reward"] = mimic_logs["key_position_reward"]
         self.extras["key_quaternion_reward"] = mimic_logs["key_quaternion_reward"]
         self.extras["key_linear_vel_reward"] = mimic_logs["key_linear_vel_reward"]
@@ -125,7 +127,7 @@ class G1MotionTrackingEnv(DirectRLEnv):
         terminate, time_out = self.termination_model.get_dones(self.episode_length_buf, self.max_episode_length, self.robot,
                                                 self.reference_motion, self.sampler)
         self.sampler.record_failures(self.termination_model.terminated_env_ids)
-
+        
         return terminate, time_out
     
     def _reset_idx(self, env_ids: torch.Tensor | None):

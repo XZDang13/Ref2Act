@@ -31,18 +31,22 @@ class Termination:
         return base_height < self.termination_height
 
     def anchor_pos_error_terminate(self, robot: Articulation, reference_motion: ReferenceMotions):
-        position_slice = slice(None)
+        # positions: [B, A, 3]
+        robot_pos = robot.data.body_link_pos_w[:, self.anchor_body_indices]
+        ref_pos   = reference_motion.body_positions[:, self.anchor_body_indices]
+
+        diff = robot_pos - ref_pos  # [B, A, 3]
+
         if self.height_only:
-            position_slice = slice(2, 3)
+            # use z only -> [B, A]
+            dist = diff[..., 2].abs()
+        else:
+            # full distance -> [B, A]
+            dist = torch.norm(diff, dim=-1)
 
-        robot_anchor_positions = robot.data.body_link_pos_w[:, self.anchor_body_indices, position_slice]
-        reference_anchor_positions = reference_motion.body_positions[:, self.anchor_body_indices, position_slice]
-
-        if self.height_only:
-            return torch.any(torch.abs(robot_anchor_positions - reference_anchor_positions) > self.anchor_pos_error_threshold, dim=-1)
-
-        return torch.any(torch.norm(robot_anchor_positions - reference_anchor_positions, dim=-1) > self.anchor_pos_error_threshold, dim=-1) 
-        
+        # terminate if ANY anchor body exceeds threshold -> [B]
+        return (dist > self.anchor_pos_error_threshold).any(dim=1)
+       
     def anchor_ori_error_terminate(self, robot: Articulation, reference_motion: ReferenceMotions):
         robot_anchor_quat = robot.data.body_link_quat_w[:, self.anchor_body_indices]
         reference_anchor_quat = reference_motion.body_quaternions[:, self.anchor_body_indices]
@@ -53,18 +57,18 @@ class Termination:
         return torch.abs(robot_projected_gravity_b[:, 2] - reference_projected_gravity_b[:, 2]) > self.anchor_ori_error_threshold
     
     def end_effector_pos_error_terminate(self, robot: Articulation, reference_motion: ReferenceMotions):
-        position_slice = slice(None)
-        if self.height_only:
-            position_slice = slice(2, 3)
+        robot_pos = robot.data.body_link_pos_w[:, self.end_effector_body_indices]
+        ref_pos   = reference_motion.body_positions[:, self.end_effector_body_indices]
 
-        robot_end_effector_positions = robot.data.body_link_pos_w[:, self.end_effector_body_indices, position_slice]
-        reference_end_effector_positions = reference_motion.body_positions[:, self.end_effector_body_indices, position_slice]
+        diff = robot_pos - ref_pos  # [B, E, 3]
 
         if self.height_only:
-            return torch.any(torch.abs(robot_end_effector_positions - reference_end_effector_positions) > self.end_effector_pos_error_threshold, dim=-1)
+            dist = diff[..., 2].abs()          # [B, E]
+        else:
+            dist = torch.norm(diff, dim=-1)    # [B, E]
 
-        return torch.any(torch.norm(robot_end_effector_positions - reference_end_effector_positions, dim=-1) > self.end_effector_pos_error_threshold, dim=-1)
-
+        return (dist > self.end_effector_pos_error_threshold).any(dim=1)  # [B]
+    
     def end_of_motion(self, sampler: Sampler) -> torch.Tensor:
         return sampler.current_times >= sampler.duration
 
@@ -82,12 +86,14 @@ class Termination:
         anchor_ori_terminate = self.anchor_ori_error_terminate(robot, reference_motion)
         end_effector_pos_terminate = self.end_effector_pos_error_terminate(robot, reference_motion)
 
-        terminate = end_motiont_erminate | anchor_pose_terminate | anchor_ori_terminate | end_effector_pos_terminate
-        self.track_terminated_env_ids(terminate)
+        failed =  anchor_pose_terminate | anchor_ori_terminate | end_effector_pos_terminate
+        self.track_terminated_env_ids(failed)
+
+        terminate = end_motiont_erminate | failed
 
         return terminate, time_out
 
-    def track_terminated_env_ids(self, terminate: torch.Tensor) -> torch.Tensor:
-        terminated_env_ids = torch.nonzero(terminate, as_tuple=False).squeeze(-1)
+    def track_terminated_env_ids(self, failed: torch.Tensor) -> torch.Tensor:
+        terminated_env_ids = torch.nonzero(failed, as_tuple=False).squeeze(-1)
         self.terminated_env_ids = terminated_env_ids
         return terminated_env_ids

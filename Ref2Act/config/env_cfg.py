@@ -119,12 +119,12 @@ class G1MotionTrackingEnvCfg(DirectRLEnvCfg):
 
     key_body_names = [
             "torso_link",
-            "left_shoulder_pitch_link",
-            "right_shoulder_pitch_link",
+            "left_shoulder_roll_link",
+            "right_shoulder_roll_link",
             "left_elbow_link",
             "right_elbow_link",
-            "left_hip_yaw_link",
-            "right_hip_yaw_link",
+            "left_hip_roll_link",
+            "right_hip_roll_link",
             "left_rubber_hand",
             "right_rubber_hand",
             "left_knee_link",
@@ -147,9 +147,9 @@ class G1MotionTrackingEnvCfg(DirectRLEnvCfg):
         "right_rubber_hand",
     ]
 
-    anchor_pos_error_threshold = 0.25
+    anchor_pos_error_threshold = 0.3
     anchor_ori_error_threshold = 0.8
-    end_effector_pos_error_threshold = 0.25
+    end_effector_pos_error_threshold = 0.3
     height_only = False
 
     training = True
@@ -178,8 +178,7 @@ class G1MotionTrackingEnvCfg(DirectRLEnvCfg):
             friction_combine_mode="multiply",
             restitution_combine_mode="multiply",
             static_friction=1.0,
-            dynamic_friction=1.0,
-            restitution=0.0,
+            dynamic_friction=1.0
         ),
         debug_vis=False,
     )

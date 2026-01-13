@@ -132,14 +132,14 @@ class RegulationReward:
         joint_acc_penalty = self.joint_acc_l2(robot) * self.cfg.joint_acc_weight
         joint_torque_penalty = self.joint_torque_l2(robot) * self.cfg.joint_torque_wegiht
         joint_limit_penalty = self.joint_limit(robot) * self.cfg.joint_limit_weight
-        self_collision_penalty = self.self_collision_penalty(
-            contact_sensor,
-            self.cfg.collision_track_body_indices,
-            self.cfg.self_collision_force_threshold,
-        ) * self.cfg.self_collision_weight
+        #self_collision_penalty = self.self_collision_penalty(
+        #    contact_sensor,
+        #    self.cfg.collision_track_body_indices,
+        #    self.cfg.self_collision_force_threshold,
+        #) * self.cfg.self_collision_weight
         
         reward = torch.stack(
-            [joint_acc_penalty, joint_torque_penalty, joint_limit_penalty, self_collision_penalty],
+            [joint_acc_penalty, joint_torque_penalty, joint_limit_penalty],
             dim=-1
         )
 
@@ -181,6 +181,7 @@ class RegulationReward:
 
         return torch.sum(out_of_limits, dim=1)
 
+
 class MimicRewards:
     def __init__(self, cfg:MimicRewardsCfg) -> None:
         self.cfg = cfg
@@ -193,12 +194,16 @@ class MimicRewards:
         return {
             "anchor_position_error": self.anchor_position_error,
             "anchor_quaternion_error": self.anchor_quaternion_error,
+            "anchor_linear_vel_error": self.anchor_linear_vel_error,
+            "anchor_ang_vel_error": self.anchor_ang_vel_error,
             "key_position_error": self.key_position_error,
             "key_quaternion_error": self.key_quaternion_error,
             "key_linear_vel_error": self.key_linear_vel_error,
             "key_ang_vel_error": self.key_ang_vel_error,
             "anchor_position_reward": self.anchor_position_reward,
             "anchor_quaternion_reward": self.anchor_quaternion_reward,
+            "anchor_linear_vel_reward": self.anchor_linear_vel_reward,
+            "anchor_ang_vel_reward": self.anchor_ang_vel_reward,
             "key_position_reward": self.key_position_reward,
             "key_quaternion_reward": self.key_quaternion_reward,
             "key_linear_vel_reward": self.key_linear_vel_reward,
@@ -208,12 +213,15 @@ class MimicRewards:
     def get_reward(self, robot: Articulation, reference_motion: ReferenceMotions) -> torch.Tensor:
         
         anchor_position_error, anchor_quaternion_error = self.anchor_body_pose_error(robot, reference_motion)
+        anchor_linear_vel_error, anchor_ang_vel_error = self.anchor_body_state_error(robot, reference_motion)
         key_position_error, key_quaternion_error = self.key_body_pose_error(robot, reference_motion,)
         key_linear_vel_error, key_ang_vel_error = self.key_body_state_error(robot, reference_motion)
         #joint_position_error, joint_vel_error = self.joint_state_error(robot, reference_motion)
 
         self.anchor_position_error = anchor_position_error.mean().item()
         self.anchor_quaternion_error = anchor_quaternion_error.mean().item()
+        self.anchor_linear_vel_error = anchor_linear_vel_error.mean().item()
+        self.anchor_ang_vel_error = anchor_ang_vel_error.mean().item()
         self.key_position_error = key_position_error.mean().item()
         self.key_quaternion_error = key_quaternion_error.mean().item()
         self.key_linear_vel_error = key_linear_vel_error.mean().item()
@@ -222,6 +230,8 @@ class MimicRewards:
 
         anchor_position_reward = torch.exp(-anchor_position_error / self.cfg.position_std) * self.cfg.mimic_anchor_position_weight
         anchor_quaternion_reward = torch.exp(-anchor_quaternion_error / self.cfg.quaternion_std) * self.cfg.mimic_anchor_quaternion_weight
+        anchor_linear_vel_reward = torch.exp(-anchor_linear_vel_error / self.cfg.linear_vel_std) * self.cfg.mimic_key_linear_vel_weight
+        anchor_ang_vel_reward = torch.exp(-anchor_ang_vel_error / self.cfg.ang_vel_std) * self.cfg.mimic_key_ang_vel_weight
         key_position_reward = torch.exp(-key_position_error / self.cfg.position_std) * self.cfg.mimic_key_position_wegiht
         key_quaternion_reward = torch.exp(-key_quaternion_error / self.cfg.quaternion_std) * self.cfg.mimic_key_quaternion_weight
         key_linear_vel_reward = torch.exp(-key_linear_vel_error / self.cfg.linear_vel_std) * self.cfg.mimic_key_linear_vel_weight
@@ -231,6 +241,8 @@ class MimicRewards:
 
         self.anchor_position_reward = anchor_position_reward.mean().item()
         self.anchor_quaternion_reward = anchor_quaternion_reward.mean().item()
+        self.anchor_linear_vel_reward = anchor_linear_vel_reward.mean().item()
+        self.anchor_ang_vel_reward = anchor_ang_vel_reward.mean().item()
         self.key_position_reward = key_position_reward.mean().item()
         self.key_quaternion_reward = key_quaternion_reward.mean().item()
         self.key_linear_vel_reward = key_linear_vel_reward.mean().item()
@@ -238,8 +250,8 @@ class MimicRewards:
 
         reward = torch.stack(
             [
-                anchor_position_reward, anchor_quaternion_reward, key_position_reward,
-                key_quaternion_reward, key_linear_vel_reward, key_ang_vel_reward,
+                anchor_position_reward, anchor_quaternion_reward, anchor_linear_vel_reward, anchor_ang_vel_reward,
+                key_position_reward, key_quaternion_reward, key_linear_vel_reward, key_ang_vel_reward,
             ],dim=-1
             )
         
@@ -260,6 +272,18 @@ class MimicRewards:
         quaternion_error = quat_error_magnitude(robot_anchor_body_quaternions, reference_anchor_body_quaternions).square().mean(-1)
 
         return position_error, quaternion_error
+    
+    def anchor_body_state_error(self, robot: Articulation, reference_motion: ReferenceMotions) -> tuple[torch.Tensor, torch.Tensor]:
+        robot_anchor_body_lin_vel = robot.data.body_lin_vel_w[:, self.cfg.anchor_body_indices]
+        robot_anchor_body_ang_vel = robot.data.body_ang_vel_w[:, self.cfg.anchor_body_indices]
+
+        reference_anchor_body_lin_vel = reference_motion.body_linear_velocities[:, self.cfg.anchor_body_indices]
+        reference_anchor_body_ang_vel = reference_motion.body_angular_velocities[:, self.cfg.anchor_body_indices]
+
+        lin_vel_error = (robot_anchor_body_lin_vel-reference_anchor_body_lin_vel).square().sum(-1).mean(-1)
+        ang_vel_error = (robot_anchor_body_ang_vel-reference_anchor_body_ang_vel).square().sum(-1).mean(-1)
+
+        return lin_vel_error, ang_vel_error
 
     
     def key_body_pose_error(self, robot: Articulation, reference_motion: ReferenceMotions) -> tuple[torch.Tensor, torch.Tensor]:

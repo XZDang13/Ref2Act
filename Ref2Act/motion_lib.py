@@ -166,7 +166,7 @@ class Sampler:
     def sample_failure_weighted_times(
         self,
         env_ids: IndexLike | None = None,
-        min_weight: float = 0.05,
+        min_weight: float = 0.001,
         temperature: float = 1.0,
     ) -> torch.Tensor:
         self._check_failure_bins()
