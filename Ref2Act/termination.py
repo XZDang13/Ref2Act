@@ -80,16 +80,15 @@ class Termination:
         reference_motion: ReferenceMotions,
         sampler: Sampler
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        time_out = self.time_out(episode_length_buf, max_episode_length)
-        end_motiont_erminate = self.end_of_motion(sampler).to(time_out.device)
+        max_epsidoe_time_out = self.time_out(episode_length_buf, max_episode_length)
+        end_motion_time_out= self.end_of_motion(sampler).to(max_epsidoe_time_out.device)
         anchor_pose_terminate = self.anchor_pos_error_terminate(robot, reference_motion)
         anchor_ori_terminate = self.anchor_ori_error_terminate(robot, reference_motion)
         end_effector_pos_terminate = self.end_effector_pos_error_terminate(robot, reference_motion)
 
-        failed =  anchor_pose_terminate | anchor_ori_terminate | end_effector_pos_terminate
-        self.track_terminated_env_ids(failed)
-
-        terminate = end_motiont_erminate | failed
+        time_out = max_epsidoe_time_out | end_motion_time_out
+        terminate =  anchor_pose_terminate | anchor_ori_terminate | end_effector_pos_terminate
+        self.track_terminated_env_ids(terminate)        
 
         return terminate, time_out
 
