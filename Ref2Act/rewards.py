@@ -2,10 +2,10 @@ import dataclasses
 import torch
 
 from isaaclab.assets import Articulation
-from isaaclab.utils.math import quat_error_magnitude
+from isaaclab.utils.math import quat_error_magnitude, yaw_quat, quat_mul, quat_apply, quat_inv
 from isaaclab.sensors import ContactSensor
 from .motion_lib import ReferenceMotions
-from .math import relative_transform
+from .math import relative_transform, get_relative_reference_motion_pose
 from .utils import IndexLike
 
 @dataclasses.dataclass
@@ -288,16 +288,26 @@ class MimicRewards:
     
     def key_body_pose_error(self, robot: Articulation, reference_motion: ReferenceMotions) -> tuple[torch.Tensor, torch.Tensor]:
 
+        robot_anchor_body_positions = robot.data.body_pos_w[:, self.cfg.anchor_body_indices]
+        robot_anchor_body_quaternions = robot.data.body_quat_w[:, self.cfg.anchor_body_indices]
+
+        reference_anchor_body_positions = reference_motion.body_positions[:, self.cfg.anchor_body_indices]
+        reference_anchor_body_quaternions = reference_motion.body_quaternions[:, self.cfg.anchor_body_indices]
+
         robot_key_body_positions = robot.data.body_pos_w[:, self.cfg.key_body_indices]
         robot_key_body_quaternions = robot.data.body_quat_w[:, self.cfg.key_body_indices]
-        
 
         reference_key_body_positions = reference_motion.body_positions[:, self.cfg.key_body_indices]
         reference_key_body_quaternions = reference_motion.body_quaternions[:, self.cfg.key_body_indices]
 
+        relative_reference_key_body_positions, relative_reference_key_body_quaternions = get_relative_reference_motion_pose(
+            robot_anchor_body_positions, robot_anchor_body_quaternions,
+            reference_anchor_body_positions, reference_anchor_body_quaternions,
+            reference_key_body_positions, reference_key_body_quaternions
+        )
 
-        position_error = (robot_key_body_positions-reference_key_body_positions).square().sum(-1).mean(-1)
-        quaternion_error = quat_error_magnitude(robot_key_body_quaternions, reference_key_body_quaternions).square().mean(-1)
+        position_error = (robot_key_body_positions-relative_reference_key_body_positions).square().sum(-1).mean(-1)
+        quaternion_error = quat_error_magnitude(robot_key_body_quaternions, relative_reference_key_body_quaternions).square().mean(-1)
         
 
         return position_error, quaternion_error

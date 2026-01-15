@@ -101,7 +101,7 @@ class G1MotionTrackingEnvCfg(DirectRLEnvCfg):
 
     observation_space = 124
     policy_observation_space = 124
-    critic_observation_space = 247
+    critic_observation_space = 256
     action_space = 23
     state_space = 0
 
@@ -115,22 +115,23 @@ class G1MotionTrackingEnvCfg(DirectRLEnvCfg):
     sampler_mod:SamplerMod = SamplerMod.Clamp
 
     root_link_name = "pelvis"
-    anchor_body_names = ["pelvis"]
+    anchor_body_name = "pelvis"
 
     key_body_names = [
-            "torso_link",
-            "left_shoulder_roll_link",
-            "right_shoulder_roll_link",
-            "left_elbow_link",
-            "right_elbow_link",
-            "left_hip_roll_link",
-            "right_hip_roll_link",
-            "left_rubber_hand",
-            "right_rubber_hand",
-            "left_knee_link",
-            "right_knee_link",
-            "left_ankle_roll_link",
-            "right_ankle_roll_link",
+        "pelvis",
+        "torso_link",
+        "left_shoulder_roll_link",
+        "right_shoulder_roll_link",
+        "left_elbow_link",
+        "right_elbow_link",
+        "left_hip_roll_link",
+        "right_hip_roll_link",
+        "left_rubber_hand",
+        "right_rubber_hand",
+        "left_knee_link",
+        "right_knee_link",
+        "left_ankle_roll_link",
+        "right_ankle_roll_link",
     ]
     
     collision_track_body_names = [
@@ -147,10 +148,10 @@ class G1MotionTrackingEnvCfg(DirectRLEnvCfg):
         "right_rubber_hand",
     ]
 
-    anchor_pos_error_threshold = 0.3
+    anchor_pos_error_threshold = 0.25
     anchor_ori_error_threshold = 0.8
-    end_effector_pos_error_threshold = 0.3
-    height_only = False
+    end_effector_pos_error_threshold = 0.25
+    height_only = True
 
     training = True
     add_obs_noise = True

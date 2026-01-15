@@ -30,24 +30,13 @@ class G1MotionTrackingEnv(DirectRLEnv):
 
         self.motion_lib = MotionLib(self.cfg.expert_motion_file, self.device)
 
-        anchor_body_indices = [self.robot.data.body_names.index(name) for name in self.cfg.anchor_body_names]
+        anchor_body_indices = self.robot.data.body_names.index(self.cfg.anchor_body_name)
         key_body_indices = [self.robot.data.body_names.index(name) for name in self.cfg.key_body_names]
         enf_effector_indices = [self.robot.data.body_names.index(name) for name in self.cfg.end_effector_body_names]
         self.root_link_index = self.robot.data.body_names.index(self.cfg.root_link_name)
 
         collision_track_body_indices, _ = self.contact_sensor.find_bodies(self.cfg.collision_track_body_names)
         self.collision_track_body_indices = collision_track_body_indices
-
-        self.sampler = Sampler(
-            self.cfg.scene.num_envs,
-            self.motion_lib.duration,
-            self.step_dt,
-            self.motion_lib.num_frames,
-            bin_size=self.cfg.bin_size,
-            device=self.device,
-        )
-        
-        self.motion_times = self.sampler.current_times.clone()
 
         self.observation_model = Observation(anchor_body_indices, key_body_indices, self.cfg.add_obs_noise)
         
@@ -108,17 +97,19 @@ class G1MotionTrackingEnv(DirectRLEnv):
         return obs
     
     def _get_rewards(self) -> torch.Tensor:
-        reward = self.reward_model.get_task_reward(self.robot, self.reference_motion, self.contact_sensor)
-        mimic_logs = self.reward_model.mimic_reward.get_logs()
+        reward = 0
+        #reward = self.reward_model.get_task_reward(self.robot, self.reference_motion, self.contact_sensor)
+        
+        #mimic_logs = self.reward_model.mimic_reward.get_logs()
 
-        self.extras["anchor_position_reward"] = mimic_logs["anchor_position_reward"]
-        self.extras["anchor_quaternion_reward"] = mimic_logs["anchor_quaternion_reward"]
-        self.extras["anchor_linear_vel_reward"] = mimic_logs["anchor_linear_vel_reward"]
-        self.extras["anchor_ang_vel_reward"] = mimic_logs["anchor_ang_vel_reward"]
-        self.extras["key_position_reward"] = mimic_logs["key_position_reward"]
-        self.extras["key_quaternion_reward"] = mimic_logs["key_quaternion_reward"]
-        self.extras["key_linear_vel_reward"] = mimic_logs["key_linear_vel_reward"]
-        self.extras["key_ang_vel_reward"] = mimic_logs["key_ang_vel_reward"]
+        #self.extras["anchor_position_reward"] = mimic_logs["anchor_position_reward"]
+        #self.extras["anchor_quaternion_reward"] = mimic_logs["anchor_quaternion_reward"]
+        #self.extras["anchor_linear_vel_reward"] = mimic_logs["anchor_linear_vel_reward"]
+        #self.extras["anchor_ang_vel_reward"] = mimic_logs["anchor_ang_vel_reward"]
+        #self.extras["key_position_reward"] = mimic_logs["key_position_reward"]
+        #self.extras["key_quaternion_reward"] = mimic_logs["key_quaternion_reward"]
+        #self.extras["key_linear_vel_reward"] = mimic_logs["key_linear_vel_reward"]
+        #self.extras["key_ang_vel_reward"] = mimic_logs["key_ang_vel_reward"]
 
         return reward
      

@@ -1,5 +1,31 @@
 import torch
-from isaaclab.utils.math import subtract_frame_transforms, quat_apply, quat_mul, quat_conjugate
+from isaaclab.assets import Articulation
+from isaaclab.utils.math import subtract_frame_transforms, quat_apply, quat_mul, quat_conjugate, yaw_quat, quat_inv
+from .motion_lib import ReferenceMotions
+
+
+def get_relative_reference_motion_pose(
+    robot_anchor_pos: torch.Tensor,
+    robot_anchor_quat: torch.Tensor,
+    reference_anchor_pos: torch.Tensor,
+    reference_anchor_quat: torch.Tensor,
+    reference_key_body_pos: torch.Tensor,
+    reference_key_body_quat: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    robot_anchor_pos = robot_anchor_pos.expand_as(reference_key_body_pos)
+    robot_anchor_quat = robot_anchor_quat.expand_as(reference_key_body_quat)
+
+    reference_anchor_pos = reference_anchor_pos.expand_as(reference_key_body_pos)
+    reference_anchor_quat = robot_anchor_quat.expand_as(reference_key_body_quat)
+
+    delta_pos_w = robot_anchor_pos.clone()
+    delta_pos_w[..., 2] = reference_anchor_pos[..., 2]
+    delta_ori_w = yaw_quat(quat_mul(robot_anchor_quat, quat_inv(reference_anchor_quat)))
+
+    relative_reference_key_body_quat = quat_mul(delta_ori_w, reference_key_body_quat)
+    relative_reference_key_body_pos = delta_pos_w + quat_apply(delta_ori_w, reference_key_body_pos - reference_anchor_pos)
+
+    return relative_reference_key_body_pos, relative_reference_key_body_quat
 
 def relative_transform(
     anchor_pos: torch.Tensor,

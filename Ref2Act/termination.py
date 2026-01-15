@@ -84,10 +84,10 @@ class Termination:
         end_motion_time_out= self.end_of_motion(sampler).to(max_epsidoe_time_out.device)
         anchor_pose_terminate = self.anchor_pos_error_terminate(robot, reference_motion)
         anchor_ori_terminate = self.anchor_ori_error_terminate(robot, reference_motion)
-        end_effector_pos_terminate = self.end_effector_pos_error_terminate(robot, reference_motion)
+        #end_effector_pos_terminate = self.end_effector_pos_error_terminate(robot, reference_motion)
 
         time_out = max_epsidoe_time_out | end_motion_time_out
-        terminate =  anchor_pose_terminate | anchor_ori_terminate | end_effector_pos_terminate
+        terminate =  anchor_pose_terminate | anchor_ori_terminate
         self.track_terminated_env_ids(terminate)        
 
         return terminate, time_out
