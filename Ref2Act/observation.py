@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from isaaclab.assets import Articulation
 from isaaclab.scene import InteractiveScene
 from isaaclab.utils.math import quat_apply_inverse, quat_mul, quat_inv
-from .motion_lib import ReferenceMotions
+from .sampler import ReferenceMotions
 from .math import relative_transform, quaternion_to_tangent_and_normal, quat_diff
 
 @dataclass
@@ -19,14 +19,14 @@ class MotionState:
     key_lin_vel: torch.Tensor
     key_ang_vel: torch.Tensor
 
-    def __post_init__(self):
-        rel_pos, rel_quat = relative_transform(
-            self.anchor_pos, self.anchor_quat,
-            self.key_pos, self.key_quat
-        )
+    #def __post_init__(self):
+    #    rel_pos, rel_quat = relative_transform(
+    #        self.anchor_pos, self.anchor_quat,
+    #        self.key_pos, self.key_quat
+    #    )
 
-        self.rel_key_pos = rel_pos
-        self.rel_key_quat = rel_quat
+    #    self.rel_key_pos = rel_pos
+    #    self.rel_key_quat = rel_quat
 
 
 def add_noise_to(data: torch.Tensor, noise_scale: float):
@@ -35,8 +35,8 @@ def add_noise_to(data: torch.Tensor, noise_scale: float):
     return data
 
 class Observation:
-    def __init__(self, anchor_body_indices: list[int], key_body_indices: list[int], add_noise:bool=False) -> None:
-        self.anchor_body_indices = anchor_body_indices
+    def __init__(self, anchor_body_index: int, key_body_indices: list[int], add_noise:bool=False) -> None:
+        self.anchor_body_index = anchor_body_index
         self.key_body_indices = key_body_indices
         self.add_noise = add_noise
 
@@ -45,15 +45,15 @@ class Observation:
         joint_pos = robot.data.joint_pos
         joint_vel = robot.data.joint_vel
 
-        local_body_positions = robot.data.body_link_pos_w - scene.env_origins.unsqueeze(1)
-        local_body_quaternions = robot.data.body_link_quat_w
+        local_body_positions = robot.data.body_pos_w - scene.env_origins.unsqueeze(1)
+        local_body_quaternions = robot.data.body_quat_w
         body_linear_velocities = robot.data.body_lin_vel_w
         body_angular_velocities = robot.data.body_ang_vel_w
 
-        anchor_positions = local_body_positions[:, self.anchor_body_indices]
-        anchor_quaternions = local_body_quaternions[:, self.anchor_body_indices]
-        anchor_linear_velocities = body_linear_velocities[:, self.anchor_body_indices]
-        anchor_angular_velocities = body_angular_velocities[:, self.anchor_body_indices]
+        anchor_positions = local_body_positions[:, self.anchor_body_index]
+        anchor_quaternions = local_body_quaternions[:, self.anchor_body_index]
+        anchor_linear_velocities = body_linear_velocities[:, self.anchor_body_index]
+        anchor_angular_velocities = body_angular_velocities[:, self.anchor_body_index]
 
         key_positions = local_body_positions[:, self.key_body_indices]
         key_quaternions = local_body_quaternions[:, self.key_body_indices]
@@ -80,10 +80,10 @@ class Observation:
         body_linear_velocities = reference_motion.body_linear_velocities
         body_angular_velocities = reference_motion.body_angular_velocities
 
-        anchor_positions = local_body_positions[:, self.anchor_body_indices]
-        anchor_quaternions = local_body_quaternions[:, self.anchor_body_indices]
-        anchor_linear_velocities = body_linear_velocities[:, self.anchor_body_indices]
-        anchor_angular_velocities = body_angular_velocities[:, self.anchor_body_indices]
+        anchor_positions = local_body_positions[:, self.anchor_body_index]
+        anchor_quaternions = local_body_quaternions[:, self.anchor_body_index]
+        anchor_linear_velocities = body_linear_velocities[:, self.anchor_body_index]
+        anchor_angular_velocities = body_angular_velocities[:, self.anchor_body_index]
 
         key_positions = local_body_positions[:, self.key_body_indices]
         key_quaternions = local_body_quaternions[:, self.key_body_indices]
@@ -118,7 +118,7 @@ class Observation:
                                last_applied_action:torch.Tensor) -> torch.Tensor:
         
         target_joint_pos = reference_state.joint_pos
-        target_jiont_vel = robot_state.joint_vel
+        target_jiont_vel = reference_state.joint_vel
 
         target_quat = reference_state.anchor_quat
         robot_quat = robot_state.anchor_quat
@@ -126,7 +126,7 @@ class Observation:
         target_projected_gravity = quat_apply_inverse(target_quat, gravity_vector)
         robot_projected_gravity = quat_apply_inverse(robot_quat, gravity_vector)
 
-        robot_ang_vel = robot_state.anchor_ang_vel.flatten(1)
+        robot_ang_vel = robot_state.anchor_ang_vel
         robot_joint_pos = robot_state.joint_pos
         robot_joint_vel = robot_state.joint_vel
         last_action = last_applied_action.clone()
@@ -158,15 +158,15 @@ class Observation:
                                last_applied_action:torch.Tensor) -> torch.Tensor:
         
         target_joint_pos = reference_state.joint_pos
-        target_jiont_vel = robot_state.joint_vel
+        target_jiont_vel = reference_state.joint_vel
 
-        relative_anchor_pos, relative_anchor_quat = relative_transform(robot_state.anchor_ang_vel,
+        relative_anchor_pos, relative_anchor_quat = relative_transform(robot_state.anchor_pos,
                                                                        robot_state.anchor_quat,
                                                                        reference_state.anchor_pos,
                                                                        reference_state.anchor_quat)
         
-        relative_anchor_pos = relative_anchor_pos.flatten(1)
-        relative_anchor_tangent_and_normal = quaternion_to_tangent_and_normal(relative_anchor_quat).flatten(1)
+        relative_anchor_pos = relative_anchor_pos
+        relative_anchor_tangent_and_normal = quaternion_to_tangent_and_normal(relative_anchor_quat)
 
         relative_key_pos, relative_key_quat = relative_transform(robot_state.anchor_pos,
                                                                  robot_state.anchor_quat,
@@ -176,8 +176,8 @@ class Observation:
         relative_key_pos = relative_key_pos.flatten(1)
         relative_key_tangent_and_normal = quaternion_to_tangent_and_normal(relative_key_quat).flatten(1)
         
-        anchor_lin_vel = robot_state.anchor_lin_vel.flatten(1)
-        anchor_ang_vel = robot_state.anchor_ang_vel.flatten(1)
+        anchor_lin_vel = robot_state.anchor_lin_vel
+        anchor_ang_vel = robot_state.anchor_ang_vel
 
         joint_pos = robot_state.joint_pos
         joint_vel = robot_state.joint_vel

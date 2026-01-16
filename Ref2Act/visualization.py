@@ -4,7 +4,7 @@ import isaaclab.sim as sim_utils
 from isaaclab.markers import VisualizationMarkers
 from isaaclab.markers.config import DEFORMABLE_TARGET_MARKER_CFG
 
-from .motion_lib import ReferenceMotions
+from .sampler import ReferenceMotions
 from .utils import IndexLike
 
 class ReferenceMotionViewer:
@@ -22,5 +22,5 @@ class ReferenceMotionViewer:
         self.body_indices = body_indices
 
     def visualize(self, reference_motion: ReferenceMotions):
-        body_position = reference_motion.body_positions[:, self.body_indices].view(-1, 3)
+        body_position = reference_motion.body_pos_relative[:, self.body_indices].view(-1, 3)
         self.markers.visualize(body_position)

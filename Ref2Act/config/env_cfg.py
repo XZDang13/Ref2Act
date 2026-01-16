@@ -13,7 +13,7 @@ from isaaclab.sensors import ContactSensorCfg
 from isaaclab.markers import VisualizationMarkersCfg
 from isaaclab.markers.config import FRAME_MARKER_CFG
 from .robot import G1_CFG
-from ..motion_lib import SamplerMod
+from ..sampler import SamplerMod
 
 VELOCITY_RANGE = {
     "x": (-0.5, 0.5),

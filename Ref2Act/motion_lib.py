@@ -10,9 +10,6 @@ from dataclasses import dataclass
 
 from .utils import interpolate, slerp, compute_frame_blend, IndexLike
 
-class SamplerMod(Enum):
-    Cycle = 0
-    Clamp = 1
 
 class MotionLib:
     def __init__(self, motion_file: str, device: torch.device=torch.device("cpu")) -> None:

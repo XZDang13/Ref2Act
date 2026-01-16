@@ -1,7 +1,7 @@
 import torch
 from isaaclab.assets import Articulation
 from isaaclab.utils.math import subtract_frame_transforms, quat_apply, quat_mul, quat_conjugate, yaw_quat, quat_inv
-from .motion_lib import ReferenceMotions
+from .sampler import ReferenceMotions
 
 
 def get_relative_reference_motion_pose(
@@ -33,13 +33,10 @@ def relative_transform(
     key_pos: torch.Tensor,
     key_quat: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    B = anchor_pos.shape[0]
-    K = key_pos.shape[1]
 
-    # [B, 1, 3] → [B, K, 3]
-    anchor_pos = anchor_pos.expand(-1, K, -1)
-    # [B, 1, 4] → [B, K, 4]
-    anchor_quat = anchor_quat.expand(-1, K, -1)
+    if key_pos.dim() == 3:
+        anchor_pos = anchor_pos[:, None, :].expand_as(key_pos)  
+        anchor_quat = anchor_quat[:, None, :].expand_as(key_quat)  
 
     key_pos = key_pos
     key_quat = key_quat
