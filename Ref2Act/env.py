@@ -15,8 +15,6 @@ from .termination import Termination
 from .visualization import ReferenceMotionViewer
 from .sampler import SamplerMod, Sampler
 
-
-
 class G1MotionTrackingEnv(DirectRLEnv):
     cfg:G1MotionTrackingEnvCfg
 
@@ -57,6 +55,25 @@ class G1MotionTrackingEnv(DirectRLEnv):
             end_effector_pos_error_threshold=self.cfg.end_effector_pos_error_threshold,
             height_only=self.cfg.height_only
         )
+
+    def get_joint_params(self):
+        joint_names = self.robot.data.joint_names
+        joint_effort_limits = self.robot.data.joint_effort_limits[0]
+        joint_pos_limits = self.robot.data.default_joint_limits[0]
+        joint_stiffness = self.robot.data.default_joint_stiffness[0]
+        joint_damping = self.robot.data.default_joint_damping[0]
+        joint_offset = self.action_processer.offset[0]
+        action_scale = self.action_processer.scale
+
+        return {
+            "joint_names": joint_names,
+            "joint_effort_limits": joint_effort_limits,
+            "joint_pos_limits": joint_pos_limits,
+            "joint_stiffness": joint_stiffness,
+            "joint_damping": joint_damping,
+            "joint_offset": joint_offset,
+            "action_scale": action_scale,
+        }
         
     def _setup_scene(self):
         self.robot = Articulation(self.cfg.robot)
@@ -80,6 +97,7 @@ class G1MotionTrackingEnv(DirectRLEnv):
 
     def _apply_action(self):
         self.robot.set_joint_position_target(self.action_processer.target_joint_position)
+        #print(self.robot.data.applied_torque)
         
     def _get_observations(self):
         obs = torch.zeros(1)

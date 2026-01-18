@@ -126,6 +126,8 @@ class Observation:
         target_projected_gravity = quat_apply_inverse(target_quat, gravity_vector)
         robot_projected_gravity = quat_apply_inverse(robot_quat, gravity_vector)
 
+        print(robot_projected_gravity)
+
         robot_ang_vel = robot_state.anchor_ang_vel
         robot_joint_pos = robot_state.joint_pos
         robot_joint_vel = robot_state.joint_vel
