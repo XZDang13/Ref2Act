@@ -62,7 +62,7 @@ class G1MotionTrackingEnv(DirectRLEnv):
         joint_pos_limits = self.robot.data.default_joint_limits[0]
         joint_stiffness = self.robot.data.default_joint_stiffness[0]
         joint_damping = self.robot.data.default_joint_damping[0]
-        joint_offset = self.action_processer.offset[0]
+        action_offset = self.action_processer.offset[0]
         action_scale = self.action_processer.scale
 
         return {
@@ -71,7 +71,7 @@ class G1MotionTrackingEnv(DirectRLEnv):
             "joint_pos_limits": joint_pos_limits,
             "joint_stiffness": joint_stiffness,
             "joint_damping": joint_damping,
-            "joint_offset": joint_offset,
+            "action_offset": action_offset,
             "action_scale": action_scale,
         }
         
@@ -94,13 +94,14 @@ class G1MotionTrackingEnv(DirectRLEnv):
 
     def _pre_physics_step(self, actions: torch.Tensor):
         self.action_processer.pre_process_action(actions)
+        #print(self.action_processer.applied_action[0])
+        #print("-------------")
 
     def _apply_action(self):
         self.robot.set_joint_position_target(self.action_processer.target_joint_position)
         #print(self.robot.data.applied_torque)
         
     def _get_observations(self):
-        obs = torch.zeros(1)
 
         self.reference_motion = self.sampler.sample_next_motions(self.robot._ALL_INDICES, self.robot, self.scene)
         self.reference_motion_viewer.visualize(self.reference_motion)
@@ -159,3 +160,4 @@ class G1MotionTrackingEnv(DirectRLEnv):
 
 
         self.target_pos = self.reference_motion.joint_pos
+

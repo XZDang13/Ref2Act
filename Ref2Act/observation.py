@@ -126,8 +126,6 @@ class Observation:
         target_projected_gravity = quat_apply_inverse(target_quat, gravity_vector)
         robot_projected_gravity = quat_apply_inverse(robot_quat, gravity_vector)
 
-        print(robot_projected_gravity)
-
         robot_ang_vel = robot_state.anchor_ang_vel
         robot_joint_pos = robot_state.joint_pos
         robot_joint_vel = robot_state.joint_vel
@@ -138,6 +136,17 @@ class Observation:
             robot_ang_vel += torch.rand_like(robot_ang_vel) * 0.3
             robot_joint_pos += torch.rand_like(robot_joint_pos) * 0.01
             robot_joint_vel += torch.rand_like(robot_joint_vel) * 0.5
+
+        #print(target_joint_pos[0])
+        #print(target_jiont_vel[0])
+        #print(target_projected_gravity[0])
+
+        #print(robot_projected_gravity[0])
+        #print(robot_ang_vel[0])
+        #print(robot_joint_pos[0])
+        #print(robot_joint_vel[0])
+        #print(last_action[0])
+        #print("--------------------")
 
         obs = torch.cat(
             [
