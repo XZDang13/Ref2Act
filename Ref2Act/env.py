@@ -117,7 +117,8 @@ class G1MotionTrackingEnv(DirectRLEnv):
         return obs
     
     def _get_rewards(self) -> torch.Tensor:
-        reward = self.reward_model.get_task_reward(self.robot, self.reference_motion, self.contact_sensor)
+        reward = self.reward_model.get_task_reward(self.robot, self.reference_motion, self.contact_sensor,
+                                                   self.action_processer)
         
         #mimic_logs = self.reward_model.mimic_reward.get_logs()
 

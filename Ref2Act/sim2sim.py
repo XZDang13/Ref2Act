@@ -44,7 +44,7 @@ def quat_rotate_inverse(q: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
 
 class MujocoEnv:
     def __init__(self, simulation_dt:float, decimation:float,
-                 kp:torch.Tensor, kd:torch.Tensor, effort_limits: torch.Tensor,
+                 kp:torch.Tensor, kd:torch.Tensor, effort_limits: torch.Tensor, joint_pos_limits: torch.Tensor,
                  action_offset: torch.Tensor, action_scale: torch.Tensor,  expert_motion_file:str,
                  root_name:str="pelvis", render:bool=False):
         
@@ -74,6 +74,8 @@ class MujocoEnv:
         self.kp = kp
         self.kd = kd
         self.effort_limits = effort_limits
+        self.joint_pos_limits_lower = joint_pos_limits[:, 0]
+        self.joint_pos_limits_upper = joint_pos_limits[:, 1]
 
         self.action_offset = action_offset
         self.action_scale = action_scale
@@ -84,8 +86,16 @@ class MujocoEnv:
 
         self.n_steps = 0
 
-        for i in range(self.mj_model.njnt):
-            print(i, mujoco.mj_id2name(self.mj_model, mujoco.mjtObj.mjOBJ_JOINT, i))
+        #print("KP:")
+        #print(self.kp)
+        #print("KD")
+        #print(self.kd)
+        #print("Action Offset")
+        #print(self.action_offset)
+        #print("Action Scale")
+        #print(self.action_scale)
+        #print("------------")
+
 
     def get_projected_gravity(self):
         base_quat = torch.from_numpy(self.mj_data.qpos[3:7]).float()
@@ -136,12 +146,12 @@ class MujocoEnv:
         #print(target_joint_pos)
         #print(target_joint_vel)
         #print(target_projected_gravity)
-        #print(projected_gravity)
-        #print(base_ang_vel)
-        #print(joint_pos)
-        #print(joint_vel)
-        #print(self.previous_action)
-        #print("-----------")
+        print(projected_gravity)
+        print(base_ang_vel)
+        print(joint_pos)
+        print(joint_vel)
+        print(self.previous_action)
+        print("-----------")
 
         return torch.cat([
             target_joint_pos,
@@ -181,9 +191,9 @@ class MujocoEnv:
         self.mj_data.qpos[3:7] = root_quat
         self.mj_data.qpos[7:] = joint_positions
 
-        self.mj_data.qvel[:3] = root_linear_vel
-        self.mj_data.qvel[3:6] = root_ang_vel
-        self.mj_data.qvel[6:] = joint_velocities
+        #self.mj_data.qvel[:3] = root_linear_vel
+        #self.mj_data.qvel[3:6] = root_ang_vel
+        #self.mj_data.qvel[6:] = joint_velocities
 
         mujoco.mj_forward(self.mj_model, self.mj_data)
 
@@ -206,19 +216,22 @@ class MujocoEnv:
 
         # PD control
         tau = self.kp * (self.target_pos - joint_pos) - self.kd * joint_vel
+
+        #print(tau)
+
         #print(tau)
         tau_clipped = torch.clip(tau, -self.effort_limits, self.effort_limits)
         tau_clipped = tau_clipped[self.isaac2mujoco]
 
         self.mj_data.ctrl[:] = tau_clipped.numpy()
+        #print(tau_clipped)
 
     def step(self, actions):
         step_start_time = time.perf_counter()
         self.previous_action = actions.clone()
-        self.target_pos = actions * self.action_scale + self.action_offset
-
-        print(self.target_pos)
-
+        target_pos = actions * self.action_scale + self.action_offset
+        self.target_pos = torch.clamp(target_pos, self.joint_pos_limits_lower, self.joint_pos_limits_upper)
+        
         for _ in range(self.decimation):
             self._apply_actions()
             mujoco.mj_step(self.mj_model, self.mj_data)
@@ -229,7 +242,6 @@ class MujocoEnv:
             # viewer was closed manually -> stop touching it
             self.mj_viewer = None
 
-        print(self.get_joint_pos())
         obs = self.get_obs()
 
         time_until_next_step = self.policy_dt - (time.perf_counter() - step_start_time)

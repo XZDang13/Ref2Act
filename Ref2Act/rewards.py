@@ -5,6 +5,7 @@ from isaaclab.assets import Articulation
 from isaaclab.utils.math import quat_error_magnitude
 from isaaclab.sensors import ContactSensor
 from .sampler import ReferenceMotions
+from .action import ActionProcessor
 from .utils import IndexLike
 
 @dataclasses.dataclass
@@ -15,6 +16,7 @@ class PenaltyRewardCfg:
     joint_limit_weight:float = -10.0
     self_collision_weight:float = -1.0
     self_collision_force_threshold:float = 10.0
+    action_rate_weight:float = -1e-1
 
 @dataclasses.dataclass
 class MimicRewardsCfg:
@@ -78,6 +80,7 @@ class RewardsCfg:
     joint_limit_weight:float = -10.0
     self_collision_weight:float = -0.1
     self_collision_force_threshold:float = 1.0
+    action_rate_weight:float = -1e-1
 
 class Rewards:
     def __init__(self, cfg:RewardsCfg):
@@ -89,6 +92,7 @@ class Rewards:
             joint_limit_weight=cfg.joint_limit_weight,
             self_collision_weight=cfg.self_collision_weight,
             self_collision_force_threshold=cfg.self_collision_force_threshold,
+            action_rate_weight=cfg.action_rate_weight,
         )
         mimic_cfg = MimicRewardsCfg(
             anchor_body_index=cfg.anchor_body_index,
@@ -117,8 +121,9 @@ class Rewards:
         robot: Articulation,
         reference_motion: ReferenceMotions,
         contact_sensor: ContactSensor,
+        action_model: ActionProcessor
     ) -> torch.Tensor:
-        regulation_reward = self.regulation_reward.get_reward(robot, contact_sensor)
+        regulation_reward = self.regulation_reward.get_reward(robot, contact_sensor, action_model)
         mimic_reward = self.mimic_reward.get_reward(robot, reference_motion)
         reward_vector = torch.cat([regulation_reward, mimic_reward], dim=-1) * self.cfg.dt
         if self.cfg.return_vector:
@@ -129,10 +134,11 @@ class RegulationReward:
     def __init__(self, cfg:PenaltyRewardCfg):
         self.cfg = cfg
 
-    def get_reward(self, robot:Articulation, contact_sensor: ContactSensor) -> torch.Tensor:
+    def get_reward(self, robot:Articulation, contact_sensor: ContactSensor, action_model: ActionProcessor) -> torch.Tensor:
         joint_acc_penalty = self.joint_acc_l2(robot) * self.cfg.joint_acc_weight
         joint_torque_penalty = self.joint_torque_l2(robot) * self.cfg.joint_torque_wegiht
         joint_limit_penalty = self.joint_limit(robot) * self.cfg.joint_limit_weight
+        action_rate_penalty = self.action_rate_l2(action_model) * self.cfg.action_rate_weight
         self_collision_penalty = self.self_collision_penalty(
             contact_sensor,
             self.cfg.collision_track_body_indices,
@@ -140,7 +146,7 @@ class RegulationReward:
         ) * self.cfg.self_collision_weight
         
         reward = torch.stack(
-            [joint_acc_penalty, joint_torque_penalty, joint_limit_penalty, self_collision_penalty],
+            [joint_acc_penalty, joint_torque_penalty, joint_limit_penalty, self_collision_penalty, action_rate_penalty],
             dim=-1
         )
 
@@ -153,6 +159,9 @@ class RegulationReward:
         reward = torch.sum((last_contact_time < threshold) * first_air, dim=-1)
 
         return reward
+    
+    def action_rate_l2(self, action_model: ActionProcessor) -> torch.Tensor:
+        return torch.sum(torch.square(action_model.applied_action), dim=1)
 
     def self_collision_penalty(
         self,

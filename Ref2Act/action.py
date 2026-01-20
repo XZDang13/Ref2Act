@@ -38,9 +38,21 @@ class ActionProcessor:
         self.joint_up_limit = robot.data.joint_pos_limits[0, :, 1]
         self.offset = robot.data.default_joint_pos
         self.scale = 0.25 * (robot.data.joint_effort_limits[0] / robot.data.default_joint_stiffness[0])
+        '''
+        print("KP:")
+        print(robot.data.joint_stiffness[0])
+        print("KD")
+        print(robot.data.joint_damping[0])
+        print("Action Offset")
+        print(self.offset[0])
+        print("Action Scale")
+        print(self.scale)
+        print("------------")
+        '''
 
     def reset_action_buffer(self, env_ids:IndexLike):
         self.action_buffer.reset(env_ids)
+        self.applied_action[env_ids, :] = 0.0
 
     def scale_action(self, action: torch.Tensor) -> torch.Tensor:
         

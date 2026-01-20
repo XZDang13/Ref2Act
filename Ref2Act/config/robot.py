@@ -2,7 +2,7 @@ from importlib import resources as importlib_resources
 from pathlib import Path
 
 import isaaclab.sim as sim_utils
-from isaaclab.actuators import ImplicitActuatorCfg
+from isaaclab.actuators import ImplicitActuatorCfg, IdealPDActuatorCfg
 from isaaclab.assets.articulation import ArticulationCfg
 
 def _default_assets_root() -> Path:
@@ -82,7 +82,7 @@ G1_CFG = ArticulationCfg(
         ),
         soft_joint_pos_limit_factor=0.9,
         actuators={
-            "legs": ImplicitActuatorCfg(
+            "legs": IdealPDActuatorCfg(
                 joint_names_expr=[
                     ".*_hip_yaw_joint",
                     ".*_hip_roll_joint",
@@ -132,7 +132,7 @@ G1_CFG = ArticulationCfg(
                     ".*_ankle_roll_joint": 2.0 * ARMATURE_5020,
                 },
             ),
-            "bodies": ImplicitActuatorCfg(
+            "bodies": IdealPDActuatorCfg(
                 joint_names_expr=[
                     "waist_yaw_joint",
                 ],
@@ -152,7 +152,7 @@ G1_CFG = ArticulationCfg(
                     "waist_yaw_joint": ARMATURE_7520_14,
                 },
             ),
-            "arms": ImplicitActuatorCfg(
+            "arms": IdealPDActuatorCfg(
                 joint_names_expr=[
                     ".*_shoulder_pitch_joint",
                     ".*_shoulder_roll_joint",

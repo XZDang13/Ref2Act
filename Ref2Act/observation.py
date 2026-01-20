@@ -132,22 +132,22 @@ class Observation:
         last_action = last_applied_action.clone()
 
         if self.add_noise:
-            robot_projected_gravity += torch.rand_like(robot_projected_gravity) * 0.05
-            robot_ang_vel += torch.rand_like(robot_ang_vel) * 0.3
-            robot_joint_pos += torch.rand_like(robot_joint_pos) * 0.01
-            robot_joint_vel += torch.rand_like(robot_joint_vel) * 0.5
+            robot_projected_gravity += torch.empty_like(robot_projected_gravity).uniform_(-0.05, 0.05)
+            robot_ang_vel += torch.empty_like(robot_ang_vel).uniform_(-0.3, 0.3)
+            robot_joint_pos += torch.empty_like(robot_joint_pos).uniform_(-0.01, 0.01)
+            robot_joint_vel += torch.empty_like(robot_joint_vel).uniform_(-0.5, 0.5)
 
         #print(target_joint_pos[0])
         #print(target_jiont_vel[0])
         #print(target_projected_gravity[0])
 
-        #print(robot_projected_gravity[0])
-        #print(robot_ang_vel[0])
-        #print(robot_joint_pos[0])
-        #print(robot_joint_vel[0])
-        #print(last_action[0])
+        #print(robot_projected_gravity)
+        #print(robot_ang_vel)
+        #print(robot_joint_pos)
+        #print("Joint Vel:")
+        #print(robot_joint_vel)
+        #print(last_action)
         #print("--------------------")
-
         obs = torch.cat(
             [
                 target_joint_pos,

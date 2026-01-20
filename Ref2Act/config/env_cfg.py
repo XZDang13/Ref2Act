@@ -44,25 +44,25 @@ class EventCfg:
         },
     )
 
-    rand_robot_mass = EventTerm(
-        func=mdp.randomize_rigid_body_mass,
-        mode="startup",
-        params={
-            "asset_cfg": SceneEntityCfg("robot", body_names=["pelvis",
-                                                             "left_hip_yaw_link",
-                                                             "left_hip_roll_link",
-                                                             "left_hip_pitch_link",
-                                                             "right_hip_yaw_link",
-                                                             "right_hip_roll_link",
-                                                             "right_hip_pitch_link",
-                                                             "torso_link",]
-            ),
-            "mass_distribution_params": (0.7, 1.3),
-            "operation": "scale",
-            "distribution": "uniform"
-        },
-    )
-    
+    #rand_robot_mass = EventTerm(
+    #    func=mdp.randomize_rigid_body_mass,
+    #    mode="startup",
+    #    params={
+    #        "asset_cfg": SceneEntityCfg("robot", body_names=["pelvis",
+    #                                                         "left_hip_yaw_link",
+    #                                                         "left_hip_roll_link",
+    #                                                         "left_hip_pitch_link",
+    #                                                         "right_hip_yaw_link",
+    #                                                         "right_hip_roll_link",
+    #                                                         "right_hip_pitch_link",
+    #                                                         "torso_link",]
+    #            ),
+    #            "mass_distribution_params": (0.7, 1.3),
+    #            "operation": "scale",
+    #            "distribution": "uniform"
+    #        },
+    #    )
+
     rand_base_com = EventTerm(
         func=mdp.randomize_rigid_body_com,
         mode="startup",
@@ -72,18 +72,18 @@ class EventCfg:
         },
     )
     
-    rand_robot_joint_stiffness_and_damping = EventTerm(
-        func=mdp.randomize_actuator_gains,
-        min_step_count_between_reset=200,
-        mode="reset",
-        params={
-            "asset_cfg": SceneEntityCfg("robot", joint_names=".*"),
-            "stiffness_distribution_params": (0.75, 1.5),
-            "damping_distribution_params": (0.75, 1.5),
-            "operation": "scale",
-            "distribution": "uniform",
-        },
-    )
+    #rand_robot_joint_stiffness_and_damping = EventTerm(
+    #    func=mdp.randomize_actuator_gains,
+    #    min_step_count_between_reset=200,
+    #    mode="reset",
+    #    params={
+    #        "asset_cfg": SceneEntityCfg("robot", joint_names=".*"),
+    #        "stiffness_distribution_params": (0.75, 1.5),
+    #        "damping_distribution_params": (0.75, 1.5),
+    #        "operation": "scale",
+    #        "distribution": "uniform",
+    #    },
+    #)
     
     push_robot = EventTerm(
         func=mdp.push_by_setting_velocity,
@@ -111,7 +111,7 @@ class G1MotionTrackingEnvCfg(DirectRLEnvCfg):
 
     expert_motion_file = None
 
-    bin_size = 0.25
+    bin_size = 0.2
     sampler_mod:SamplerMod = SamplerMod.Clamp
 
     root_link_name = "pelvis"
