@@ -105,6 +105,7 @@ class G1MotionTrackingEnvCfg(DirectRLEnvCfg):
     expert_motion_file = None
 
     bin_size = 0.2
+    failure_decay = 0.99
     sampler_mod:SamplerMod = SamplerMod.Clamp
 
     root_link_name = "pelvis"
@@ -207,6 +208,7 @@ class PiPlusMotionTrackingEnvCfg(DirectRLEnvCfg):
     expert_motion_file = None
 
     bin_size = 0.2
+    failure_decay = 1.0
     sampler_mod:SamplerMod = SamplerMod.Clamp
 
     root_link_name = "base_link"

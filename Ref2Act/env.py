@@ -37,8 +37,15 @@ class G1MotionTrackingEnv(DirectRLEnv):
         collision_track_body_indices, _ = self.contact_sensor.find_bodies(self.cfg.collision_track_body_names)
         self.collision_track_body_indices = collision_track_body_indices
 
-        self.sampler = Sampler(self.cfg.scene.num_envs, self.motion_lib,
-                               self.step_dt, anchor_body_index, self.cfg.add_reset_noise, self.cfg.bin_size, self.device)
+        self.sampler = Sampler(
+            self.cfg.scene.num_envs,
+            self.motion_lib,
+            self.step_dt,
+            anchor_body_index,
+            self.cfg.add_reset_noise,
+            self.cfg.bin_size,
+            self.device,
+        )
 
         self.observation_model = Observation(anchor_body_index, key_body_indices, self.cfg.add_obs_noise)
         
@@ -161,4 +168,3 @@ class G1MotionTrackingEnv(DirectRLEnv):
 
 
         self.target_pos = self.reference_motion.joint_pos
-
