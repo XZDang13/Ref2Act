@@ -16,7 +16,7 @@ class PenaltyRewardCfg:
     joint_limit_weight:float = -10.0
     self_collision_weight:float = -1.0
     self_collision_force_threshold:float = 10.0
-    action_rate_weight:float = -1e-1
+    action_rate_weight:float = -1e-3
 
 @dataclasses.dataclass
 class MimicRewardsCfg:
@@ -80,7 +80,7 @@ class RewardsCfg:
     joint_limit_weight:float = -10.0
     self_collision_weight:float = -0.1
     self_collision_force_threshold:float = 1.0
-    action_rate_weight:float = -1e-1
+    action_rate_weight:float = -1e-3
 
 class Rewards:
     def __init__(self, cfg:RewardsCfg):

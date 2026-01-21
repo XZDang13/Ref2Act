@@ -6,7 +6,7 @@ from isaaclab.assets import Articulation
 from isaaclab.envs import DirectRLEnv
 from isaaclab.sensors import ContactSensor
 
-from .config.env_cfg import G1MotionTrackingEnvCfg, ActionMod
+from .config.env_cfg import G1MotionTrackingEnvCfg, PiPlusMotionTrackingEnvCfg, ActionMod
 from .action import ActionProcessor
 from .motion_lib import MotionLib
 from .observation import Observation
@@ -16,7 +16,7 @@ from .visualization import ReferenceMotionViewer
 from .sampler import SamplerMod, Sampler
 
 class G1MotionTrackingEnv(DirectRLEnv):
-    cfg:G1MotionTrackingEnvCfg
+    cfg:G1MotionTrackingEnvCfg|PiPlusMotionTrackingEnvCfg
 
     def __init__(self, cfg, render_mode = None, **kwargs):
         super().__init__(cfg, render_mode, **kwargs)

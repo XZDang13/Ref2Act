@@ -72,7 +72,3 @@ def compute_frame_blend(times: torch.Tensor, duration: float,
     blend = (times - index_0_float * dt) / dt
     blend = torch.round(blend * 1e5) / 1e5
     return index_0, index_1, blend
-
-def add_noise(data: torch.Tensor, noise_scale: float) -> torch.Tensor:
-    data += torch.randn_like(data) * noise_scale
-    return data

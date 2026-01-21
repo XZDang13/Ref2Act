@@ -50,7 +50,7 @@ class GMRMotionData:
         self.root_rot = self.root_rot[:, [3, 0, 1, 2]]
         self.joint_pos = torch.from_numpy(motion_data["dof_pos"]).float().to(self.device)
         self.num_frames = self.joint_pos.size(0)
-        self.render_interval = 2
+        self.render_interval = 1
         self.physic_dt = 1 / (self.render_interval * self.fps)
         self.current_step = 0
 

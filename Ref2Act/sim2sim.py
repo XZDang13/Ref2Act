@@ -8,22 +8,9 @@ import mujoco
 import mujoco_viewer.mujoco_viewer as mjv
 
 from .motion_lib import MotionLib
+from .assets import ASSET_DIR
 
-def _default_assets_root() -> Path:
-    try:
-        assets_root = Path(importlib_resources.files("Ref2Act") / "assets")
-        if assets_root.exists():
-            return assets_root
-    except Exception:
-        pass
-    return Path(__file__).resolve().parent.parent / "assets"
-
-_assets_root = _default_assets_root()
-mujoco_env_xml = str(
-    _assets_root
-    / "G1"
-    / "scene.xml"
-)
+mujoco_env_xml = f"{ASSET_DIR}/G1/scene.xml"
 
 def quat_rotate_inverse(q: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
     """Rotate a vector by the inverse of a quaternion.
@@ -146,12 +133,12 @@ class MujocoEnv:
         #print(target_joint_pos)
         #print(target_joint_vel)
         #print(target_projected_gravity)
-        print(projected_gravity)
-        print(base_ang_vel)
-        print(joint_pos)
-        print(joint_vel)
-        print(self.previous_action)
-        print("-----------")
+        #print(projected_gravity)
+        #print(base_ang_vel)
+        #print(joint_pos)
+        #print(joint_vel)
+        #print(self.previous_action)
+        #print("-----------")
 
         return torch.cat([
             target_joint_pos,
