@@ -162,7 +162,7 @@ class G1MotionTrackingEnv(DirectRLEnv):
             self.action_processer.set_random_offset_noise(env_ids)
 
         if self.cfg.random_start:
-            self.reference_motion = self.sampler.sample_failure_weighted_motions(env_ids, self.robot, self.scene)
+            self.reference_motion = self.sampler.sample_rand_motions(env_ids, self.robot, self.scene)
         else:
             self.reference_motion = self.sampler.sample_start_motions(env_ids, self.robot, self.scene)
 

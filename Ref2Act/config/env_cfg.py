@@ -104,7 +104,7 @@ class G1MotionTrackingEnvCfg(DirectRLEnvCfg):
 
     expert_motion_file = None
 
-    bin_size = 0.2
+    bin_size = 0.3
     failure_decay = 0.99
     sampler_mod:SamplerMod = SamplerMod.Clamp
 

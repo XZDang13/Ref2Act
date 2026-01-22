@@ -16,7 +16,7 @@ class PenaltyRewardCfg:
     joint_limit_weight:float = -10.0
     self_collision_weight:float = -1.0
     self_collision_force_threshold:float = 10.0
-    action_rate_weight:float = -1e-3
+    action_rate_weight:float = -1e-2
 
 @dataclasses.dataclass
 class MimicRewardsCfg:
