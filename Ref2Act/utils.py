@@ -63,12 +63,14 @@ def slerp(
     new_q = torch.where(torch.abs(cos_half_theta) >= 1, q0, new_q)
     return new_q
 
-def compute_frame_blend(times: torch.Tensor, duration: float,
-                        num_frames: int, dt: float) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def compute_frame_blend(times: torch.Tensor,
+                        duration: float,
+                        num_frames: int):
     phase = torch.clamp(times / duration, 0.0, 1.0)
-    index_0 = torch.round(phase * (num_frames - 1)).to(torch.long)
+    frame = phase * (num_frames - 1)
+
+    index_0 = torch.floor(frame).long()
     index_1 = torch.clamp(index_0 + 1, max=num_frames - 1)
-    index_0_float = index_0.to(times.dtype)
-    blend = (times - index_0_float * dt) / dt
-    blend = torch.round(blend * 1e5) / 1e5
+    blend = frame - index_0
+
     return index_0, index_1, blend

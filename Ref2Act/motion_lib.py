@@ -45,7 +45,7 @@ class MotionLib:
     ) -> dict[str: torch.Tensor]:
         
         index_0, index_1, blend = compute_frame_blend(
-            times, self.duration, self.num_frames, self.dt
+            times, self.duration, self.num_frames
         )
 
         index_0 = index_0.to(device=self.device)

@@ -167,7 +167,7 @@ class MujocoEnv:
         body_angular_velocities = reference_motion["body_angular_velocities"].squeeze(0).numpy()
 
         root_pos = body_positions[self.root_index]
-        #root_pos[2] += 0.50
+        root_pos[2] += 0.05
         root_quat = body_rotations[self.root_index]
         root_linear_vel = body_linear_velocities[self.root_index]
         root_ang_vel = body_angular_velocities[self.root_index]

@@ -55,7 +55,7 @@ G1_CFG = ArticulationCfg(
         ),
         soft_joint_pos_limit_factor=0.9,
         actuators={
-            "legs": IdealPDActuatorCfg(
+            "legs": ImplicitActuatorCfg(
                 joint_names_expr=[
                     ".*_hip_yaw_joint",
                     ".*_hip_roll_joint",
@@ -105,7 +105,7 @@ G1_CFG = ArticulationCfg(
                     ".*_ankle_roll_joint": 2.0 * ARMATURE_5020,
                 },
             ),
-            "bodies": IdealPDActuatorCfg(
+            "bodies": ImplicitActuatorCfg(
                 joint_names_expr=[
                     "waist_yaw_joint",
                 ],
@@ -125,7 +125,7 @@ G1_CFG = ArticulationCfg(
                     "waist_yaw_joint": ARMATURE_7520_14,
                 },
             ),
-            "arms": IdealPDActuatorCfg(
+            "arms": ImplicitActuatorCfg(
                 joint_names_expr=[
                     ".*_shoulder_pitch_joint",
                     ".*_shoulder_roll_joint",
