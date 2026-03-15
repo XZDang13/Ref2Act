@@ -94,6 +94,9 @@ class G1MotionTrackingEnvCfg(DirectRLEnvCfg):
 
     observation_space = 124
     policy_observation_space = 124
+    motion_observation_space = 49
+    robot_observation_space = 75
+
     critic_observation_space = 256
     action_space = 23
     state_space = 0
