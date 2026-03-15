@@ -105,9 +105,12 @@ class Observation:
         robot_state = self.get_robot_state(robot, scene)
         reference_state = self.get_reference_motion_state(reference_motion, scene)
 
-        obs["policy"] = self.get_policy_observation(robot_state, reference_state, robot.data.GRAVITY_VEC_W, last_applied_actions)
-        obs["critic"] = self.get_critic_observation(robot_state, reference_state, last_applied_actions)
+        motion_obs, robot_obs = self.get_policy_observation(robot_state, reference_state, robot.data.GRAVITY_VEC_W, last_applied_actions)
+        privilege_obs = self.get_critic_observation(robot_state, reference_state, last_applied_actions)
         
+        obs["motion"] = motion_obs
+        obs["robot"] = robot_obs
+        obs["privilege"] = privilege_obs
 
         return obs
     
@@ -148,11 +151,16 @@ class Observation:
         #print(robot_joint_vel)
         #print(last_action)
         #print("--------------------")
-        obs = torch.cat(
+        motion_obs = torch.cat(
             [
-                target_joint_pos,
-                target_jiont_vel,
                 target_projected_gravity,
+                target_joint_pos,
+                target_jiont_vel
+            ], dim=-1
+        )
+
+        robot_obs = torch.cat(
+            [
                 robot_projected_gravity,
                 robot_ang_vel,
                 robot_joint_pos,
@@ -161,7 +169,8 @@ class Observation:
             ], dim=-1
         )
 
-        return obs
+
+        return motion_obs, robot_obs
     
     def get_critic_observation(self,
                                robot_state: MotionState,
