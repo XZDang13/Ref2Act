@@ -13,15 +13,30 @@ from .observation import Observation
 from .rewards import Rewards, RewardsCfg
 from .termination import Termination
 from .visualization import ReferenceMotionViewer
-from .sampler import SamplerMod, Sampler
+from .sampler import Sampler, SamplingStrategy
 
 class G1MotionTrackingEnv(DirectRLEnv):
-    cfg:G1MotionTrackingEnvCfg|PiPlusMotionTrackingEnvCfg
+    cfg: G1MotionTrackingEnvCfg | PiPlusMotionTrackingEnvCfg
+    _REFERENCE_MOTION_FIELDS = (
+        "joint_pos",
+        "joint_vel",
+        "body_positions",
+        "body_quaternions",
+        "body_linear_velocities",
+        "body_angular_velocities",
+        "robot_body_positions",
+        "robot_body_quaternions",
+        "body_pos_relative",
+        "body_quat_relative",
+    )
 
-    def __init__(self, cfg, render_mode = None, **kwargs):
+    def __init__(self, cfg, render_mode=None, **kwargs):
         super().__init__(cfg, render_mode, **kwargs)
 
-        self.action_processer = ActionProcessor(self.robot, self.cfg.action_buffer_length, self.cfg.action_noise)
+        action_history_length = self.cfg.action_buffer_length
+        if hasattr(self.cfg, "action_latency_range"):
+            action_history_length = max(action_history_length, self.cfg.action_latency_range[1] + 1)
+        self.action_processer = ActionProcessor(self.robot, action_history_length, self.cfg.action_noise)
         if self.cfg.action_mod == ActionMod.Median:
             self.action_processer.set_median_scale_offset(self.robot)
         elif self.cfg.action_mod == ActionMod.Offset:
@@ -44,8 +59,11 @@ class G1MotionTrackingEnv(DirectRLEnv):
             anchor_body_index,
             self.cfg.add_reset_noise,
             self.cfg.bin_size,
+            self.cfg.failure_decay,
             self.device,
         )
+        if self._get_sampling_strategy() == SamplingStrategy.FailureWeighted and self.cfg.bin_size is None:
+            raise ValueError("Failure-weighted sampling requires cfg.bin_size to be set.")
 
         self.observation_model = Observation(anchor_body_index, key_body_indices, self.cfg.add_obs_noise)
         
@@ -62,6 +80,31 @@ class G1MotionTrackingEnv(DirectRLEnv):
             end_effector_pos_error_threshold=self.cfg.end_effector_pos_error_threshold,
             height_only=self.cfg.height_only
         )
+
+    def _store_reference_motion(self, env_ids: torch.Tensor, reference_motion) -> None:
+        if not hasattr(self, "reference_motion") or len(env_ids) == self.num_envs:
+            self.reference_motion = reference_motion
+            return
+
+        for field_name in self._REFERENCE_MOTION_FIELDS:
+            current_value = getattr(self.reference_motion, field_name)
+            updated_value = getattr(reference_motion, field_name)
+            if current_value is None or updated_value is None:
+                setattr(self.reference_motion, field_name, updated_value)
+                continue
+            current_value[env_ids] = updated_value
+
+    def _advance_reference_motion(self) -> None:
+        reference_motion = self.sampler.sample_next_motions(self.robot._ALL_INDICES, self.robot, self.scene)
+        self._store_reference_motion(self.robot._ALL_INDICES, reference_motion)
+
+    def _get_sampling_strategy(self) -> SamplingStrategy:
+        strategy = getattr(self.cfg, "sampling_strategy", None)
+        if strategy is not None:
+            return strategy
+        if getattr(self.cfg, "random_start", False):
+            return SamplingStrategy.Random
+        return SamplingStrategy.Start
 
     def get_joint_params(self):
         joint_names = self.robot.data.joint_names
@@ -100,6 +143,9 @@ class G1MotionTrackingEnv(DirectRLEnv):
         light_cfg.func("/World/Light", light_cfg)
 
     def _pre_physics_step(self, actions: torch.Tensor):
+        # Keep rewards, dones, and the returned observations aligned to the same
+        # reference frame for the current environment step.
+        self._advance_reference_motion()
         self.action_processer.pre_process_action(actions)
         #print(self.action_processer.applied_action[0])
         #print("-------------")
@@ -109,8 +155,6 @@ class G1MotionTrackingEnv(DirectRLEnv):
         #print(self.robot.data.applied_torque)
         
     def _get_observations(self):
-
-        self.reference_motion = self.sampler.sample_next_motions(self.robot._ALL_INDICES, self.robot, self.scene)
         self.reference_motion_viewer.visualize(self.reference_motion)
 
         self.previous_actions = self.action_processer.applied_action.clone()
@@ -161,10 +205,14 @@ class G1MotionTrackingEnv(DirectRLEnv):
         if self.cfg.add_action_noise:
             self.action_processer.set_random_offset_noise(env_ids)
 
-        if self.cfg.random_start:
-            self.reference_motion = self.sampler.sample_rand_motions(env_ids, self.robot, self.scene)
-        else:
-            self.reference_motion = self.sampler.sample_start_motions(env_ids, self.robot, self.scene)
+        reference_motion = self.sampler.sample_reset_motions(
+            env_ids,
+            self.robot,
+            self.scene,
+            strategy=self._get_sampling_strategy(),
+            min_weight=self.cfg.failure_weight_min,
+            temperature=self.cfg.failure_temperature,
+        )
 
-
+        self._store_reference_motion(env_ids, reference_motion)
         self.target_pos = self.reference_motion.joint_pos

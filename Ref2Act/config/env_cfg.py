@@ -13,77 +13,316 @@ from isaaclab.sensors import ContactSensorCfg
 from isaaclab.markers import VisualizationMarkersCfg
 from isaaclab.markers.config import FRAME_MARKER_CFG
 from .robot import G1_CFG, PI_PLUS_CFG
-from ..sampler import SamplerMod
+from ..domain_randomization import (
+    randomize_action_latency,
+    randomize_group_actuator_gains,
+    randomize_group_body_masses,
+    randomize_rigid_body_collider_offsets_by_body,
+    randomize_rigid_body_com_from_default,
+)
+from ..sampler import SamplerMod, SamplingStrategy
 
-VELOCITY_RANGE = {
-    "x": (-0.5, 0.5),
-    "y": (-0.5, 0.5),
-    "z": (-0.2, 0.2),
-    "roll": (-0.52, 0.52),
-    "pitch": (-0.52, 0.52),
-    "yaw": (-0.78, 0.78),
+G1_ACTION_LATENCY_RANGE = (0, 2)
+PI_PLUS_ACTION_LATENCY_RANGE = (0, 2)
+
+G1_PUSH_VELOCITY_RANGE = {
+    "x": (-0.3, 0.3),
+    "y": (-0.3, 0.3),
+    "yaw": (-0.4, 0.4),
 }
+
+PI_PLUS_PUSH_VELOCITY_RANGE = {
+    "x": (-0.2, 0.2),
+    "y": (-0.2, 0.2),
+    "yaw": (-0.3, 0.3),
+}
+
+G1_CONTACT_BODIES = "left_ankle_roll_link|right_ankle_roll_link|left_rubber_hand|right_rubber_hand"
+PI_PLUS_CONTACT_BODIES = "l_ankle_roll_link|r_ankle_roll_link|l_wrist_link|r_wrist_link"
+
+G1_LEG_JOINTS = ".*_hip_.*_joint|.*_knee_joint|.*_ankle_.*_joint"
+G1_TORSO_JOINTS = "waist_yaw_joint"
+G1_ARM_JOINTS = ".*_shoulder_.*_joint|.*_elbow_joint|.*_wrist_.*"
+
+PI_PLUS_LEG_JOINTS = ".*_thigh_joint|.*_hip_roll_joint|.*_hip_pitch_joint|.*_calf_joint|.*_ankle_.*_joint"
+PI_PLUS_ARM_JOINTS = ".*_shoulder_.*_joint|.*_upper_arm_joint|.*_elbow_joint|.*_wrist_joint"
+
 
 class ActionMod(Enum):
     Median = 0
     Offset = 1
 
+
 @configclass
-class EventCfg:
-    """Configuration for randomization."""
+class G1DomainRandCfg:
+    """Structured domain randomization for the G1 robot."""
 
     physics_material = EventTerm(
         func=mdp.randomize_rigid_body_material,
         mode="startup",
         params={
-            "asset_cfg": SceneEntityCfg("robot", body_names=".*"),
-            "static_friction_range": (0.3, 1.6),
-            "dynamic_friction_range": (0.3, 1.2),
-            "restitution_range": (0.0, 0.5),
+            "asset_cfg": SceneEntityCfg("robot", body_names=G1_CONTACT_BODIES),
+            "static_friction_range": (0.6, 1.3),
+            "dynamic_friction_range": (0.5, 1.1),
+            "restitution_range": (0.0, 0.1),
             "num_buckets": 64,
+            "make_consistent": True,
         },
     )
 
     rand_robot_mass = EventTerm(
-        func=mdp.randomize_rigid_body_mass,
+        func=randomize_group_body_masses,
         mode="startup",
         params={
-            "asset_cfg": SceneEntityCfg("robot", body_names=".*"
-                ),
-                "mass_distribution_params": (0.7, 1.3),
-                "operation": "scale",
-                "distribution": "uniform"
-            },
-        )
-
-    rand_base_com = EventTerm(
-        func=mdp.randomize_rigid_body_com,
-        mode="startup",
-        params={
-            "asset_cfg": SceneEntityCfg("robot", body_names="torso_link"),
-            "com_range": {"x": (-0.025, 0.025), "y": (-0.05, 0.05), "z": (-0.05, 0.05)},
+            "base_cfg": SceneEntityCfg("robot", body_names="pelvis|torso_link"),
+            "base_scale_range": (0.95, 1.05),
+            "legs_cfg": SceneEntityCfg("robot", body_names=".*hip.*|.*knee.*|.*ankle.*"),
+            "legs_scale_range": (0.9, 1.1),
+            "arms_cfg": SceneEntityCfg("robot", body_names=".*shoulder.*|.*elbow.*|.*wrist.*|.*hand.*"),
+            "arms_scale_range": (0.9, 1.1),
         },
     )
-    
-    rand_robot_joint_stiffness_and_damping = EventTerm(
-        func=mdp.randomize_actuator_gains,
-        min_step_count_between_reset=200,
-        mode="reset",
+
+    rand_base_com = EventTerm(
+        func=randomize_rigid_body_com_from_default,
+        mode="startup",
         params={
-            "asset_cfg": SceneEntityCfg("robot", joint_names=".*"),
-            "stiffness_distribution_params": (0.75, 1.5),
-            "damping_distribution_params": (0.75, 1.5),
+            "asset_cfg": SceneEntityCfg("robot", body_names="pelvis"),
+            "com_range": {"x": (-0.015, 0.015), "y": (-0.02, 0.02), "z": (-0.015, 0.015)},
+        },
+    )
+
+    rand_contact_offsets = EventTerm(
+        func=randomize_rigid_body_collider_offsets_by_body,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", body_names=G1_CONTACT_BODIES),
+            "rest_offset_range": (0.0, 0.002),
+            "contact_offset_range": (0.004, 0.012),
+            "min_contact_gap": 5e-4,
+        },
+    )
+
+    rand_leg_joint_friction = EventTerm(
+        func=mdp.randomize_joint_parameters,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", joint_names=G1_LEG_JOINTS),
+            "friction_distribution_params": (0.0, 0.04),
+            "operation": "abs",
+            "distribution": "uniform",
+        },
+    )
+
+    rand_arm_joint_friction = EventTerm(
+        func=mdp.randomize_joint_parameters,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", joint_names=G1_ARM_JOINTS),
+            "friction_distribution_params": (0.0, 0.02),
+            "operation": "abs",
+            "distribution": "uniform",
+        },
+    )
+
+    rand_torso_joint_friction = EventTerm(
+        func=mdp.randomize_joint_parameters,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", joint_names=G1_TORSO_JOINTS),
+            "friction_distribution_params": (0.0, 0.03),
+            "operation": "abs",
+            "distribution": "uniform",
+        },
+    )
+
+    rand_leg_joint_armature = EventTerm(
+        func=mdp.randomize_joint_parameters,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", joint_names=G1_LEG_JOINTS),
+            "armature_distribution_params": (0.92, 1.08),
             "operation": "scale",
             "distribution": "uniform",
         },
     )
 
+    rand_arm_joint_armature = EventTerm(
+        func=mdp.randomize_joint_parameters,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", joint_names=G1_ARM_JOINTS),
+            "armature_distribution_params": (0.9, 1.1),
+            "operation": "scale",
+            "distribution": "uniform",
+        },
+    )
+
+    rand_torso_joint_armature = EventTerm(
+        func=mdp.randomize_joint_parameters,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", joint_names=G1_TORSO_JOINTS),
+            "armature_distribution_params": (0.95, 1.05),
+            "operation": "scale",
+            "distribution": "uniform",
+        },
+    )
+
+    rand_robot_joint_stiffness_and_damping = EventTerm(
+        func=randomize_group_actuator_gains,
+        mode="startup",
+        params={
+            "legs_cfg": SceneEntityCfg("robot", joint_names=G1_LEG_JOINTS),
+            "legs_scale_range": (0.9, 1.1),
+            "torso_cfg": SceneEntityCfg("robot", joint_names=G1_TORSO_JOINTS),
+            "torso_scale_range": (0.9, 1.08),
+            "arms_cfg": SceneEntityCfg("robot", joint_names=G1_ARM_JOINTS),
+            "arms_scale_range": (0.9, 1.1),
+        },
+    )
+
+    rand_action_latency = EventTerm(
+        func=randomize_action_latency,
+        mode="reset",
+        params={"latency_range": G1_ACTION_LATENCY_RANGE},
+    )
+
+
+@configclass
+class G1TrainingEventCfg(G1DomainRandCfg):
+    """Training events for the G1 robot."""
+
     push_robot = EventTerm(
         func=mdp.push_by_setting_velocity,
         mode="interval",
-        interval_range_s=(1.0, 3.0),
-        params={"velocity_range": VELOCITY_RANGE},
+        interval_range_s=(2.0, 4.0),
+        params={"velocity_range": G1_PUSH_VELOCITY_RANGE},
     )
+
+@configclass
+class PiPlusDomainRandCfg:
+    """Structured domain randomization for the PiPlus robot."""
+
+    physics_material = EventTerm(
+        func=mdp.randomize_rigid_body_material,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", body_names=PI_PLUS_CONTACT_BODIES),
+            "static_friction_range": (0.6, 1.2),
+            "dynamic_friction_range": (0.5, 1.0),
+            "restitution_range": (0.0, 0.08),
+            "num_buckets": 64,
+            "make_consistent": True,
+        },
+    )
+
+    rand_robot_mass = EventTerm(
+        func=randomize_group_body_masses,
+        mode="startup",
+        params={
+            "base_cfg": SceneEntityCfg("robot", body_names="base_link"),
+            "base_scale_range": (0.95, 1.05),
+            "legs_cfg": SceneEntityCfg("robot", body_names=".*hip.*|.*thigh.*|.*calf.*|.*ankle.*"),
+            "legs_scale_range": (0.9, 1.1),
+            "arms_cfg": SceneEntityCfg("robot", body_names=".*shoulder.*|.*upper_arm.*|.*elbow.*|.*wrist.*"),
+            "arms_scale_range": (0.9, 1.1),
+        },
+    )
+
+    rand_base_com = EventTerm(
+        func=randomize_rigid_body_com_from_default,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", body_names="base_link"),
+            "com_range": {"x": (-0.01, 0.01), "y": (-0.015, 0.015), "z": (-0.01, 0.01)},
+        },
+    )
+
+    rand_contact_offsets = EventTerm(
+        func=randomize_rigid_body_collider_offsets_by_body,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", body_names=PI_PLUS_CONTACT_BODIES),
+            "rest_offset_range": (0.0, 0.0015),
+            "contact_offset_range": (0.003, 0.01),
+            "min_contact_gap": 5e-4,
+        },
+    )
+
+    rand_leg_joint_friction = EventTerm(
+        func=mdp.randomize_joint_parameters,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", joint_names=PI_PLUS_LEG_JOINTS),
+            "friction_distribution_params": (0.0, 0.03),
+            "operation": "abs",
+            "distribution": "uniform",
+        },
+    )
+
+    rand_arm_joint_friction = EventTerm(
+        func=mdp.randomize_joint_parameters,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", joint_names=PI_PLUS_ARM_JOINTS),
+            "friction_distribution_params": (0.0, 0.02),
+            "operation": "abs",
+            "distribution": "uniform",
+        },
+    )
+
+    rand_leg_joint_armature = EventTerm(
+        func=mdp.randomize_joint_parameters,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", joint_names=PI_PLUS_LEG_JOINTS),
+            "armature_distribution_params": (0.94, 1.06),
+            "operation": "scale",
+            "distribution": "uniform",
+        },
+    )
+
+    rand_arm_joint_armature = EventTerm(
+        func=mdp.randomize_joint_parameters,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", joint_names=PI_PLUS_ARM_JOINTS),
+            "armature_distribution_params": (0.92, 1.08),
+            "operation": "scale",
+            "distribution": "uniform",
+        },
+    )
+
+    rand_robot_joint_stiffness_and_damping = EventTerm(
+        func=randomize_group_actuator_gains,
+        mode="startup",
+        params={
+            "legs_cfg": SceneEntityCfg("robot", joint_names=PI_PLUS_LEG_JOINTS),
+            "legs_scale_range": (0.92, 1.08),
+            "arms_cfg": SceneEntityCfg("robot", joint_names=PI_PLUS_ARM_JOINTS),
+            "arms_scale_range": (0.92, 1.08),
+        },
+    )
+
+    rand_action_latency = EventTerm(
+        func=randomize_action_latency,
+        mode="reset",
+        params={"latency_range": PI_PLUS_ACTION_LATENCY_RANGE},
+    )
+
+
+@configclass
+class PiPlusTrainingEventCfg(PiPlusDomainRandCfg):
+    """Training events for the PiPlus robot."""
+
+    push_robot = EventTerm(
+        func=mdp.push_by_setting_velocity,
+        mode="interval",
+        interval_range_s=(2.5, 4.5),
+        params={"velocity_range": PI_PLUS_PUSH_VELOCITY_RANGE},
+    )
+
 
 @configclass
 class G1MotionTrackingEnvCfg(DirectRLEnvCfg):
@@ -101,7 +340,8 @@ class G1MotionTrackingEnvCfg(DirectRLEnvCfg):
     action_space = 23
     state_space = 0
 
-    action_buffer_length = 1
+    action_buffer_length = G1_ACTION_LATENCY_RANGE[1] + 1
+    action_latency_range = G1_ACTION_LATENCY_RANGE
     action_mod = ActionMod.Median
     action_noise = 0.01
 
@@ -109,6 +349,9 @@ class G1MotionTrackingEnvCfg(DirectRLEnvCfg):
 
     bin_size = 0.3
     failure_decay = 0.99
+    failure_weight_min = 0.001
+    failure_temperature = 1.0
+    sampling_strategy: SamplingStrategy | None = None
     sampler_mod:SamplerMod = SamplerMod.Clamp
 
     root_link_name = "pelvis"
@@ -185,6 +428,8 @@ class G1MotionTrackingEnvCfg(DirectRLEnvCfg):
         num_envs=4096, env_spacing=4.0, replicate_physics=True
     )
 
+    events: G1TrainingEventCfg = G1TrainingEventCfg()
+
     robot:ArticulationCfg = G1_CFG.replace(prim_path="/World/envs/env_.*/Robot")
 
     contact_sensor = ContactSensorCfg(
@@ -204,7 +449,8 @@ class PiPlusMotionTrackingEnvCfg(DirectRLEnvCfg):
     action_space = 23
     state_space = 0
 
-    action_buffer_length = 1
+    action_buffer_length = PI_PLUS_ACTION_LATENCY_RANGE[1] + 1
+    action_latency_range = PI_PLUS_ACTION_LATENCY_RANGE
     action_mod = ActionMod.Median
     action_noise = 0.01
 
@@ -212,6 +458,9 @@ class PiPlusMotionTrackingEnvCfg(DirectRLEnvCfg):
 
     bin_size = 0.2
     failure_decay = 1.0
+    failure_weight_min = 0.001
+    failure_temperature = 1.0
+    sampling_strategy: SamplingStrategy | None = None
     sampler_mod:SamplerMod = SamplerMod.Clamp
 
     root_link_name = "base_link"
@@ -287,6 +536,8 @@ class PiPlusMotionTrackingEnvCfg(DirectRLEnvCfg):
     scene:InteractiveSceneCfg = InteractiveSceneCfg(
         num_envs=4096, env_spacing=4.0, replicate_physics=True
     )
+
+    events: PiPlusTrainingEventCfg = PiPlusTrainingEventCfg()
 
     robot:ArticulationCfg = PI_PLUS_CFG.replace(prim_path="/World/envs/env_.*/Robot")
 

@@ -1,31 +1,26 @@
 import argparse
-from isaaclab.app import AppLauncher
-
-parser = argparse.ArgumentParser(
-    description="This script demonstrates adding a custom robot to an Isaac Lab environment."
-)
-parser.add_argument("--input_file", "-f", type=str, required=True, help="path of gmr pkl file.")
-parser.add_argument("--output_file", type=str, help="The name of the motion npz file.")
-parser.add_argument("--height_offset", type=float, default=0.0, help="Offset to root z position.")
-
-AppLauncher.add_app_launcher_args(parser)
-
-args_cli = parser.parse_args()
-
-
-app_launcher = AppLauncher(args_cli)
-
-simulation_app = app_launcher.app
-
 import pickle
+from pathlib import Path
+
 import numpy as np
 
 import torch
-import isaaclab.sim as sim_utils
-from isaaclab.scene import InteractiveScene
-from isaaclab.utils.math import quat_mul, quat_conjugate, axis_angle_from_quat
+from isaaclab.app import AppLauncher
 
-from .config.env_cfg import MotionViewerCfg, JOINT_ORDER
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Convert a GMR pickle motion file into the Ref2Act .npz format."
+    )
+    parser.add_argument("--input_file", "-f", type=str, required=True, help="Path to a GMR .pkl file.")
+    parser.add_argument(
+        "--output_file",
+        type=str,
+        help="Output .npz file. Defaults to the input path with an .npz suffix.",
+    )
+    parser.add_argument("--height_offset", type=float, default=0.0, help="Offset to root z position.")
+    AppLauncher.add_app_launcher_args(parser)
+    return parser
 
 class NumpyCompatUnpickler(pickle.Unpickler):
     def find_class(self, module, name):
@@ -35,12 +30,12 @@ class NumpyCompatUnpickler(pickle.Unpickler):
         return super().find_class(module, name)
 
 class GMRMotionData:
-    def __init__(self, file: str, device:torch.device, height_offset:float=0.0):
+    def __init__(self, file: str, device: torch.device, joint_order: list[str], height_offset: float = 0.0):
         with open(file, "rb") as f:
             motion_data = NumpyCompatUnpickler(f).load()
 
         self.device = device
-        self.joint_order = JOINT_ORDER
+        self.joint_order = joint_order
         print(motion_data["fps"])
         self.fps = round(motion_data["fps"])
         self.offset = torch.zeros(3).to(self.device)
@@ -60,7 +55,8 @@ class GMRMotionData:
 
 
     def _so3_derivative(self, rotations: torch.Tensor, dt: float) -> torch.Tensor:
-        
+        from isaaclab.utils.math import quat_mul, quat_conjugate, axis_angle_from_quat
+
         q_prev, q_next = rotations[:-2], rotations[2:]
         q_rel = quat_mul(q_next, quat_conjugate(q_prev))  # shape (B−2, 4)
 
@@ -90,7 +86,7 @@ def is_contact(net_contact_forces, body_ids):
 
     print(is_contact)
 
-def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene, motion_data:GMRMotionData):
+def run_simulator(sim, scene, motion_data: GMRMotionData, simulation_app, output_file: Path):
     robot = scene["robot"]
     contact_sensors = scene["contact_sensor"]
     joint_indices = robot.find_joints(motion_data.joint_order, preserve_order=True)[0]
@@ -161,27 +157,39 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene, mot
                     log[k] = np.stack(log[k], axis=0)
 
 
-                np.savez(args_cli.output_file, **log)
-                print("[INFO]: Motion npz file saved to", args_cli.output_file)
+                np.savez(output_file, **log)
+                print("[INFO]: Motion npz file saved to", output_file)
 
-def main():
-    # Initialize the simulation context
-    motion_data = GMRMotionData(args_cli.input_file, args_cli.device, args_cli.height_offset)
+def main(argv: list[str] | None = None):
+    args_cli = build_parser().parse_args(argv)
+    output_file = Path(args_cli.output_file) if args_cli.output_file else Path(args_cli.input_file).with_suffix(".npz")
 
-    dt = motion_data.physic_dt
-    render_interval = motion_data.render_interval
+    app_launcher = AppLauncher(args_cli)
+    simulation_app = app_launcher.app
 
-    sim_cfg = sim_utils.SimulationCfg(dt=dt, render_interval=render_interval, device=args_cli.device)
-    sim = sim_utils.SimulationContext(sim_cfg)
+    try:
+        import isaaclab.sim as sim_utils
+        from isaaclab.scene import InteractiveScene
 
-    scene_cfg = MotionViewerCfg(1, env_spacing=2.0)
-    scene = InteractiveScene(scene_cfg)
+        from .config.env_cfg import MotionViewerCfg, JOINT_ORDER
 
-    sim.reset()
-    print("[INFO]: Setup complete...")
+        motion_data = GMRMotionData(args_cli.input_file, args_cli.device, JOINT_ORDER, args_cli.height_offset)
 
-    run_simulator(sim, scene, motion_data)
+        dt = motion_data.physic_dt
+        render_interval = motion_data.render_interval
+
+        sim_cfg = sim_utils.SimulationCfg(dt=dt, render_interval=render_interval, device=args_cli.device)
+        sim = sim_utils.SimulationContext(sim_cfg)
+
+        scene_cfg = MotionViewerCfg(1, env_spacing=2.0)
+        scene = InteractiveScene(scene_cfg)
+
+        sim.reset()
+        print("[INFO]: Setup complete...")
+
+        run_simulator(sim, scene, motion_data, simulation_app, output_file)
+    finally:
+        simulation_app.close()
 
 if __name__ == "__main__":
     main()
-    simulation_app.close()

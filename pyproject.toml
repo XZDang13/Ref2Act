@@ -4,7 +4,29 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "Ref2Act"
-version = "0.1.0"
+version = "0.2.1"
+description = "Motion-tracking environments built on Isaac Lab."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "gymnasium",
+    "isaaclab",
+    "matplotlib",
+    "numpy",
+    "torch",
+]
+
+[project.optional-dependencies]
+sim2sim = ["mujoco"]
 
 [project.scripts]
 convert = "Ref2Act.convert_gmr_data:main"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["Ref2Act*"]
+
+[tool.setuptools.package-data]
+Ref2Act = ["assets/**/*"]
