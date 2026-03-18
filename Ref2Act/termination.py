@@ -67,7 +67,7 @@ class Termination:
         return (dist > self.end_effector_pos_error_threshold).any(dim=1)  # [B]
     
     def end_of_motion(self, sampler: Sampler) -> torch.Tensor:
-        return sampler.current_times >= sampler.duration
+        return sampler.current_times >= sampler.get_current_durations()
 
     def get_dones(
         self,

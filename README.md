@@ -50,6 +50,9 @@ env = G1MotionTrackingEnv(cfg)
 obs, info = env.reset()
 ```
 
+`cfg.expert_motion_file` also accepts a sequence of `.npz` paths, in which case each
+environment samples a clip ID plus a local time inside that clip.
+
 The default configs are tuned for large Isaac Lab runs. Lower `cfg.scene.num_envs` for local
 debugging before attempting full-scale training.
 

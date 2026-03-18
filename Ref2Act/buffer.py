@@ -105,9 +105,11 @@ class DequeBuffer:
         x = x.to(device=self.device, dtype=self.buffer.dtype)
         assert x.shape == (self.B, *self.size), f"x must be {(self.B, *self.size)}, got {tuple(x.shape)}"
 
-        # shift left (drop oldest), write newest at end
-        self.buffer[:, :-1] = self.buffer[:, 1:]
-        self.buffer[:, -1] = x
+        # Shift left (drop oldest), then write the newest step.
+        # Clone the source view first so PyTorch does not reject the overlapping write.
+        if self.T > 1:
+            self.buffer[:, :-1].copy_(self.buffer[:, 1:].clone())
+        self.buffer[:, -1].copy_(x)
 
         self.valid_len = torch.minimum(self.valid_len + 1, torch.tensor(self.T, device=self.device))
 

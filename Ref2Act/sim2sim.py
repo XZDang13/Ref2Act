@@ -51,6 +51,7 @@ class MujocoEnv:
 
         self.motion_lib = MotionLib(expert_motion_file)
         self.root_index = self.motion_lib.body_names.index(root_name)
+        self.motion_id = torch.zeros(1, dtype=torch.long)
 
         self.gravity_vector = torch.tensor([0.0, 0.0, -1.0]).float()
         self.previous_action = torch.zeros(23).float()
@@ -104,7 +105,8 @@ class MujocoEnv:
         return joint_vel
     
     def get_motion_command(self, times):
-        reference_motion = self.motion_lib.sample_motion(times)
+        motion_ids = torch.full(times.shape, int(self.motion_id.item()), dtype=torch.long)
+        reference_motion = self.motion_lib.sample_motion(motion_ids=motion_ids, times=times)
 
         joint_pos = reference_motion["joint_pos"].squeeze(0)
         joint_vel = reference_motion["joint_vel"].squeeze(0)
@@ -119,7 +121,8 @@ class MujocoEnv:
         
         self.times += self.policy_dt
 
-        if self.times > self.motion_lib.duration:
+        current_duration = self.motion_lib.get_duration(self.motion_id).squeeze(0)
+        if self.times.item() > current_duration.item():
             self.times = torch.zeros(1)
             self.previous_action[:] = 0.0
 
@@ -155,9 +158,10 @@ class MujocoEnv:
         mujoco.mj_resetData(self.mj_model, self.mj_data)
 
         self.previous_action[:] = 0.0
+        self.motion_id.zero_()
         self.times = torch.zeros(1)
         
-        reference_motion = self.motion_lib.sample_motion(self.times)
+        reference_motion = self.motion_lib.sample_motion(motion_ids=self.motion_id, times=self.times)
 
         joint_positions = reference_motion["joint_pos"].squeeze(0).numpy()[self.isaac2mujoco]
         joint_velocities = reference_motion["joint_vel"].squeeze(0).numpy()[self.isaac2mujoco]
