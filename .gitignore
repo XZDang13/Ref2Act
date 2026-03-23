@@ -141,3 +141,4 @@ dmypy.json
 Thumbs.db
 
 test/
+tests/

@@ -483,12 +483,12 @@ class Sampler:
         self._check_failure_bins()
         env_ids = self._normalize_env_ids(env_ids)
         if times is None:
-            times = self.episode_start_times[env_ids]
+            times = self.current_times[env_ids]
         else:
             times = torch.as_tensor(times, dtype=torch.float32, device=self.device)
             if times.shape[0] != env_ids.shape[0]:
                 raise ValueError("times must have the same batch size as env_ids.")
-        motion_ids = self.episode_start_motion_ids[env_ids]
+        motion_ids = self.current_motion_ids[env_ids]
 
         self._accumulate_bin_counts(self.bin_fail_counts, motion_ids, self._times_to_bins(motion_ids, times))
 
