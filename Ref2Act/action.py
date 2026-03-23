@@ -23,6 +23,7 @@ class ActionProcessor:
 
         self.delays = torch.zeros(self.num_env, device=self.device, dtype=torch.long)
         self.applied_action = torch.zeros_like(robot.data.default_joint_pos)
+        self.previous_applied_action = torch.zeros_like(robot.data.default_joint_pos)
         self.offset_noise = torch.zeros_like(robot.data.default_joint_pos)
 
     def set_median_scale_offset(
@@ -63,6 +64,7 @@ class ActionProcessor:
         env_ids = self._resolve_env_ids(env_ids)
         self.action_buffer.reset(env_ids)
         self.applied_action[env_ids, :] = 0.0
+        self.previous_applied_action[env_ids, :] = 0.0
 
     def scale_action(self, action: torch.Tensor) -> torch.Tensor:
         return action * self.scale + self.offset
@@ -85,6 +87,7 @@ class ActionProcessor:
     def pre_process_action(self, action: torch.Tensor):
         self.action_buffer.append(action)
         # Delay is defined in control ticks: 0 means latest action, 1 means one step stale, etc.
+        self.previous_applied_action.copy_(self.applied_action)
         self.applied_action = self.action_buffer.get(-(self.delays + 1))
 
         self.target_joint_position = self.applied_action * self.scale + self.offset + self.offset_noise

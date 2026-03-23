@@ -10,6 +10,7 @@ import mpl_toolkits.mplot3d
 from dataclasses import dataclass
 
 from .utils import interpolate, slerp, compute_frame_blend
+from .motion_segments import validate_segment_arrays
 
 
 MotionFileInput = str | PathLike[str] | Sequence[str | PathLike[str]]
@@ -30,6 +31,19 @@ class MotionClip:
     body_quaternions: torch.Tensor
     body_linear_velocities: torch.Tensor
     body_angular_velocities: torch.Tensor
+    segment_start_times: torch.Tensor | None = None
+    segment_end_times: torch.Tensor | None = None
+    segment_types: torch.Tensor | None = None
+
+    @property
+    def has_segments(self) -> bool:
+        return self.segment_start_times is not None
+
+    @property
+    def num_segments(self) -> int:
+        if self.segment_start_times is None:
+            return 0
+        return int(self.segment_start_times.shape[0])
 
 
 class MotionLib:
@@ -59,6 +73,16 @@ class MotionLib:
         self.motion_fps = torch.tensor(
             [clip.fps for clip in self.clips], dtype=torch.float32, device=self.device
         )
+        self.motion_has_segments = torch.tensor(
+            [clip.has_segments for clip in self.clips], dtype=torch.bool, device=self.device
+        )
+        self.motion_num_segments = torch.tensor(
+            [clip.num_segments for clip in self.clips], dtype=torch.long, device=self.device
+        )
+        self.motion_segment_start_times = [clip.segment_start_times for clip in self.clips]
+        self.motion_segment_end_times = [clip.segment_end_times for clip in self.clips]
+        self.motion_segment_types = [clip.segment_types for clip in self.clips]
+        self.all_clips_have_segments = bool(torch.all(self.motion_has_segments).item())
         print(
             f"motion data loaded: {self.num_motions} clip(s), "
             f"durations={[round(float(duration), 3) for duration in self.motion_durations.tolist()]} s"
@@ -89,6 +113,32 @@ class MotionLib:
             joint_pos = torch.as_tensor(motion_data["joint_pos"], dtype=torch.float32, device=self.device)
             num_frames = int(joint_pos.shape[0])
             duration = dt * num_frames
+            segment_start_times = None
+            segment_end_times = None
+            segment_types = None
+
+            segment_keys = ("segment_start_times", "segment_end_times", "segment_types")
+            has_segment_keys = [key in motion_data for key in segment_keys]
+            if any(has_segment_keys):
+                if not all(has_segment_keys):
+                    raise ValueError(
+                        f"Motion clip {motion_file} is missing part of the segment metadata: {segment_keys}"
+                    )
+                segment_start_times = torch.as_tensor(
+                    motion_data["segment_start_times"], dtype=torch.float32, device=self.device
+                ).reshape(-1)
+                segment_end_times = torch.as_tensor(
+                    motion_data["segment_end_times"], dtype=torch.float32, device=self.device
+                ).reshape(-1)
+                segment_types = torch.as_tensor(
+                    motion_data["segment_types"], dtype=torch.long, device=self.device
+                ).reshape(-1)
+                validate_segment_arrays(
+                    segment_start_times.detach().cpu().numpy(),
+                    segment_end_times.detach().cpu().numpy(),
+                    duration=duration,
+                    segment_types=segment_types.detach().cpu().numpy(),
+                )
 
             return MotionClip(
                 motion_id=motion_id,
@@ -108,6 +158,9 @@ class MotionLib:
                 body_angular_velocities=torch.as_tensor(
                     motion_data["body_ang_vel_w"], dtype=torch.float32, device=self.device
                 ),
+                segment_start_times=segment_start_times,
+                segment_end_times=segment_end_times,
+                segment_types=segment_types,
             )
 
     def _validate_clip_compatibility(self) -> None:

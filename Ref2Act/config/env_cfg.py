@@ -555,10 +555,6 @@ class MotionViewerCfg(InteractiveSceneCfg):
 
     robot = G1_CFG.replace(prim_path="/World/Robot")
 
-    contact_sensor = ContactSensorCfg(
-        prim_path="/World/Robot/.*", history_length=3, track_air_time=True, force_threshold=10.0,
-    )
-
 JOINT_ORDER = [
     "left_hip_pitch_joint",
     "left_hip_roll_joint",

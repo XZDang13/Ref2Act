@@ -142,3 +142,7 @@ Thumbs.db
 
 test/
 tests/
+!test/
+test/*
+!test/test_motion_segments.py
+!test/test_sampler_failure_bins.py

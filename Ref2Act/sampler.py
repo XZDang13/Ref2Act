@@ -6,6 +6,7 @@ from isaaclab.scene import InteractiveScene
 from isaaclab.assets import Articulation
 from isaaclab.utils.math import quat_mul, quat_inv, quat_apply, yaw_quat, quat_from_euler_xyz
 from .motion_lib import MotionLib
+from .motion_segments import build_legacy_time_segments
 from .utils import IndexLike
 
 @dataclass
@@ -233,8 +234,13 @@ class Sampler:
         self.bin_size: float | None = None
         self.num_bins = 0
         self.num_bins_per_motion: torch.Tensor | None = None
+        self.bin_start_times: list[torch.Tensor] | None = None
+        self.bin_end_times: list[torch.Tensor] | None = None
+        self.bin_types: list[torch.Tensor] | None = None
+        self.bin_uses_segment_metadata: list[bool] | None = None
         self.bin_fail_counts: list[torch.Tensor] | None = None
         self.bin_sample_counts: list[torch.Tensor] | None = None
+        self.supports_failure_weighted_sampling = False
 
         if bin_size is not None:
             self.init_failure_bins(bin_size)
@@ -276,6 +282,7 @@ class Sampler:
         temperature: float = 1.0,
     ) -> torch.Tensor:
         self._check_failure_bins()
+        self._check_failure_weighted_support()
 
         if min_weight < 0.0:
             raise ValueError("min_weight must be >= 0")
@@ -297,9 +304,8 @@ class Sampler:
                 weights = torch.ones_like(weights)
 
             bin_indices = torch.multinomial(weights, num_samples, replacement=True)
-            bin_starts = bin_indices.to(dtype=torch.float32) * self.bin_size
-            duration = float(self.motion_lib.motion_durations[motion_id].item())
-            bin_ends = torch.minimum(bin_starts + self.bin_size, torch.full_like(bin_starts, duration))
+            bin_starts = self.bin_start_times[motion_id][bin_indices]
+            bin_ends = self.bin_end_times[motion_id][bin_indices]
             times[mask] = bin_starts + torch.rand(num_samples, device=self.device) * (bin_ends - bin_starts)
 
         return times
@@ -455,10 +461,35 @@ class Sampler:
             raise ValueError("bin_size must be > 0")
 
         self.bin_size = float(bin_size)
-        self.num_bins_per_motion = torch.clamp(
-            torch.ceil(self.motion_lib.motion_durations / self.bin_size).to(dtype=torch.long),
-            min=1,
-        )
+        self.bin_start_times = []
+        self.bin_end_times = []
+        self.bin_types = []
+        self.bin_uses_segment_metadata = []
+        num_bins_per_motion: list[int] = []
+
+        for clip in self.motion_lib.clips:
+            if clip.has_segments:
+                start_times = clip.segment_start_times.to(device=self.device)
+                end_times = clip.segment_end_times.to(device=self.device)
+                segment_types = clip.segment_types.to(device=self.device)
+                self.bin_uses_segment_metadata.append(True)
+            else:
+                start_times_np, end_times_np, segment_types_np = build_legacy_time_segments(
+                    duration=clip.duration,
+                    bin_size=self.bin_size,
+                )
+                start_times = torch.as_tensor(start_times_np, dtype=torch.float32, device=self.device)
+                end_times = torch.as_tensor(end_times_np, dtype=torch.float32, device=self.device)
+                segment_types = torch.as_tensor(segment_types_np, dtype=torch.long, device=self.device)
+                self.bin_uses_segment_metadata.append(False)
+
+            self.bin_start_times.append(start_times)
+            self.bin_end_times.append(end_times)
+            self.bin_types.append(segment_types)
+            num_bins_per_motion.append(int(start_times.shape[0]))
+
+        self.supports_failure_weighted_sampling = all(self.bin_uses_segment_metadata)
+        self.num_bins_per_motion = torch.as_tensor(num_bins_per_motion, dtype=torch.long, device=self.device)
         self.num_bins = int(self.num_bins_per_motion.sum().item())
         self.bin_fail_counts = [
             torch.zeros(int(num_bins), dtype=torch.float32, device=self.device)
@@ -496,15 +527,36 @@ class Sampler:
         if (
             self.bin_size is None
             or self.num_bins_per_motion is None
+            or self.bin_start_times is None
+            or self.bin_end_times is None
+            or self.bin_types is None
+            or self.bin_uses_segment_metadata is None
             or self.bin_fail_counts is None
             or self.bin_sample_counts is None
         ):
             raise RuntimeError("Failure bins not initialized. Call init_failure_bins(...) first.")
 
+    def _check_failure_weighted_support(self) -> None:
+        if not self.supports_failure_weighted_sampling:
+            raise RuntimeError(
+                "Failure-weighted sampling requires motion clips with segment metadata. "
+                "Reconvert the motion .npz files with `convert --segment-bin-size ...`."
+            )
+
     def _times_to_bins(self, motion_ids: torch.Tensor, times: torch.Tensor) -> torch.Tensor:
-        bin_indices = torch.floor(times / self.bin_size).to(dtype=torch.long)
-        max_bin_indices = self.num_bins_per_motion[motion_ids] - 1
-        return torch.minimum(torch.clamp(bin_indices, min=0), max_bin_indices)
+        motion_ids = torch.as_tensor(motion_ids, dtype=torch.long, device=self.device).reshape(-1)
+        times = torch.as_tensor(times, dtype=torch.float32, device=self.device).reshape(-1)
+        bin_indices = torch.empty_like(motion_ids)
+
+        for motion_id in torch.unique(motion_ids, sorted=True).tolist():
+            motion_mask = motion_ids == motion_id
+            end_times = self.bin_end_times[motion_id]
+            motion_times = torch.clamp(times[motion_mask], min=0.0)
+            motion_bin_indices = torch.searchsorted(end_times, motion_times, right=True)
+            max_bin_index = int(self.num_bins_per_motion[motion_id].item()) - 1
+            bin_indices[motion_mask] = torch.clamp(motion_bin_indices, max=max_bin_index)
+
+        return bin_indices
 
     def _accumulate_bin_counts(
         self,

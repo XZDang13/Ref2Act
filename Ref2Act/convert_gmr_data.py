@@ -7,6 +7,12 @@ import numpy as np
 import torch
 from isaaclab.app import AppLauncher
 
+from .motion_segments import (
+    DEFAULT_AIRBORNE_HEIGHT_MARGIN,
+    build_contact_segments,
+    infer_ground_contact_from_foot_heights,
+)
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -19,6 +25,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output .npz file. Defaults to the input path with an .npz suffix.",
     )
     parser.add_argument("--height_offset", type=float, default=0.0, help="Offset to root z position.")
+    parser.add_argument(
+        "--segment-bin-size",
+        type=float,
+        default=0.3,
+        help="Base time-bin size in seconds used to build segment-aware failure bins.",
+    )
+    parser.add_argument(
+        "--airborne-height-threshold",
+        type=float,
+        default=DEFAULT_AIRBORNE_HEIGHT_MARGIN,
+        help="Height above each foot's baseline required for both feet to be treated as airborne.",
+    )
     AppLauncher.add_app_launcher_args(parser)
     return parser
 
@@ -99,24 +117,55 @@ class GMRMotionData:
             reset_flag = True
         return motion, reset_flag
 
-def is_contact(net_contact_forces, body_ids):
-    is_contact = torch.max(torch.norm(net_contact_forces[:, :, body_ids], dim=-1), dim=1)[0] > 10.0
-
-    print(is_contact)
-
 def extract_feet_height(robot, foot_body_names: list[str]) -> dict[str, float]:
     foot_body_indices = [robot.data.body_names.index(body_name) for body_name in foot_body_names]
     foot_heights = robot.data.body_pos_w[0, foot_body_indices, 2].detach().cpu().tolist()
     return {body_name: float(height) for body_name, height in zip(foot_body_names, foot_heights, strict=True)}
 
-def run_simulator(sim, scene, motion_data: GMRMotionData, simulation_app, output_file: Path):
+
+def extract_foot_heights(robot, foot_body_indices: list[int]) -> np.ndarray:
+    return robot.data.body_pos_w[0, foot_body_indices, 2].detach().cpu().numpy().copy()
+
+
+def log_in_air_events(has_ground_contact: np.ndarray, dt: float) -> None:
+    ground_contact = np.asarray(has_ground_contact, dtype=bool).reshape(-1)
+    in_air = ~ground_contact
+    run_start: int | None = None
+
+    for frame_index, is_in_air in enumerate(in_air):
+        if is_in_air and run_start is None:
+            run_start = frame_index
+        elif not is_in_air and run_start is not None:
+            run_end = frame_index - 1
+            start_time = run_start * dt
+            end_time = (run_end + 1) * dt
+            print(
+                f"[IN AIR]: frames {run_start}-{run_end}, "
+                f"time {start_time:.3f}s-{end_time:.3f}s"
+            )
+            run_start = None
+
+    if run_start is not None:
+        run_end = len(in_air) - 1
+        start_time = run_start * dt
+        end_time = (run_end + 1) * dt
+        print(
+            f"[IN AIR]: frames {run_start}-{run_end}, "
+            f"time {start_time:.3f}s-{end_time:.3f}s"
+        )
+
+
+def run_simulator(
+    sim,
+    scene,
+    motion_data: GMRMotionData,
+    simulation_app,
+    output_file: Path,
+    segment_bin_size: float,
+    airborne_height_threshold: float,
+):
     robot = scene["robot"]
-    contact_sensors = scene["contact_sensor"]
     joint_indices = robot.find_joints(motion_data.joint_order, preserve_order=True)[0]
-    contact_tracking_body_indices, _ = contact_sensors.find_bodies([
-        "left_ankle_roll_link",
-        "right_ankle_roll_link",
-    ])
 
     log = {
         "fps": motion_data.fps,
@@ -130,6 +179,7 @@ def run_simulator(sim, scene, motion_data: GMRMotionData, simulation_app, output
         "body_ang_vel_w": [],
     }
     file_saved = False
+    foot_height_frames: list[np.ndarray] = []
 
     motion = motion_data.get_init_state()
     reference_root_pos, reference_root_rot, reference_root_lin_vel, reference_root_ang_vel, reference_joint_pose, reference_joint_vel = motion
@@ -156,6 +206,7 @@ def run_simulator(sim, scene, motion_data: GMRMotionData, simulation_app, output
         "left_ankle_roll_link",
         "right_ankle_roll_link",
     ]
+    foot_body_indices = [robot.data.body_names.index(body_name) for body_name in foot_body_names]
     feet_height = extract_feet_height(robot, foot_body_names)
     lowest_foot_height = min(feet_height.values()) - 0.025
     motion_data.set_root_height(-lowest_foot_height)
@@ -183,13 +234,11 @@ def run_simulator(sim, scene, motion_data: GMRMotionData, simulation_app, output
         #sim.step()
         sim.render()  # We don't want physic (sim.step())
         scene.update(sim.get_physics_dt())
-        #net_force = contact_sensors.data.net_forces_w_history
-        #is_contact(net_force, contact_tracking_body_indices)
-
         pos_lookat = root_states[0, :3].cpu().numpy()
         sim.set_camera_view(pos_lookat + np.array([2.0, 2.0, 0.5]), pos_lookat)
 
         if not file_saved:
+            foot_height_frames.append(extract_foot_heights(robot, foot_body_indices))
             log["joint_pos"].append(robot.data.joint_pos[0, :].cpu().numpy().copy())
             log["joint_vel"].append(robot.data.joint_vel[0, :].cpu().numpy().copy())
             log["body_pos_w"].append(robot.data.body_pos_w[0, :].cpu().numpy().copy())
@@ -209,9 +258,25 @@ def run_simulator(sim, scene, motion_data: GMRMotionData, simulation_app, output
                 ):
                     log[k] = np.stack(log[k], axis=0)
 
+                ground_contact = infer_ground_contact_from_foot_heights(
+                    np.stack(foot_height_frames, axis=0),
+                    airborne_height_margin=airborne_height_threshold,
+                )
+                log_in_air_events(ground_contact, motion_data.physic_dt)
+
+                segment_start_times, segment_end_times, segment_types = build_contact_segments(
+                    has_ground_contact=ground_contact,
+                    dt=motion_data.physic_dt,
+                    duration=motion_data.physic_dt * motion_data.num_frames,
+                    bin_size=segment_bin_size,
+                )
+                log["segment_start_times"] = segment_start_times
+                log["segment_end_times"] = segment_end_times
+                log["segment_types"] = segment_types
 
                 np.savez(output_file, **log)
                 print("[INFO]: Motion npz file saved to", output_file)
+                break
 
 def main(argv: list[str] | None = None):
     args_cli = build_parser().parse_args(argv)
@@ -240,9 +305,17 @@ def main(argv: list[str] | None = None):
         sim.reset()
         print("[INFO]: Setup complete...")
 
-        run_simulator(sim, scene, motion_data, simulation_app, output_file)
+        run_simulator(
+            sim,
+            scene,
+            motion_data,
+            simulation_app,
+            output_file,
+            args_cli.segment_bin_size,
+            args_cli.airborne_height_threshold,
+        )
     finally:
-        simulation_app.close()
+        simulation_app.close(wait_for_replicator=False, skip_cleanup=True)
 
 if __name__ == "__main__":
     main()

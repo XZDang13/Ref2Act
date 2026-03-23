@@ -1,3 +1,4 @@
+import dataclasses
 import numpy as np
 import torch
 
@@ -64,11 +65,33 @@ class G1MotionTrackingEnv(DirectRLEnv):
         )
         if self._get_sampling_strategy() == SamplingStrategy.FailureWeighted and self.cfg.bin_size is None:
             raise ValueError("Failure-weighted sampling requires cfg.bin_size to be set.")
+        if (
+            self._get_sampling_strategy() == SamplingStrategy.FailureWeighted
+            and not self.sampler.supports_failure_weighted_sampling
+        ):
+            raise ValueError(
+                "Failure-weighted sampling requires motion clips with segment metadata. "
+                "Reconvert the motion .npz files with `convert --segment-bin-size ...`."
+            )
 
         self.observation_model = Observation(anchor_body_index, key_body_indices, self.cfg.add_obs_noise)
         
         
-        reward_cfg = RewardsCfg(anchor_body_index, key_body_indices, collision_track_body_indices, self.step_dt)
+        reward_cfg_kwargs = {
+            "anchor_height_only": getattr(self.cfg, "anchor_height_only", self.cfg.height_only),
+        }
+        for field in dataclasses.fields(RewardsCfg):
+            if field.name in {"anchor_body_index", "key_body_indices", "collision_track_body_indices", "dt", "anchor_height_only"}:
+                continue
+            if hasattr(self.cfg, field.name):
+                reward_cfg_kwargs[field.name] = getattr(self.cfg, field.name)
+        reward_cfg = RewardsCfg(
+            anchor_body_index=anchor_body_index,
+            key_body_indices=key_body_indices,
+            collision_track_body_indices=collision_track_body_indices,
+            dt=self.step_dt,
+            **reward_cfg_kwargs,
+        )
         self.reward_model = Rewards(reward_cfg)
 
         self.reference_motion_viewer = ReferenceMotionViewer(key_body_indices)
