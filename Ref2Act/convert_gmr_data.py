@@ -64,6 +64,24 @@ class GMRMotionData:
         omega = torch.cat([omega[:1], omega, omega[-1:]], dim=0)  # repeat first and last sample
         return omega
     
+    def get_init_state(self):
+        motion = (
+            self.root_pos[0 : 0 + 1],
+            self.root_rot[0 : 0 + 1],
+            self.root_lin_vel[0 : 0 + 1],
+            self.root_ang_vel[0 : 0 + 1],
+            self.joint_pos[0 : 0 + 1],
+            self.joint_vel[0 : 0 + 1],
+        )
+
+        return motion
+    
+    def set_root_height(self, height_offset:float):
+        offset = torch.zeros(3).to(self.device)
+        offset[-1] += height_offset
+
+        self.root_pos += offset
+    
     def get_next_state(self):
         motion = (
             self.root_pos[self.current_step : self.current_step + 1],
@@ -86,6 +104,11 @@ def is_contact(net_contact_forces, body_ids):
 
     print(is_contact)
 
+def extract_feet_height(robot, foot_body_names: list[str]) -> dict[str, float]:
+    foot_body_indices = [robot.data.body_names.index(body_name) for body_name in foot_body_names]
+    foot_heights = robot.data.body_pos_w[0, foot_body_indices, 2].detach().cpu().tolist()
+    return {body_name: float(height) for body_name, height in zip(foot_body_names, foot_heights, strict=True)}
+
 def run_simulator(sim, scene, motion_data: GMRMotionData, simulation_app, output_file: Path):
     robot = scene["robot"]
     contact_sensors = scene["contact_sensor"]
@@ -107,6 +130,36 @@ def run_simulator(sim, scene, motion_data: GMRMotionData, simulation_app, output
         "body_ang_vel_w": [],
     }
     file_saved = False
+
+    motion = motion_data.get_init_state()
+    reference_root_pos, reference_root_rot, reference_root_lin_vel, reference_root_ang_vel, reference_joint_pose, reference_joint_vel = motion
+    root_states = robot.data.default_root_state.clone()
+    root_states[:, :3] = reference_root_pos
+    root_states[:, :2] += scene.env_origins[:, :2]
+    root_states[:, 3:7] = reference_root_rot
+    root_states[:, 7:10] = reference_root_lin_vel
+    root_states[:, 10:] = reference_root_ang_vel
+    robot.write_root_state_to_sim(root_states)
+    # set joint state
+    joint_pos = robot.data.default_joint_pos.clone()
+    joint_vel = robot.data.default_joint_vel.clone()
+
+    joint_pos[:, joint_indices] = reference_joint_pose
+    joint_vel[:, joint_indices] = reference_joint_vel
+    robot.write_joint_state_to_sim(joint_pos, joint_vel)
+
+    #sim.step()
+    sim.render()  # We don't want physic (sim.step())
+    scene.update(sim.get_physics_dt())
+
+    foot_body_names = [
+        "left_ankle_roll_link",
+        "right_ankle_roll_link",
+    ]
+    feet_height = extract_feet_height(robot, foot_body_names)
+    lowest_foot_height = min(feet_height.values()) - 0.025
+    motion_data.set_root_height(-lowest_foot_height)
+    print(f"[INFO]: Applied root height offset {-lowest_foot_height:.6f} from lowest foot height {lowest_foot_height:.6f}")
 
     while simulation_app.is_running():
         motion, reset_flag = motion_data.get_next_state()
