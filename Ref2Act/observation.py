@@ -41,7 +41,7 @@ class Observation:
         self.add_noise = add_noise
 
     
-    def get_robot_state(self, robot: Articulation, scene: InteractiveScene):
+    def get_robot_state(self, robot: Articulation, scene: InteractiveScene) -> MotionState:
         joint_pos = robot.data.joint_pos
         joint_vel = robot.data.joint_vel
 
@@ -71,7 +71,7 @@ class Observation:
         self,
         reference_motion: ReferenceMotions,
         scene: InteractiveScene
-    ):
+    ) -> MotionState:
         joint_pos = reference_motion.joint_pos
         joint_vel = reference_motion.joint_vel
 
@@ -118,7 +118,7 @@ class Observation:
                                robot_state: MotionState,
                                reference_state: MotionState,
                                gravity_vector: torch.Tensor,
-                               last_applied_action:torch.Tensor) -> torch.Tensor:
+                               last_applied_action:torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         
         target_joint_pos = reference_state.joint_pos
         target_jiont_vel = reference_state.joint_vel
@@ -129,9 +129,11 @@ class Observation:
         target_projected_gravity = quat_apply_inverse(target_quat, gravity_vector)
         robot_projected_gravity = quat_apply_inverse(robot_quat, gravity_vector)
 
-        robot_ang_vel = robot_state.anchor_ang_vel
-        robot_joint_pos = robot_state.joint_pos
-        robot_joint_vel = robot_state.joint_vel
+        # Clone tensors before injecting observation noise so we do not mutate
+        # the live robot state or contaminate privileged observations.
+        robot_ang_vel = robot_state.anchor_ang_vel.clone()
+        robot_joint_pos = robot_state.joint_pos.clone()
+        robot_joint_vel = robot_state.joint_vel.clone()
         last_action = last_applied_action.clone()
 
         if self.add_noise:

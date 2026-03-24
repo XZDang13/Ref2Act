@@ -146,3 +146,7 @@ tests/
 test/*
 !test/test_motion_segments.py
 !test/test_sampler_failure_bins.py
+!test/test_termination.py
+!test/test_action.py
+!test/test_observation.py
+!test/test_sim2sim.py

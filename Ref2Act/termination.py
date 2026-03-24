@@ -27,7 +27,7 @@ class Termination:
     def time_out(self, episode_length_buf: torch.Tensor, max_episode_length: torch.Tensor) -> torch.Tensor:
         return episode_length_buf >= (max_episode_length - 1)
 
-    def anchor_pos_error_terminate(self, robot: Articulation, reference_motion: ReferenceMotions):
+    def anchor_pos_error_terminate(self, robot: Articulation, reference_motion: ReferenceMotions) -> torch.Tensor:
         # positions: [B, 3]
         robot_pos = robot.data.body_pos_w[:, self.anchor_body_index]
         ref_pos   = reference_motion.body_positions[:, self.anchor_body_index]
@@ -44,8 +44,8 @@ class Termination:
         # terminate if anchor exceeds threshold -> [B]
         return dist > self.anchor_pos_error_threshold
        
-    def anchor_ori_error_terminate(self, robot: Articulation, reference_motion: ReferenceMotions):
-        robot_anchor_quat = robot.data.body_link_quat_w[:, self.anchor_body_index]
+    def anchor_ori_error_terminate(self, robot: Articulation, reference_motion: ReferenceMotions) -> torch.Tensor:
+        robot_anchor_quat = robot.data.body_quat_w[:, self.anchor_body_index]
         reference_anchor_quat = reference_motion.body_quaternions[:, self.anchor_body_index]
 
         robot_projected_gravity_b = quat_apply_inverse(robot_anchor_quat, robot.data.GRAVITY_VEC_W)
@@ -53,16 +53,15 @@ class Termination:
 
         return torch.abs(robot_projected_gravity_b[:, 2] - reference_projected_gravity_b[:, 2]) > self.anchor_ori_error_threshold
     
-    def end_effector_pos_error_terminate(self, robot: Articulation, reference_motion: ReferenceMotions):
+    def end_effector_pos_error_terminate(self, robot: Articulation, reference_motion: ReferenceMotions) -> torch.Tensor:
         robot_pos = robot.data.body_pos_w[:, self.end_effector_body_indices]
         ref_pos   = reference_motion.body_pos_relative[:, self.end_effector_body_indices]
 
         diff = robot_pos - ref_pos  # [B, E, 3]
-
-        if self.height_only:
-            dist = diff[..., 2].abs()          # [B, E]
-        else:
-            dist = torch.norm(diff, dim=-1)    # [B, E]
+        # `body_pos_relative` already removes anchor XY/yaw drift, so end-effector
+        # termination should remain a full 3D check even when anchor tracking is
+        # height-only.
+        dist = torch.norm(diff, dim=-1)  # [B, E]
 
         return (dist > self.end_effector_pos_error_threshold).any(dim=1)  # [B]
     
@@ -77,14 +76,14 @@ class Termination:
         reference_motion: ReferenceMotions,
         sampler: Sampler
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        max_epsidoe_time_out = self.time_out(episode_length_buf, max_episode_length)
-        end_motion_time_out= self.end_of_motion(sampler).to(max_epsidoe_time_out.device)
+        max_episode_time_out = self.time_out(episode_length_buf, max_episode_length)
+        end_motion_time_out = self.end_of_motion(sampler).to(max_episode_time_out.device)
         anchor_pose_terminate = self.anchor_pos_error_terminate(robot, reference_motion)
         anchor_ori_terminate = self.anchor_ori_error_terminate(robot, reference_motion)
         end_effector_pos_terminate = self.end_effector_pos_error_terminate(robot, reference_motion)
 
-        time_out = max_epsidoe_time_out | end_motion_time_out
-        terminate =  anchor_pose_terminate | anchor_ori_terminate | end_effector_pos_terminate
+        time_out = max_episode_time_out | end_motion_time_out
+        terminate = anchor_pose_terminate | anchor_ori_terminate | end_effector_pos_terminate
         self.track_terminated_env_ids(terminate)
 
         #terminate = torch.zeros_like(terminate)       

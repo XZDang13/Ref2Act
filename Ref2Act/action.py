@@ -21,10 +21,26 @@ class ActionProcessor:
             device=self.device,
         )
 
+        self.joint_low_limit = robot.data.joint_pos_limits[0, :, 0]
+        self.joint_up_limit = robot.data.joint_pos_limits[0, :, 1]
         self.delays = torch.zeros(self.num_env, device=self.device, dtype=torch.long)
         self.applied_action = torch.zeros_like(robot.data.default_joint_pos)
         self.previous_applied_action = torch.zeros_like(robot.data.default_joint_pos)
         self.offset_noise = torch.zeros_like(robot.data.default_joint_pos)
+        self.target_joint_position = robot.data.default_joint_pos.clone()
+
+    def _update_target_joint_position(self, env_ids: IndexLike | None = None) -> None:
+        target_joint_position = self.applied_action * self.scale + self.offset + self.offset_noise
+        if env_ids is None:
+            self.target_joint_position.copy_(target_joint_position)
+            self.target_joint_position.clamp_(self.joint_low_limit, self.joint_up_limit)
+            return
+
+        env_ids = self._resolve_env_ids(env_ids)
+        if env_ids.numel() == 0:
+            return
+        self.target_joint_position[env_ids] = target_joint_position[env_ids]
+        self.target_joint_position[env_ids].clamp_(self.joint_low_limit, self.joint_up_limit)
 
     def set_median_scale_offset(
         self,
@@ -34,15 +50,17 @@ class ActionProcessor:
         self.joint_up_limit = robot.data.joint_pos_limits[0, :, 1]
         self.scale = 0.5 * (self.joint_up_limit - self.joint_low_limit)
         self.offset = 0.5 * (self.joint_up_limit + self.joint_low_limit)
+        self._update_target_joint_position()
 
     def set_robot_default_scale_offset(
         self,
         robot: Articulation,
-    ):
+    ) -> None:
         self.joint_low_limit = robot.data.joint_pos_limits[0, :, 0]
         self.joint_up_limit = robot.data.joint_pos_limits[0, :, 1]
         self.offset = robot.data.default_joint_pos
         self.scale = 0.25 * (robot.data.joint_effort_limits[0] / robot.data.default_joint_stiffness[0])
+        self._update_target_joint_position()
         '''
         print("KP:")
         print(robot.data.joint_stiffness[0])
@@ -60,16 +78,18 @@ class ActionProcessor:
             return env_ids.to(device=self.device, dtype=torch.long)
         return torch.tensor(list(env_ids), device=self.device, dtype=torch.long)
 
-    def reset_action_buffer(self, env_ids: IndexLike):
+    def reset_action_buffer(self, env_ids: IndexLike) -> None:
         env_ids = self._resolve_env_ids(env_ids)
         self.action_buffer.reset(env_ids)
         self.applied_action[env_ids, :] = 0.0
         self.previous_applied_action[env_ids, :] = 0.0
+        self.offset_noise[env_ids, :] = 0.0
+        self._update_target_joint_position(env_ids)
 
     def scale_action(self, action: torch.Tensor) -> torch.Tensor:
         return action * self.scale + self.offset
 
-    def set_random_delays(self, env_ids: IndexLike, delay_range: tuple[int, int]):
+    def set_random_delays(self, env_ids: IndexLike, delay_range: tuple[int, int]) -> None:
         env_ids = self._resolve_env_ids(env_ids)
         lower, upper = delay_range
         if lower < 0 or upper < lower:
@@ -80,15 +100,15 @@ class ActionProcessor:
             )
         self.delays[env_ids] = torch.randint(lower, upper + 1, (len(env_ids),), device=self.device)
 
-    def set_random_offset_noise(self, env_ids: IndexLike):
+    def set_random_offset_noise(self, env_ids: IndexLike) -> None:
+        env_ids = self._resolve_env_ids(env_ids)
         noise = torch.empty_like(self.offset_noise[env_ids, :]).uniform_(-self.noise_scale, self.noise_scale)
         self.offset_noise[env_ids, :] = noise
+        self._update_target_joint_position(env_ids)
 
-    def pre_process_action(self, action: torch.Tensor):
+    def pre_process_action(self, action: torch.Tensor) -> None:
         self.action_buffer.append(action)
         # Delay is defined in control ticks: 0 means latest action, 1 means one step stale, etc.
         self.previous_applied_action.copy_(self.applied_action)
-        self.applied_action = self.action_buffer.get(-(self.delays + 1))
-
-        self.target_joint_position = self.applied_action * self.scale + self.offset + self.offset_noise
-        self.target_joint_position.clamp_(self.joint_low_limit, self.joint_up_limit)
+        self.applied_action.copy_(self.action_buffer.get(-(self.delays + 1)))
+        self._update_target_joint_position()

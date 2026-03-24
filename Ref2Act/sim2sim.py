@@ -54,19 +54,19 @@ class MujocoEnv:
         self.motion_id = torch.zeros(1, dtype=torch.long)
 
         self.gravity_vector = torch.tensor([0.0, 0.0, -1.0]).float()
-        self.previous_action = torch.zeros(23).float()
-
         self.mujoco2isaac = [0, 6, 12, 1, 7, 13, 18, 2, 8, 14, 19, 3, 9, 15, 20, 4, 10, 16, 21, 5, 11, 17, 22]
         self.isaac2mujoco = [0, 3, 7, 11, 15, 19, 1, 4, 8, 12, 16, 20, 2, 5, 9, 13, 17, 21, 6, 10, 14, 18, 22]
 
-        self.kp = kp
-        self.kd = kd
-        self.effort_limits = effort_limits
+        self.kp = torch.as_tensor(kp, dtype=torch.float32, device="cpu").clone()
+        self.kd = torch.as_tensor(kd, dtype=torch.float32, device="cpu").clone()
+        self.effort_limits = torch.as_tensor(effort_limits, dtype=torch.float32, device="cpu").clone()
+        joint_pos_limits = torch.as_tensor(joint_pos_limits, dtype=torch.float32, device="cpu").clone()
         self.joint_pos_limits_lower = joint_pos_limits[:, 0]
         self.joint_pos_limits_upper = joint_pos_limits[:, 1]
 
-        self.action_offset = action_offset
-        self.action_scale = action_scale
+        self.action_offset = torch.as_tensor(action_offset, dtype=torch.float32, device="cpu").clone()
+        self.action_scale = torch.as_tensor(action_scale, dtype=torch.float32, device="cpu").clone()
+        self.previous_action = torch.zeros_like(self.action_offset)
 
         self.simulation_dt = simulation_dt
         self.decimation = decimation
@@ -117,9 +117,9 @@ class MujocoEnv:
 
         return joint_pos, joint_vel, projected_gravity
 
-    def get_obs(self):
-        
-        self.times += self.policy_dt
+    def get_obs(self, advance_time: bool = True) -> torch.Tensor:
+        if advance_time:
+            self.times += self.policy_dt
 
         current_duration = self.motion_lib.get_duration(self.motion_id).squeeze(0)
         if self.times.item() > current_duration.item():
@@ -144,9 +144,9 @@ class MujocoEnv:
         #print("-----------")
 
         return torch.cat([
+            target_projected_gravity,
             target_joint_pos,
             target_joint_vel,
-            target_projected_gravity,
             projected_gravity,
             base_ang_vel,
             joint_pos,
@@ -171,7 +171,7 @@ class MujocoEnv:
         body_angular_velocities = reference_motion["body_angular_velocities"].squeeze(0).numpy()
 
         root_pos = body_positions[self.root_index]
-        #root_pos[2] += 0.05
+        root_pos[2] += 0.05
         root_quat = body_rotations[self.root_index]
         root_linear_vel = body_linear_velocities[self.root_index]
         root_ang_vel = body_angular_velocities[self.root_index]
@@ -182,9 +182,9 @@ class MujocoEnv:
         self.mj_data.qpos[3:7] = root_quat
         self.mj_data.qpos[7:] = joint_positions
 
-        #self.mj_data.qvel[:3] = root_linear_vel
-        #self.mj_data.qvel[3:6] = root_ang_vel
-        #self.mj_data.qvel[6:] = joint_velocities
+        self.mj_data.qvel[:3] = root_linear_vel
+        self.mj_data.qvel[3:6] = root_ang_vel
+        self.mj_data.qvel[6:] = joint_velocities
 
         mujoco.mj_forward(self.mj_model, self.mj_data)
 
@@ -194,9 +194,9 @@ class MujocoEnv:
             # viewer was closed manually -> stop touching it
             self.mj_viewer = None
 
-        obs = self.get_obs()
+        obs = self.get_obs(advance_time=False)
 
-        self.target_pos = reference_motion["joint_pos"].squeeze(0)
+        self.target_pos = reference_motion["joint_pos"].squeeze(0).clone()
 
         return obs
     
@@ -219,7 +219,8 @@ class MujocoEnv:
 
     def step(self, actions):
         step_start_time = time.perf_counter()
-        self.previous_action = actions.clone()
+        actions = torch.as_tensor(actions, dtype=torch.float32, device="cpu")
+        self.previous_action.copy_(actions)
         target_pos = actions * self.action_scale + self.action_offset
         self.target_pos = torch.clamp(target_pos, self.joint_pos_limits_lower, self.joint_pos_limits_upper)
         
@@ -233,7 +234,7 @@ class MujocoEnv:
             # viewer was closed manually -> stop touching it
             self.mj_viewer = None
 
-        obs = self.get_obs()
+        obs = self.get_obs(advance_time=True)
 
         time_until_next_step = self.policy_dt - (time.perf_counter() - step_start_time)
         if time_until_next_step > 0:
