@@ -145,6 +145,8 @@ tests/
 !test/
 test/*
 !test/test_motion_segments.py
+!test/test_motion_smoothing.py
+!test/test_convert_gmr_data_batch.py
 !test/test_sampler_failure_bins.py
 !test/test_termination.py
 !test/test_action.py

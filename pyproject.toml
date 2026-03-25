@@ -21,6 +21,7 @@ sim2sim = ["mujoco"]
 
 [project.scripts]
 convert = "Ref2Act.convert_gmr_data:main"
+convert-batch = "Ref2Act.convert_gmr_data_batch:main"
 
 [tool.setuptools]
 include-package-data = true

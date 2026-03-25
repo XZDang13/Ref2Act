@@ -1,8 +1,9 @@
 # Ref2Act
 
 Ref2Act provides motion-tracking environments built on Isaac Lab. The package registers
-`G1MotionTracking-v0`, includes robot and environment configuration, and ships a `convert`
-CLI for turning GMR `.pkl` motion files into the `.npz` format consumed by the runtime.
+`G1MotionTracking-v0`, includes robot and environment configuration, and ships `convert`
+and `convert-batch` CLIs for turning GMR `.pkl` motion files into the `.npz` format
+consumed by the runtime.
 
 ## Prerequisites
 
@@ -33,6 +34,24 @@ convert --input_file path/to/motion.pkl --output_file path/to/motion.npz
 ```
 
 If `--output_file` is omitted, the converter writes the `.npz` file next to the input file.
+
+Convert a whole folder tree while preserving the directory layout under a new output root:
+
+```bash
+convert-batch --input_dir path/to/mocap --output_dir path/to/converted_mocap
+```
+
+Use `--num-agents` to convert multiple same-FPS motions concurrently in one shared Isaac runtime:
+
+```bash
+convert-batch --input_dir path/to/mocap --output_dir path/to/converted_mocap --num-agents 4
+```
+
+Batch runs print a summary that now includes total wall-clock time, for example:
+
+```text
+[INFO]: Batch conversion summary: discovered=120, converted=118, skipped=1, failed=1, elapsed=84.237s
+```
 
 ## Minimal Usage
 

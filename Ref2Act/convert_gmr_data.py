@@ -1,5 +1,7 @@
 import argparse
 import pickle
+from collections.abc import Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -7,6 +9,7 @@ import numpy as np
 import torch
 from isaaclab.app import AppLauncher
 
+from .motion_smoothing import DEFAULT_SMOOTHING_PROFILE, SMOOTHING_PROFILES, smooth_motion_trajectory
 from .motion_segments import (
     DEFAULT_AIRBORNE_HEIGHT_MARGIN,
     build_contact_segments,
@@ -14,17 +17,51 @@ from .motion_segments import (
 )
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Convert a GMR pickle motion file into the Ref2Act .npz format."
-    )
-    parser.add_argument("--input_file", "-f", type=str, required=True, help="Path to a GMR .pkl file.")
+@dataclass(frozen=True)
+class ConversionOptions:
+    device: str | torch.device
+    height_offset: float
+    segment_bin_size: float
+    airborne_height_threshold: float
+    smooth_motion: bool
+    smoothing_profile: str
+
+    @classmethod
+    def from_args(cls, args: argparse.Namespace) -> "ConversionOptions":
+        return cls(
+            device=args.device,
+            height_offset=args.height_offset,
+            segment_bin_size=args.segment_bin_size,
+            airborne_height_threshold=args.airborne_height_threshold,
+            smooth_motion=args.smooth_motion,
+            smoothing_profile=args.smoothing_profile,
+        )
+
+
+@dataclass
+class ConversionRuntime:
+    sim: object
+    scene: object
+    joint_order: list[str]
+    fps: int
+    render_interval: int
+    num_agents: int
+
+
+@dataclass(frozen=True)
+class ConversionFailure:
+    input_file: Path
+    output_file: Path
+    error: str
+
+
+def add_conversion_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
-        "--output_file",
-        type=str,
-        help="Output .npz file. Defaults to the input path with an .npz suffix.",
+        "--height_offset",
+        type=float,
+        default=0.0,
+        help="Offset to root z position.",
     )
-    parser.add_argument("--height_offset", type=float, default=0.0, help="Offset to root z position.")
     parser.add_argument(
         "--segment-bin-size",
         type=float,
@@ -37,7 +74,32 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_AIRBORNE_HEIGHT_MARGIN,
         help="Height above each foot's baseline required for both feet to be treated as airborne.",
     )
+    parser.add_argument(
+        "--smooth-motion",
+        action="store_true",
+        help="Apply temporal smoothing to the imported root and joint trajectories before exporting.",
+    )
+    parser.add_argument(
+        "--smoothing-profile",
+        type=str,
+        choices=tuple(SMOOTHING_PROFILES),
+        default=DEFAULT_SMOOTHING_PROFILE,
+        help="Smoothing strength profile to use when --smooth-motion is enabled.",
+    )
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Convert a GMR pickle motion file into the Ref2Act .npz format."
+    )
     AppLauncher.add_app_launcher_args(parser)
+    parser.add_argument("--input_file", "-f", type=str, required=True, help="Path to a GMR .pkl file.")
+    parser.add_argument(
+        "--output_file",
+        type=str,
+        help="Output .npz file. Defaults to the input path with an .npz suffix.",
+    )
+    add_conversion_arguments(parser)
     return parser
 
 class NumpyCompatUnpickler(pickle.Unpickler):
@@ -47,8 +109,48 @@ class NumpyCompatUnpickler(pickle.Unpickler):
             module = module.replace("numpy._core", "numpy.core", 1)
         return super().find_class(module, name)
 
+
+def _quat_conjugate(quaternions: torch.Tensor) -> torch.Tensor:
+    conjugate = quaternions.clone()
+    conjugate[..., 1:] *= -1.0
+    return conjugate
+
+
+def _quat_mul(q0: torch.Tensor, q1: torch.Tensor) -> torch.Tensor:
+    w0, x0, y0, z0 = q0.unbind(dim=-1)
+    w1, x1, y1, z1 = q1.unbind(dim=-1)
+    return torch.stack(
+        (
+            w0 * w1 - x0 * x1 - y0 * y1 - z0 * z1,
+            w0 * x1 + x0 * w1 + y0 * z1 - z0 * y1,
+            w0 * y1 - x0 * z1 + y0 * w1 + z0 * x1,
+            w0 * z1 + x0 * y1 - y0 * x1 + z0 * w1,
+        ),
+        dim=-1,
+    )
+
+
+def _axis_angle_from_quat(quaternions: torch.Tensor) -> torch.Tensor:
+    normalized = quaternions / torch.linalg.norm(quaternions, dim=-1, keepdim=True).clamp_min(1.0e-8)
+    normalized = torch.where(normalized[..., :1] < 0.0, -normalized, normalized)
+
+    vector = normalized[..., 1:]
+    vector_norm = torch.linalg.norm(vector, dim=-1, keepdim=True)
+    angle = 2.0 * torch.atan2(vector_norm, normalized[..., :1].clamp(min=-1.0, max=1.0))
+    axis = vector / vector_norm.clamp_min(1.0e-8)
+    axis_angle = axis * angle
+    return torch.where(vector_norm > 1.0e-8, axis_angle, 2.0 * vector)
+
 class GMRMotionData:
-    def __init__(self, file: str, device: torch.device, joint_order: list[str], height_offset: float = 0.0):
+    def __init__(
+        self,
+        file: str,
+        device: torch.device,
+        joint_order: list[str],
+        height_offset: float = 0.0,
+        smooth_motion: bool = False,
+        smoothing_profile: str = DEFAULT_SMOOTHING_PROFILE,
+    ):
         with open(file, "rb") as f:
             motion_data = NumpyCompatUnpickler(f).load()
 
@@ -63,22 +165,43 @@ class GMRMotionData:
         self.root_rot = self.root_rot[:, [3, 0, 1, 2]]
         self.joint_pos = torch.from_numpy(motion_data["dof_pos"]).float().to(self.device)
         self.num_frames = self.joint_pos.size(0)
+        if smooth_motion:
+            self.root_pos, self.root_rot, self.joint_pos = smooth_motion_trajectory(
+                self.root_pos,
+                self.root_rot,
+                self.joint_pos,
+                fps=float(self.fps),
+                profile=smoothing_profile,
+            )
+            print(f"[INFO]: Enabled motion smoothing with profile '{smoothing_profile}'.")
         self.render_interval = 1
         self.physic_dt = 1 / (self.render_interval * self.fps)
         self.current_step = 0
 
-        self.root_lin_vel = torch.gradient(self.root_pos, spacing=self.physic_dt, dim=0)[0]
+        self.root_lin_vel = self._linear_derivative(self.root_pos, self.physic_dt)
         self.root_ang_vel = self._so3_derivative(self.root_rot, self.physic_dt)
-        self.joint_vel = torch.gradient(self.joint_pos, spacing=self.physic_dt, dim=0)[0]
+        self.joint_vel = self._linear_derivative(self.joint_pos, self.physic_dt)
 
+    def _linear_derivative(self, values: torch.Tensor, dt: float) -> torch.Tensor:
+        if values.shape[0] <= 1:
+            return torch.zeros_like(values)
+        return torch.gradient(values, spacing=dt, dim=0)[0]
 
     def _so3_derivative(self, rotations: torch.Tensor, dt: float) -> torch.Tensor:
-        from isaaclab.utils.math import quat_mul, quat_conjugate, axis_angle_from_quat
+        num_frames = rotations.shape[0]
+        if num_frames == 0:
+            return torch.empty((0, 3), device=rotations.device, dtype=rotations.dtype)
+        if num_frames == 1:
+            return torch.zeros((1, 3), device=rotations.device, dtype=rotations.dtype)
+        if num_frames == 2:
+            q_rel = _quat_mul(rotations[1:], _quat_conjugate(rotations[:-1]))
+            omega = _axis_angle_from_quat(q_rel) / dt
+            return omega.repeat(2, 1)
 
         q_prev, q_next = rotations[:-2], rotations[2:]
-        q_rel = quat_mul(q_next, quat_conjugate(q_prev))  # shape (B−2, 4)
+        q_rel = _quat_mul(q_next, _quat_conjugate(q_prev))  # shape (B−2, 4)
 
-        omega = axis_angle_from_quat(q_rel) / (2.0 * dt)  # shape (B−2, 3)
+        omega = _axis_angle_from_quat(q_rel) / (2.0 * dt)  # shape (B−2, 3)
         omega = torch.cat([omega[:1], omega, omega[-1:]], dim=0)  # repeat first and last sample
         return omega
     
@@ -117,14 +240,75 @@ class GMRMotionData:
             reset_flag = True
         return motion, reset_flag
 
-def extract_feet_height(robot, foot_body_names: list[str]) -> dict[str, float]:
+
+def peek_motion_fps(file: str | Path) -> int:
+    with open(file, "rb") as f:
+        motion_data = NumpyCompatUnpickler(f).load()
+    return round(motion_data["fps"])
+
+
+def create_conversion_runtime(
+    device: str | torch.device,
+    fps: int,
+    num_agents: int = 1,
+) -> ConversionRuntime:
+    import isaaclab.sim as sim_utils
+    from isaaclab.assets import AssetBaseCfg
+    from isaaclab.scene import InteractiveScene, InteractiveSceneCfg
+    from isaaclab.utils import configclass
+
+    from .config.env_cfg import JOINT_ORDER
+    from .config.robot import G1_CFG
+
+    if num_agents < 1:
+        raise ValueError("num_agents must be at least 1.")
+
+    @configclass
+    class ConversionSceneCfg(InteractiveSceneCfg):
+        ground = AssetBaseCfg(prim_path="/World/defaultGroundPlane", spawn=sim_utils.GroundPlaneCfg())
+
+        dome_light = AssetBaseCfg(
+            prim_path="/World/Light",
+            spawn=sim_utils.DomeLightCfg(intensity=3000.0, color=(0.75, 0.75, 0.75)),
+        )
+
+        robot = G1_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
+
+    render_interval = 1
+    sim_cfg = sim_utils.SimulationCfg(dt=1.0 / fps, render_interval=render_interval, device=device)
+    sim = sim_utils.SimulationContext(sim_cfg)
+    scene_cfg = ConversionSceneCfg(num_envs=num_agents, env_spacing=2.0, replicate_physics=True)
+    scene = InteractiveScene(scene_cfg)
+    sim.reset()
+    scene.reset()
+    return ConversionRuntime(
+        sim=sim,
+        scene=scene,
+        joint_order=JOINT_ORDER,
+        fps=fps,
+        render_interval=render_interval,
+        num_agents=num_agents,
+    )
+
+
+def reset_conversion_runtime(runtime: ConversionRuntime) -> None:
+    runtime.sim.reset()
+    runtime.scene.reset()
+
+
+def resolve_output_file(input_file: str | Path, output_file: str | Path | None = None) -> Path:
+    if output_file is not None:
+        return Path(output_file)
+    return Path(input_file).with_suffix(".npz")
+
+def extract_feet_height(robot, foot_body_names: list[str], env_id: int = 0) -> dict[str, float]:
     foot_body_indices = [robot.data.body_names.index(body_name) for body_name in foot_body_names]
-    foot_heights = robot.data.body_pos_w[0, foot_body_indices, 2].detach().cpu().tolist()
+    foot_heights = robot.data.body_pos_w[env_id, foot_body_indices, 2].detach().cpu().tolist()
     return {body_name: float(height) for body_name, height in zip(foot_body_names, foot_heights, strict=True)}
 
 
-def extract_foot_heights(robot, foot_body_indices: list[int]) -> np.ndarray:
-    return robot.data.body_pos_w[0, foot_body_indices, 2].detach().cpu().numpy().copy()
+def extract_foot_heights(robot, foot_body_indices: list[int], env_id: int = 0) -> np.ndarray:
+    return robot.data.body_pos_w[env_id, foot_body_indices, 2].detach().cpu().numpy().copy()
 
 
 def log_in_air_events(has_ground_contact: np.ndarray, dt: float) -> None:
@@ -155,19 +339,18 @@ def log_in_air_events(has_ground_contact: np.ndarray, dt: float) -> None:
         )
 
 
-def run_simulator(
-    sim,
-    scene,
-    motion_data: GMRMotionData,
-    simulation_app,
-    output_file: Path,
-    segment_bin_size: float,
-    airborne_height_threshold: float,
-):
-    robot = scene["robot"]
-    joint_indices = robot.find_joints(motion_data.joint_order, preserve_order=True)[0]
+@dataclass
+class _MotionConversionState:
+    env_id: int
+    input_file: Path
+    output_file: Path
+    motion_data: GMRMotionData
+    log: dict[str, object]
+    foot_height_frames: list[np.ndarray] = field(default_factory=list)
 
-    log = {
+
+def _create_motion_log(robot, motion_data: GMRMotionData) -> dict[str, object]:
+    return {
         "fps": motion_data.fps,
         "joint_names": robot.data.joint_names,
         "body_names": robot.data.body_names,
@@ -178,143 +361,316 @@ def run_simulator(
         "body_lin_vel_w": [],
         "body_ang_vel_w": [],
     }
-    file_saved = False
-    foot_height_frames: list[np.ndarray] = []
 
-    motion = motion_data.get_init_state()
-    reference_root_pos, reference_root_rot, reference_root_lin_vel, reference_root_ang_vel, reference_joint_pose, reference_joint_vel = motion
-    root_states = robot.data.default_root_state.clone()
-    root_states[:, :3] = reference_root_pos
-    root_states[:, :2] += scene.env_origins[:, :2]
-    root_states[:, 3:7] = reference_root_rot
-    root_states[:, 7:10] = reference_root_lin_vel
-    root_states[:, 10:] = reference_root_ang_vel
-    robot.write_root_state_to_sim(root_states)
-    # set joint state
-    joint_pos = robot.data.default_joint_pos.clone()
-    joint_vel = robot.data.default_joint_vel.clone()
+def _resolve_env_ids(robot, slots: Sequence[_MotionConversionState]) -> torch.Tensor:
+    return torch.tensor([slot.env_id for slot in slots], device=robot.device, dtype=torch.long)
 
-    joint_pos[:, joint_indices] = reference_joint_pose
-    joint_vel[:, joint_indices] = reference_joint_vel
-    robot.write_joint_state_to_sim(joint_pos, joint_vel)
 
-    #sim.step()
-    sim.render()  # We don't want physic (sim.step())
-    scene.update(sim.get_physics_dt())
+def _initialize_motion_slots(robot, scene, slots: Sequence[_MotionConversionState], joint_indices: Sequence[int]) -> None:
+    env_ids = _resolve_env_ids(robot, slots)
+    root_states = robot.data.default_root_state[env_ids].clone()
+    joint_pos = robot.data.default_joint_pos[env_ids].clone()
+    joint_vel = robot.data.default_joint_vel[env_ids].clone()
 
+    for row, slot in enumerate(slots):
+        motion = slot.motion_data.get_init_state()
+        (
+            reference_root_pos,
+            reference_root_rot,
+            reference_root_lin_vel,
+            reference_root_ang_vel,
+            reference_joint_pose,
+            reference_joint_vel,
+        ) = motion
+        root_states[row, :3] = reference_root_pos[0]
+        root_states[row, :2] += scene.env_origins[slot.env_id, :2]
+        root_states[row, 3:7] = reference_root_rot[0]
+        root_states[row, 7:10] = reference_root_lin_vel[0]
+        root_states[row, 10:] = reference_root_ang_vel[0]
+        joint_pos[row, joint_indices] = reference_joint_pose[0]
+        joint_vel[row, joint_indices] = reference_joint_vel[0]
+
+    robot.write_root_state_to_sim(root_states, env_ids=env_ids)
+    robot.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=env_ids)
+
+
+def _apply_root_height_offsets(robot, slots: Sequence[_MotionConversionState], foot_body_names: list[str]) -> list[int]:
+    foot_body_indices = [robot.data.body_names.index(body_name) for body_name in foot_body_names]
+    for slot in slots:
+        feet_height = extract_feet_height(robot, foot_body_names, env_id=slot.env_id)
+        lowest_foot_height = min(feet_height.values()) - 0.03
+        slot.motion_data.set_root_height(-lowest_foot_height)
+        print(
+            f"[INFO]: Applied root height offset {-lowest_foot_height:.6f} "
+            f"from lowest foot height {lowest_foot_height:.6f} for {slot.input_file}"
+        )
+    return foot_body_indices
+
+
+def _capture_motion_frame(robot, slot: _MotionConversionState, foot_body_indices: list[int]) -> None:
+    env_id = slot.env_id
+    slot.foot_height_frames.append(extract_foot_heights(robot, foot_body_indices, env_id=env_id))
+    slot.log["joint_pos"].append(robot.data.joint_pos[env_id, :].cpu().numpy().copy())
+    slot.log["joint_vel"].append(robot.data.joint_vel[env_id, :].cpu().numpy().copy())
+    slot.log["body_pos_w"].append(robot.data.body_pos_w[env_id, :].cpu().numpy().copy())
+    slot.log["body_quat_w"].append(robot.data.body_quat_w[env_id, :].cpu().numpy().copy())
+    slot.log["body_lin_vel_w"].append(robot.data.body_lin_vel_w[env_id, :].cpu().numpy().copy())
+    slot.log["body_ang_vel_w"].append(robot.data.body_ang_vel_w[env_id, :].cpu().numpy().copy())
+
+
+def _finalize_motion_slot(
+    slot: _MotionConversionState,
+    *,
+    segment_bin_size: float,
+    airborne_height_threshold: float,
+) -> None:
+    for key in (
+        "joint_pos",
+        "joint_vel",
+        "body_pos_w",
+        "body_quat_w",
+        "body_lin_vel_w",
+        "body_ang_vel_w",
+    ):
+        slot.log[key] = np.stack(slot.log[key], axis=0)
+
+    ground_contact = infer_ground_contact_from_foot_heights(
+        np.stack(slot.foot_height_frames, axis=0),
+        airborne_height_margin=airborne_height_threshold,
+    )
+    log_in_air_events(ground_contact, slot.motion_data.physic_dt)
+
+    segment_start_times, segment_end_times, segment_types = build_contact_segments(
+        has_ground_contact=ground_contact,
+        dt=slot.motion_data.physic_dt,
+        duration=slot.motion_data.physic_dt * slot.motion_data.num_frames,
+        bin_size=segment_bin_size,
+    )
+    slot.log["segment_start_times"] = segment_start_times
+    slot.log["segment_end_times"] = segment_end_times
+    slot.log["segment_types"] = segment_types
+
+    slot.output_file.parent.mkdir(parents=True, exist_ok=True)
+    np.savez(slot.output_file, **slot.log)
+    print("[INFO]: Motion npz file saved to", slot.output_file)
+
+
+def _run_motion_chunk(
+    sim,
+    scene,
+    slots: Sequence[_MotionConversionState],
+    simulation_app,
+    *,
+    segment_bin_size: float,
+    airborne_height_threshold: float,
+    camera_follow: bool,
+) -> tuple[list[ConversionFailure], bool]:
+    robot = scene["robot"]
+    joint_indices = robot.find_joints(slots[0].motion_data.joint_order, preserve_order=True)[0]
     foot_body_names = [
         "left_ankle_roll_link",
         "right_ankle_roll_link",
     ]
-    foot_body_indices = [robot.data.body_names.index(body_name) for body_name in foot_body_names]
-    feet_height = extract_feet_height(robot, foot_body_names)
-    lowest_foot_height = min(feet_height.values()) - 0.025
-    motion_data.set_root_height(-lowest_foot_height)
-    print(f"[INFO]: Applied root height offset {-lowest_foot_height:.6f} from lowest foot height {lowest_foot_height:.6f}")
+    active_slots = list(slots)
+    failures: list[ConversionFailure] = []
 
-    while simulation_app.is_running():
-        motion, reset_flag = motion_data.get_next_state()
-        reference_root_pos, reference_root_rot, reference_root_lin_vel, reference_root_ang_vel, reference_joint_pose, reference_joint_vel = motion
-
-        root_states = robot.data.default_root_state.clone()
-        root_states[:, :3] = reference_root_pos
-        root_states[:, :2] += scene.env_origins[:, :2]
-        root_states[:, 3:7] = reference_root_rot
-        root_states[:, 7:10] = reference_root_lin_vel
-        root_states[:, 10:] = reference_root_ang_vel
-        robot.write_root_state_to_sim(root_states)
-        # set joint state
-        joint_pos = robot.data.default_joint_pos.clone()
-        joint_vel = robot.data.default_joint_vel.clone()
-
-        joint_pos[:, joint_indices] = reference_joint_pose
-        joint_vel[:, joint_indices] = reference_joint_vel
-        robot.write_joint_state_to_sim(joint_pos, joint_vel)
-
-        #sim.step()
-        sim.render()  # We don't want physic (sim.step())
+    try:
+        _initialize_motion_slots(robot, scene, active_slots, joint_indices)
+        sim.render()
         scene.update(sim.get_physics_dt())
-        pos_lookat = root_states[0, :3].cpu().numpy()
-        sim.set_camera_view(pos_lookat + np.array([2.0, 2.0, 0.5]), pos_lookat)
+        foot_body_indices = _apply_root_height_offsets(robot, active_slots, foot_body_names)
 
-        if not file_saved:
-            foot_height_frames.append(extract_foot_heights(robot, foot_body_indices))
-            log["joint_pos"].append(robot.data.joint_pos[0, :].cpu().numpy().copy())
-            log["joint_vel"].append(robot.data.joint_vel[0, :].cpu().numpy().copy())
-            log["body_pos_w"].append(robot.data.body_pos_w[0, :].cpu().numpy().copy())
-            log["body_quat_w"].append(robot.data.body_quat_w[0, :].cpu().numpy().copy())
-            log["body_lin_vel_w"].append(robot.data.body_lin_vel_w[0, :].cpu().numpy().copy())
-            log["body_ang_vel_w"].append(robot.data.body_ang_vel_w[0, :].cpu().numpy().copy())
+        while active_slots and simulation_app.is_running():
+            env_ids = _resolve_env_ids(robot, active_slots)
+            root_states = robot.data.default_root_state[env_ids].clone()
+            joint_pos = robot.data.default_joint_pos[env_ids].clone()
+            joint_vel = robot.data.default_joint_vel[env_ids].clone()
+            reset_flags: list[bool] = []
 
-            if reset_flag and not file_saved:
-                file_saved = True
-                for k in (
-                    "joint_pos",
-                    "joint_vel",
-                    "body_pos_w",
-                    "body_quat_w",
-                    "body_lin_vel_w",
-                    "body_ang_vel_w",
-                ):
-                    log[k] = np.stack(log[k], axis=0)
+            for row, slot in enumerate(active_slots):
+                motion, reset_flag = slot.motion_data.get_next_state()
+                (
+                    reference_root_pos,
+                    reference_root_rot,
+                    reference_root_lin_vel,
+                    reference_root_ang_vel,
+                    reference_joint_pose,
+                    reference_joint_vel,
+                ) = motion
+                root_states[row, :3] = reference_root_pos[0]
+                root_states[row, :2] += scene.env_origins[slot.env_id, :2]
+                root_states[row, 3:7] = reference_root_rot[0]
+                root_states[row, 7:10] = reference_root_lin_vel[0]
+                root_states[row, 10:] = reference_root_ang_vel[0]
+                joint_pos[row, joint_indices] = reference_joint_pose[0]
+                joint_vel[row, joint_indices] = reference_joint_vel[0]
+                reset_flags.append(reset_flag)
 
-                ground_contact = infer_ground_contact_from_foot_heights(
-                    np.stack(foot_height_frames, axis=0),
-                    airborne_height_margin=airborne_height_threshold,
+            robot.write_root_state_to_sim(root_states, env_ids=env_ids)
+            robot.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=env_ids)
+
+            sim.render()
+            scene.update(sim.get_physics_dt())
+
+            if camera_follow:
+                pos_lookat = root_states[0, :3].detach().cpu().numpy()
+                sim.set_camera_view(pos_lookat + np.array([2.0, 2.0, 0.5]), pos_lookat)
+
+            next_active_slots: list[_MotionConversionState] = []
+            for slot, reset_flag in zip(active_slots, reset_flags, strict=True):
+                _capture_motion_frame(robot, slot, foot_body_indices)
+                if reset_flag:
+                    try:
+                        _finalize_motion_slot(
+                            slot,
+                            segment_bin_size=segment_bin_size,
+                            airborne_height_threshold=airborne_height_threshold,
+                        )
+                    except Exception as exc:
+                        failures.append(
+                            ConversionFailure(
+                                input_file=slot.input_file,
+                                output_file=slot.output_file,
+                                error=str(exc),
+                            )
+                        )
+                else:
+                    next_active_slots.append(slot)
+            active_slots = next_active_slots
+
+        if active_slots:
+            raise RuntimeError("Simulation app stopped before conversion completed.")
+    except Exception as exc:
+        for slot in active_slots:
+            failures.append(
+                ConversionFailure(
+                    input_file=slot.input_file,
+                    output_file=slot.output_file,
+                    error=str(exc),
                 )
-                log_in_air_events(ground_contact, motion_data.physic_dt)
+            )
+        return failures, True
 
-                segment_start_times, segment_end_times, segment_types = build_contact_segments(
-                    has_ground_contact=ground_contact,
-                    dt=motion_data.physic_dt,
-                    duration=motion_data.physic_dt * motion_data.num_frames,
-                    bin_size=segment_bin_size,
+    return failures, False
+
+
+def convert_motion_files(
+    motion_files: Sequence[tuple[str | Path, str | Path]],
+    *,
+    runtime: ConversionRuntime,
+    simulation_app,
+    options: ConversionOptions,
+    camera_follow: bool = False,
+) -> list[ConversionFailure]:
+    if len(motion_files) > runtime.num_agents:
+        raise ValueError(
+            f"Received {len(motion_files)} motions but runtime supports only {runtime.num_agents} agents."
+        )
+
+    if not motion_files:
+        return []
+
+    reset_conversion_runtime(runtime)
+    robot = runtime.scene["robot"]
+    slots: list[_MotionConversionState] = []
+    failures: list[ConversionFailure] = []
+
+    for env_id, (input_file, output_file) in enumerate(motion_files):
+        input_path = Path(input_file)
+        output_path = Path(output_file)
+        try:
+            motion_data = GMRMotionData(
+                str(input_path),
+                options.device,
+                runtime.joint_order,
+                options.height_offset,
+                smooth_motion=options.smooth_motion,
+                smoothing_profile=options.smoothing_profile,
+            )
+            if motion_data.fps != runtime.fps:
+                raise ValueError(
+                    f"Motion fps {motion_data.fps} does not match runtime fps {runtime.fps} for {input_path}."
                 )
-                log["segment_start_times"] = segment_start_times
-                log["segment_end_times"] = segment_end_times
-                log["segment_types"] = segment_types
+            slots.append(
+                _MotionConversionState(
+                    env_id=env_id,
+                    input_file=input_path,
+                    output_file=output_path,
+                    motion_data=motion_data,
+                    log=_create_motion_log(robot, motion_data),
+                )
+            )
+        except Exception as exc:
+            failures.append(
+                ConversionFailure(
+                    input_file=input_path,
+                    output_file=output_path,
+                    error=str(exc),
+                )
+            )
 
-                np.savez(output_file, **log)
-                print("[INFO]: Motion npz file saved to", output_file)
-                break
+    if not slots:
+        return failures
+
+    chunk_failures, runtime_failed = _run_motion_chunk(
+        runtime.sim,
+        runtime.scene,
+        slots,
+        simulation_app,
+        segment_bin_size=options.segment_bin_size,
+        airborne_height_threshold=options.airborne_height_threshold,
+        camera_follow=camera_follow,
+    )
+    failures.extend(chunk_failures)
+
+    if runtime_failed:
+        reset_conversion_runtime(runtime)
+
+    return failures
+
+
+def convert_motion_file(
+    input_file: str | Path,
+    output_file: str | Path,
+    *,
+    runtime: ConversionRuntime,
+    simulation_app,
+    options: ConversionOptions,
+) -> Path:
+    output_path = Path(output_file)
+    failures = convert_motion_files(
+        [(input_file, output_path)],
+        runtime=runtime,
+        simulation_app=simulation_app,
+        options=options,
+        camera_follow=True,
+    )
+    if failures:
+        raise RuntimeError(failures[0].error)
+    return output_path
 
 def main(argv: list[str] | None = None):
     args_cli = build_parser().parse_args(argv)
-    output_file = Path(args_cli.output_file) if args_cli.output_file else Path(args_cli.input_file).with_suffix(".npz")
+    output_file = resolve_output_file(args_cli.input_file, args_cli.output_file)
+    options = ConversionOptions.from_args(args_cli)
 
     app_launcher = AppLauncher(args_cli)
     simulation_app = app_launcher.app
 
     try:
-        import isaaclab.sim as sim_utils
-        from isaaclab.scene import InteractiveScene
-
-        from .config.env_cfg import MotionViewerCfg, JOINT_ORDER
-
-        motion_data = GMRMotionData(args_cli.input_file, args_cli.device, JOINT_ORDER, args_cli.height_offset)
-
-        dt = motion_data.physic_dt
-        render_interval = motion_data.render_interval
-
-        sim_cfg = sim_utils.SimulationCfg(dt=dt, render_interval=render_interval, device=args_cli.device)
-        sim = sim_utils.SimulationContext(sim_cfg)
-
-        scene_cfg = MotionViewerCfg(1, env_spacing=2.0)
-        scene = InteractiveScene(scene_cfg)
-
-        sim.reset()
+        runtime = create_conversion_runtime(options.device, peek_motion_fps(args_cli.input_file))
         print("[INFO]: Setup complete...")
-
-        run_simulator(
-            sim,
-            scene,
-            motion_data,
-            simulation_app,
+        convert_motion_file(
+            args_cli.input_file,
             output_file,
-            args_cli.segment_bin_size,
-            args_cli.airborne_height_threshold,
+            runtime=runtime,
+            simulation_app=simulation_app,
+            options=options,
         )
     finally:
+        runtime = locals().get("runtime")
+        if runtime is not None:
+            runtime.sim.clear_instance()
         simulation_app.close(wait_for_replicator=False, skip_cleanup=True)
 
 if __name__ == "__main__":
