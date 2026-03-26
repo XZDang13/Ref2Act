@@ -194,7 +194,7 @@ class InitialSetting:
             joint_pos += joint_pose_noise
 
         root_state[:, 0:3] = root_pos
-        #root_state[:, 2] += 0.05  # lift the humanoid slightly to avoid collisions with the ground
+        root_state[:, 2] += 0.05  # lift the humanoid slightly to avoid collisions with the ground
         root_state[:, 3:7] = root_quat
         root_state[:, 7:10] = root_linear_vel
         root_state[:, 10:13] = root_angular_vel
@@ -272,8 +272,30 @@ class Sampler:
         return torch.zeros(motion_ids.shape, dtype=torch.float32, device=self.device)
 
     def _sample_rand_times_for_motion_ids(self, motion_ids: torch.Tensor) -> torch.Tensor:
+        motion_ids = torch.as_tensor(motion_ids, dtype=torch.long, device=self.device).reshape(-1)
         durations = self.motion_lib.get_duration(motion_ids)
-        return torch.rand_like(durations) * durations
+        times = torch.rand_like(durations) * durations
+
+        if not torch.any(self.motion_lib.motion_has_segments[motion_ids]):
+            return times
+
+        for motion_id in torch.unique(motion_ids, sorted=True).tolist():
+            if not bool(self.motion_lib.motion_has_segments[motion_id].item()):
+                continue
+
+            mask = motion_ids == motion_id
+            segment_start_times = self.motion_lib.motion_segment_start_times[motion_id]
+            if segment_start_times is None or segment_start_times.numel() == 0:
+                continue
+
+            segment_indices = torch.randint(
+                segment_start_times.shape[0],
+                (int(mask.sum().item()),),
+                device=self.device,
+            )
+            times[mask] = segment_start_times[segment_indices]
+
+        return times
 
     def _sample_failure_weighted_times_for_motion_ids(
         self,

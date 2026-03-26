@@ -175,6 +175,39 @@ def test_sampler_failure_weighted_sampling_stays_inside_segment_bounds(tmp_path:
     assert torch.all(times < 0.8)
 
 
+def test_sampler_random_sampling_uses_segment_start_times(tmp_path: Path) -> None:
+    motion_file = tmp_path / "jump_segmented.npz"
+    expected_start_times = torch.tensor([0.0, 0.2, 0.8], dtype=torch.float32)
+    _write_motion_file(
+        motion_file,
+        segment_start_times=expected_start_times.numpy(),
+        segment_end_times=np.asarray([0.2, 0.8, 1.0], dtype=np.float32),
+        segment_types=np.asarray(
+            [SEGMENT_TYPE_TIME_BIN, SEGMENT_TYPE_AIR_MERGE, SEGMENT_TYPE_TIME_BIN],
+            dtype=np.int64,
+        ),
+    )
+    motion_lib = MotionLib([motion_file])
+    sampler_mod = _load_sampler_module()
+    sampler = sampler_mod.Sampler(
+        num_envs=1,
+        motion_lib=motion_lib,
+        dt=0.05,
+        anchor_body_index=0,
+        device=torch.device("cpu"),
+    )
+
+    torch.manual_seed(0)
+    motion_ids = torch.zeros(256, dtype=torch.long)
+    times = sampler.sample_times_for_motion_ids(
+        motion_ids,
+        strategy=sampler_mod.SamplingStrategy.Random,
+    )
+
+    unique_times = torch.unique(times)
+    assert torch.equal(unique_times, expected_start_times)
+
+
 def test_sampler_failure_weighted_sampling_requires_segment_metadata(tmp_path: Path) -> None:
     motion_file = tmp_path / "legacy_motion.npz"
     _write_motion_file(motion_file)

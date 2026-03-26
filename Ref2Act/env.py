@@ -101,7 +101,8 @@ class G1MotionTrackingEnv(DirectRLEnv):
             anchor_pos_error_threshold=self.cfg.anchor_pos_error_threshold,
             anchor_ori_error_threshold=self.cfg.anchor_ori_error_threshold,
             end_effector_pos_error_threshold=self.cfg.end_effector_pos_error_threshold,
-            height_only=self.cfg.height_only
+            height_only=self.cfg.height_only,
+            end_effector_height_only=getattr(self.cfg, "end_effector_height_only", False),
         )
 
     def _store_reference_motion(self, env_ids: torch.Tensor, reference_motion) -> None:

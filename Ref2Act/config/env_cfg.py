@@ -392,6 +392,7 @@ class G1MotionTrackingEnvCfg(DirectRLEnvCfg):
     anchor_ori_error_threshold = 0.8
     end_effector_pos_error_threshold = 0.25
     height_only = True
+    end_effector_height_only = True
 
     training = True
     add_obs_noise = True
@@ -501,6 +502,7 @@ class PiPlusMotionTrackingEnvCfg(DirectRLEnvCfg):
     anchor_ori_error_threshold = 0.8
     end_effector_pos_error_threshold = 0.25
     height_only = True
+    end_effector_height_only = False
 
     training = True
     add_obs_noise = True

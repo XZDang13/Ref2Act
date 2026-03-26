@@ -14,7 +14,8 @@ class Termination:
         anchor_pos_error_threshold:float,
         anchor_ori_error_threshold:float,
         end_effector_pos_error_threshold:float,
-        height_only: bool = True
+        height_only: bool = True,
+        end_effector_height_only: bool = False,
     ) -> None:
         self.anchor_body_index = anchor_body_index
         self.end_effector_body_indices = end_effector_body_indices
@@ -22,6 +23,7 @@ class Termination:
         self.anchor_ori_error_threshold = anchor_ori_error_threshold
         self.end_effector_pos_error_threshold = end_effector_pos_error_threshold
         self.height_only = height_only
+        self.end_effector_height_only = end_effector_height_only
         self.terminated_env_ids = torch.empty(0, dtype=torch.long)
 
     def time_out(self, episode_length_buf: torch.Tensor, max_episode_length: torch.Tensor) -> torch.Tensor:
@@ -58,10 +60,10 @@ class Termination:
         ref_pos   = reference_motion.body_pos_relative[:, self.end_effector_body_indices]
 
         diff = robot_pos - ref_pos  # [B, E, 3]
-        # `body_pos_relative` already removes anchor XY/yaw drift, so end-effector
-        # termination should remain a full 3D check even when anchor tracking is
-        # height-only.
-        dist = torch.norm(diff, dim=-1)  # [B, E]
+        if self.end_effector_height_only:
+            dist = diff[..., 2].abs()  # [B, E]
+        else:
+            dist = torch.norm(diff, dim=-1)  # [B, E]
 
         return (dist > self.end_effector_pos_error_threshold).any(dim=1)  # [B]
     

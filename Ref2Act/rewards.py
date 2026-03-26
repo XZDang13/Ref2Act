@@ -36,8 +36,8 @@ class MimicRewardsCfg:
     mimic_key_quaternion_weight:float = 1.0
     mimic_key_linear_vel_weight:float = 1.0
     mimic_key_ang_vel_weight:float = 1.0
-    mimic_joint_position_weight:float = 1.0
-    mimic_joint_vel_weight:float = 1.0
+    mimic_joint_position_weight:float = 0.0
+    mimic_joint_vel_weight:float = 0.0
 
     anchor_height_only:bool = False
 
@@ -255,10 +255,6 @@ class MimicRewards:
         
         key_body_lin_vel_reward = torch.exp(-key_body_lin_vel_error / self.cfg.linear_vel_std) * self.cfg.mimic_key_linear_vel_weight
         key_body_ang_vel_reward = torch.exp(-key_body_ang_vel_error / self.cfg.ang_vel_std) * self.cfg.mimic_key_ang_vel_weight
-        joint_position_reward = torch.exp(-joint_position_error / self.cfg.joint_position_std) * self.cfg.mimic_joint_position_weight
-        joint_vel_reward = torch.exp(-joint_vel_error / self.cfg.joint_vel_std) * self.cfg.mimic_joint_vel_weight
-       
-
 
         self.anchor_position_reward = anchor_position_reward.mean().item()
         self.anchor_quaternion_reward = anchor_quaternion_reward.mean().item()
@@ -266,15 +262,14 @@ class MimicRewards:
         self.relative_key_body_quaternion_reward = relative_key_body_quaternion_reward.mean().item()
         self.key_body_lin_vel_reward = key_body_lin_vel_reward.mean().item()
         self.key_body_ang_vel_reward = key_body_ang_vel_reward.mean().item()
-        self.joint_position_reward = joint_position_reward.mean().item()
-        self.joint_vel_reward = joint_vel_reward.mean().item()
+        self.joint_position_reward = 0.0
+        self.joint_vel_reward = 0.0
 
         reward = torch.stack(
             [
                 anchor_position_reward, anchor_quaternion_reward,
                 relative_key_body_position_reward, relative_key_body_quaternion_reward,
                 key_body_lin_vel_reward, key_body_ang_vel_reward,
-                joint_position_reward, joint_vel_reward
             ],dim=-1
         )
         

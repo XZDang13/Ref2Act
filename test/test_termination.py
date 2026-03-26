@@ -133,3 +133,32 @@ def test_end_effector_termination_keeps_full_3d_error_when_height_only() -> None
     terminated = termination.end_effector_pos_error_terminate(robot, reference_motion)
 
     assert torch.equal(terminated, torch.tensor([True]))
+
+
+def test_end_effector_termination_can_use_height_only_mode() -> None:
+    termination_mod = _load_termination_module()
+    termination = termination_mod.Termination(
+        anchor_body_index=0,
+        end_effector_body_indices=[1],
+        anchor_pos_error_threshold=1.0,
+        anchor_ori_error_threshold=1.0,
+        end_effector_pos_error_threshold=0.25,
+        height_only=True,
+        end_effector_height_only=True,
+    )
+
+    robot = types.SimpleNamespace(
+        data=types.SimpleNamespace(
+            body_pos_w=torch.tensor(
+                [[[0.0, 0.0, 0.0], [0.3, 0.0, 0.1]]],
+                dtype=torch.float32,
+            ),
+        )
+    )
+    reference_motion = types.SimpleNamespace(
+        body_pos_relative=torch.zeros((1, 2, 3), dtype=torch.float32),
+    )
+
+    terminated = termination.end_effector_pos_error_terminate(robot, reference_motion)
+
+    assert torch.equal(terminated, torch.tensor([False]))
