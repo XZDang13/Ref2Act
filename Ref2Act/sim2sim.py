@@ -33,7 +33,7 @@ class MujocoEnv:
     def __init__(self, simulation_dt:float, decimation:float,
                  kp:torch.Tensor, kd:torch.Tensor, effort_limits: torch.Tensor, joint_pos_limits: torch.Tensor,
                  action_offset: torch.Tensor, action_scale: torch.Tensor,  expert_motion_file:str,
-                 root_name:str="pelvis", render:bool=False):
+                 root_name:str="pelvis", render:bool=False, action_mode: str = "absolute"):
         
         self.mj_model = mujoco.MjModel.from_xml_path(mujoco_env_xml)
         self.mj_data = mujoco.MjData(self.mj_model)
@@ -66,6 +66,7 @@ class MujocoEnv:
 
         self.action_offset = torch.as_tensor(action_offset, dtype=torch.float32, device="cpu").clone()
         self.action_scale = torch.as_tensor(action_scale, dtype=torch.float32, device="cpu").clone()
+        self.action_mode = self._normalize_action_mode(action_mode)
         self.previous_action = torch.zeros_like(self.action_offset)
 
         self.simulation_dt = simulation_dt
@@ -83,6 +84,19 @@ class MujocoEnv:
         #print("Action Scale")
         #print(self.action_scale)
         #print("------------")
+
+    def _normalize_action_mode(self, action_mode: object | str) -> str:
+        if isinstance(action_mode, str):
+            normalized = action_mode
+        elif hasattr(action_mode, "name"):
+            normalized = str(action_mode.name)
+        else:
+            normalized = str(action_mode).split(".")[-1]
+
+        normalized = normalized.replace("-", "_").lower()
+        if normalized in {"currentresidual", "current_residual"}:
+            return "current_residual"
+        return normalized
 
 
     def get_projected_gravity(self):
@@ -217,12 +231,22 @@ class MujocoEnv:
         self.mj_data.ctrl[:] = tau_clipped.numpy()
         #print(tau_clipped)
 
+    def _compute_target_pos(self, actions: torch.Tensor) -> torch.Tensor:
+        action_mode = getattr(self, "action_mode", "absolute")
+        if action_mode == "residual":
+            reference_joint_pos, _, _ = self.get_motion_command(self.times)
+            target_pos = reference_joint_pos + actions * self.action_scale
+        elif action_mode == "current_residual":
+            target_pos = self.get_joint_pos() + actions * self.action_scale
+        else:
+            target_pos = actions * self.action_scale + self.action_offset
+        return torch.clamp(target_pos, self.joint_pos_limits_lower, self.joint_pos_limits_upper)
+
     def step(self, actions):
         step_start_time = time.perf_counter()
         actions = torch.as_tensor(actions, dtype=torch.float32, device="cpu")
         self.previous_action.copy_(actions)
-        target_pos = actions * self.action_scale + self.action_offset
-        self.target_pos = torch.clamp(target_pos, self.joint_pos_limits_lower, self.joint_pos_limits_upper)
+        self.target_pos = self._compute_target_pos(actions)
         
         for _ in range(self.decimation):
             self._apply_actions()

@@ -11,11 +11,15 @@ from .utils import IndexLike
 @dataclasses.dataclass
 class PenaltyRewardCfg:
     collision_track_body_indices: list[int] = dataclasses.MISSING
+    foot_body_indices: list[int] = dataclasses.MISSING
+    foot_contact_body_indices: list[int] = dataclasses.MISSING
     joint_acc_weight:float = -2.5e-7
     joint_torque_wegiht:float = -1e-5
     joint_limit_weight:float = -10.0
     self_collision_weight:float = -1.0
     self_collision_force_threshold:float = 10.0
+    foot_slip_weight: float = -0.1
+    foot_slip_force_threshold: float = 1.0
     action_rate_weight:float = -1e-2
 
 @dataclasses.dataclass
@@ -53,6 +57,8 @@ class RewardsCfg:
     key_body_indices: list[int] = dataclasses.MISSING
     # Penalty reward indices.
     collision_track_body_indices: list[int] = dataclasses.MISSING
+    foot_body_indices: list[int] = dataclasses.MISSING
+    foot_contact_body_indices: list[int] = dataclasses.MISSING
     # Shared options.
     dt: float = dataclasses.MISSING
 
@@ -80,6 +86,8 @@ class RewardsCfg:
     joint_limit_weight:float = -10.0
     self_collision_weight:float = -0.1
     self_collision_force_threshold:float = 1.0
+    foot_slip_weight: float = -0.1
+    foot_slip_force_threshold: float = 1.0
     action_rate_weight:float = -1e-3
 
 class Rewards:
@@ -87,11 +95,15 @@ class Rewards:
         self.cfg = cfg
         penalty_cfg = PenaltyRewardCfg(
             collision_track_body_indices=cfg.collision_track_body_indices,
+            foot_body_indices=cfg.foot_body_indices,
+            foot_contact_body_indices=cfg.foot_contact_body_indices,
             joint_acc_weight=cfg.joint_acc_weight,
             joint_torque_wegiht=cfg.joint_torque_wegiht,
             joint_limit_weight=cfg.joint_limit_weight,
             self_collision_weight=cfg.self_collision_weight,
             self_collision_force_threshold=cfg.self_collision_force_threshold,
+            foot_slip_weight=cfg.foot_slip_weight,
+            foot_slip_force_threshold=cfg.foot_slip_force_threshold,
             action_rate_weight=cfg.action_rate_weight,
         )
         mimic_cfg = MimicRewardsCfg(
@@ -138,15 +150,29 @@ class RegulationReward:
         joint_acc_penalty = self.joint_acc_l2(robot) * self.cfg.joint_acc_weight
         joint_torque_penalty = self.joint_torque_l2(robot) * self.cfg.joint_torque_wegiht
         joint_limit_penalty = self.joint_limit(robot) * self.cfg.joint_limit_weight
-        action_rate_penalty = self.action_rate_l2(action_model) * self.cfg.action_rate_weight
         self_collision_penalty = self.self_collision_penalty(
             contact_sensor,
             self.cfg.collision_track_body_indices,
             self.cfg.self_collision_force_threshold,
         ) * self.cfg.self_collision_weight
+        foot_slip_penalty = self.foot_slip_penalty(
+            robot,
+            contact_sensor,
+            self.cfg.foot_body_indices,
+            self.cfg.foot_contact_body_indices,
+            self.cfg.foot_slip_force_threshold,
+        ) * self.cfg.foot_slip_weight
+        action_rate_penalty = self.action_rate_l2(action_model) * self.cfg.action_rate_weight
         
         reward = torch.stack(
-            [joint_acc_penalty, joint_torque_penalty, joint_limit_penalty, self_collision_penalty, action_rate_penalty],
+            [
+                joint_acc_penalty,
+                joint_torque_penalty,
+                joint_limit_penalty,
+                self_collision_penalty,
+                foot_slip_penalty,
+                action_rate_penalty,
+            ],
             dim=-1
         )
 
@@ -164,6 +190,32 @@ class RegulationReward:
         action_delta = action_model.applied_action - action_model.previous_applied_action
         return torch.sum(torch.square(action_delta), dim=1)
 
+    def foot_slip_penalty(
+        self,
+        robot: Articulation,
+        sensor: ContactSensor,
+        foot_body_ids: list[int],
+        foot_contact_body_ids: list[int],
+        threshold: float,
+    ) -> torch.Tensor:
+        num_envs = robot.data.body_lin_vel_w.shape[0]
+        device = robot.data.body_lin_vel_w.device
+        if len(foot_body_ids) == 0 or len(foot_contact_body_ids) == 0:
+            return torch.zeros(num_envs, device=device)
+
+        contact_history = sensor.data.net_forces_w_history
+        if contact_history is None:
+            net_contact_forces = sensor.data.net_forces_w
+            if net_contact_forces is None:
+                return torch.zeros(num_envs, device=device)
+            contact_history = net_contact_forces.unsqueeze(1)
+
+        is_contact = (
+            torch.norm(contact_history[:, :, foot_contact_body_ids], dim=-1).amax(dim=1) > threshold
+        ).to(robot.data.body_lin_vel_w.dtype)
+        foot_planar_vel = torch.linalg.norm(robot.data.body_lin_vel_w[:, foot_body_ids, :2], dim=-1)
+        return torch.sum(foot_planar_vel * is_contact, dim=1)
+
     def self_collision_penalty(
         self,
         sensor: ContactSensor,
@@ -171,10 +223,19 @@ class RegulationReward:
         threshold: float,
     ) -> torch.Tensor:
         net_contact_forces = sensor.data.net_forces_w_history
-        if net_contact_forces is None or len(body_ids) == 0:
+        if len(body_ids) == 0:
+            if net_contact_forces is not None:
+                return torch.zeros(net_contact_forces.shape[0], device=net_contact_forces.device)
             net_contact_forces = sensor.data.net_forces_w
             num_envs = 0 if net_contact_forces is None else net_contact_forces.shape[0]
-            return torch.zeros(num_envs, device=sensor.device)
+            device = sensor.device if net_contact_forces is None else net_contact_forces.device
+            return torch.zeros(num_envs, device=device)
+
+        if net_contact_forces is None:
+            net_contact_forces = sensor.data.net_forces_w
+            num_envs = 0 if net_contact_forces is None else net_contact_forces.shape[0]
+            device = sensor.device if net_contact_forces is None else net_contact_forces.device
+            return torch.zeros(num_envs, device=device)
 
         filtered_contact_forces = sensor.data.force_matrix_w_history
         if filtered_contact_forces is None:

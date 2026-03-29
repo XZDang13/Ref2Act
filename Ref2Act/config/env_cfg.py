@@ -1,6 +1,7 @@
 from enum import Enum
 import isaaclab.envs.mdp as mdp
 import isaaclab.sim as sim_utils
+import isaaclab.terrains as terrain_gen
 from isaaclab.envs import DirectRLEnvCfg
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.terrains import TerrainImporterCfg
@@ -13,6 +14,7 @@ from isaaclab.sensors import ContactSensorCfg
 from isaaclab.markers import VisualizationMarkersCfg
 from isaaclab.markers.config import FRAME_MARKER_CFG
 from .robot import G1_CFG, PI_PLUS_CFG
+from ..curriculum import TerminationCurriculumCfg
 from ..domain_randomization import (
     randomize_action_latency,
     randomize_group_actuator_gains,
@@ -48,9 +50,50 @@ PI_PLUS_LEG_JOINTS = ".*_thigh_joint|.*_hip_roll_joint|.*_hip_pitch_joint|.*_cal
 PI_PLUS_ARM_JOINTS = ".*_shoulder_.*_joint|.*_upper_arm_joint|.*_elbow_joint|.*_wrist_joint"
 
 
+def _rough_terrain_importer_cfg() -> TerrainImporterCfg:
+    terrain_generator_cfg = terrain_gen.TerrainGeneratorCfg(
+        size=(8.0, 8.0),
+        border_width=20.0,
+        num_rows=10,
+        num_cols=20,
+        horizontal_scale=0.1,
+        vertical_scale=0.005,
+        slope_threshold=0.75,
+        difficulty_range=(0.0, 1.0),
+        use_cache=False,
+        sub_terrains={
+            "stepping_stones": terrain_gen.HfSteppingStonesTerrainCfg(
+                proportion=1.0,
+                stone_height_max=0.2,
+                stone_width_range=(0.25, 1.575),
+                stone_distance_range=(0.05, 0.1),
+                holes_depth=-2.0,
+                platform_width=1.5,
+                border_width=0.0,
+            ),
+        },
+    )
+    return TerrainImporterCfg(
+        prim_path="/World/ground",
+        terrain_type="generator",
+        terrain_generator=terrain_generator_cfg,
+        max_init_terrain_level=terrain_generator_cfg.num_rows - 1,
+        collision_group=-1,
+        physics_material=sim_utils.RigidBodyMaterialCfg(
+            friction_combine_mode="multiply",
+            restitution_combine_mode="multiply",
+            static_friction=1.0,
+            dynamic_friction=1.0,
+        ),
+        debug_vis=False,
+    )
+
+
 class ActionMod(Enum):
     Median = 0
     Offset = 1
+    Residual = 2
+    CurrentResidual = 3
 
 
 @configclass
@@ -61,12 +104,11 @@ class G1DomainRandCfg:
         func=mdp.randomize_rigid_body_material,
         mode="startup",
         params={
-            "asset_cfg": SceneEntityCfg("robot", body_names=G1_CONTACT_BODIES),
-            "static_friction_range": (0.6, 1.3),
-            "dynamic_friction_range": (0.5, 1.1),
-            "restitution_range": (0.0, 0.1),
+            "asset_cfg": SceneEntityCfg("robot", body_names=[".*"]),
+            "static_friction_range": (0.3, 1.6),
+            "dynamic_friction_range": (0.3, 1.2),
+            "restitution_range": (0.0, 0.5),
             "num_buckets": 64,
-            "make_consistent": True,
         },
     )
 
@@ -75,7 +117,7 @@ class G1DomainRandCfg:
         mode="startup",
         params={
             "base_cfg": SceneEntityCfg("robot", body_names="pelvis|torso_link"),
-            "base_scale_range": (0.95, 1.05),
+            "base_scale_range": (0.8, 1.2),
             "legs_cfg": SceneEntityCfg("robot", body_names=".*hip.*|.*knee.*|.*ankle.*"),
             "legs_scale_range": (0.9, 1.1),
             "arms_cfg": SceneEntityCfg("robot", body_names=".*shoulder.*|.*elbow.*|.*wrist.*|.*hand.*"),
@@ -87,8 +129,8 @@ class G1DomainRandCfg:
         func=randomize_rigid_body_com_from_default,
         mode="startup",
         params={
-            "asset_cfg": SceneEntityCfg("robot", body_names="pelvis"),
-            "com_range": {"x": (-0.015, 0.015), "y": (-0.02, 0.02), "z": (-0.015, 0.015)},
+            "asset_cfg": SceneEntityCfg("robot", body_names="pelvis|torso_link"),
+            "com_range": {"x": (-0.025, 0.025), "y": (-0.05, 0.05), "z": (-0.05, 0.05)},
         },
     )
 
@@ -174,11 +216,11 @@ class G1DomainRandCfg:
         mode="startup",
         params={
             "legs_cfg": SceneEntityCfg("robot", joint_names=G1_LEG_JOINTS),
-            "legs_scale_range": (0.9, 1.1),
+            "legs_scale_range": (0.8, 1.2),
             "torso_cfg": SceneEntityCfg("robot", joint_names=G1_TORSO_JOINTS),
-            "torso_scale_range": (0.9, 1.08),
+            "torso_scale_range": (0.8, 1.2),
             "arms_cfg": SceneEntityCfg("robot", joint_names=G1_ARM_JOINTS),
-            "arms_scale_range": (0.9, 1.1),
+            "arms_scale_range": (0.8, 1.2),
         },
     )
 
@@ -343,7 +385,7 @@ class G1MotionTrackingEnvCfg(DirectRLEnvCfg):
     action_buffer_length = G1_ACTION_LATENCY_RANGE[1] + 1
     action_latency_range = G1_ACTION_LATENCY_RANGE
     action_mod = ActionMod.Median
-    action_noise = 0.01
+    action_noise = 0.025
 
     expert_motion_file = None
 
@@ -388,9 +430,21 @@ class G1MotionTrackingEnvCfg(DirectRLEnvCfg):
         "right_rubber_hand",
     ]
 
-    anchor_pos_error_threshold = 0.25
-    anchor_ori_error_threshold = 0.8
-    end_effector_pos_error_threshold = 0.25
+    foot_body_names = [
+        "left_ankle_roll_link",
+        "right_ankle_roll_link",
+    ]
+
+    foot_slip_weight = -0.1
+    foot_slip_force_threshold = 1.0
+
+    anchor_pos_error_threshold = 0.5
+    anchor_ori_error_threshold = 1.5
+    end_effector_pos_error_threshold = 0.5
+    #termination_curriculum: TerminationCurriculumCfg = TerminationCurriculumCfg()
+    probabilistic_error_termination = True
+    error_termination_ramp_multiplier = 2.0
+    error_termination_sigmoid_steepness = 8.0
     height_only = True
     end_effector_height_only = True
 
@@ -498,9 +552,21 @@ class PiPlusMotionTrackingEnvCfg(DirectRLEnvCfg):
         "r_wrist_link",
     ]
 
+    foot_body_names = [
+        "l_ankle_roll_link",
+        "r_ankle_roll_link",
+    ]
+
+    foot_slip_weight = -0.1
+    foot_slip_force_threshold = 1.0
+
     anchor_pos_error_threshold = 0.25
     anchor_ori_error_threshold = 0.8
-    end_effector_pos_error_threshold = 0.25
+    end_effector_pos_error_threshold = 0.15
+    termination_curriculum: TerminationCurriculumCfg = TerminationCurriculumCfg()
+    probabilistic_error_termination = True
+    error_termination_ramp_multiplier = 2.0
+    error_termination_sigmoid_steepness = 8.0
     height_only = True
     end_effector_height_only = False
 
@@ -546,6 +612,16 @@ class PiPlusMotionTrackingEnvCfg(DirectRLEnvCfg):
     contact_sensor = ContactSensorCfg(
         prim_path="/World/envs/env_.*/Robot/.*", history_length=3, track_air_time=True, force_threshold=10.0,
     )
+
+
+@configclass
+class G1MotionTrackingRoughEnvCfg(G1MotionTrackingEnvCfg):
+    terrain = _rough_terrain_importer_cfg()
+
+
+@configclass
+class PiPlusMotionTrackingRoughEnvCfg(PiPlusMotionTrackingEnvCfg):
+    terrain = _rough_terrain_importer_cfg()
 
 @configclass
 class MotionViewerCfg(InteractiveSceneCfg):

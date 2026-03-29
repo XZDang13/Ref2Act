@@ -101,3 +101,170 @@ def test_random_offset_noise_updates_target_for_selected_envs() -> None:
     assert torch.allclose(processor.target_joint_position[0], torch.zeros(3))
     assert torch.allclose(processor.target_joint_position[1], processor.offset_noise[1])
     assert not torch.allclose(processor.target_joint_position[1], torch.zeros(3))
+
+
+def test_residual_action_uses_reference_positions_and_clamps_targets() -> None:
+    action_mod = _load_action_module()
+    robot = _make_robot()
+    processor = action_mod.ActionProcessor(robot, action_buffer_length=2, noise_scale=0.0, action_mod="residual")
+    processor.set_residual_scale_offset(robot)
+    processor.set_reference_joint_position(
+        torch.tensor(
+            [
+                [0.2, -0.2, 0.0],
+                [0.4, 0.4, 0.4],
+            ],
+            dtype=torch.float32,
+        )
+    )
+
+    processor.pre_process_action(
+        torch.tensor(
+            [
+                [1.0, -1.0, 0.5],
+                [-2.0, 2.0, 0.0],
+            ],
+            dtype=torch.float32,
+        )
+    )
+
+    assert torch.allclose(
+        processor.target_joint_position,
+        torch.tensor(
+            [
+                [0.7, -0.7, 0.25],
+                [-0.6, 1.0, 0.4],
+            ],
+            dtype=torch.float32,
+        ),
+    )
+    assert torch.allclose(
+        processor.scale_action(torch.zeros((2, 3), dtype=torch.float32)),
+        processor.reference_joint_position,
+    )
+
+
+def test_residual_reference_updates_and_reset_restore_reference_baseline() -> None:
+    action_mod = _load_action_module()
+    robot = _make_robot()
+    processor = action_mod.ActionProcessor(robot, action_buffer_length=2, noise_scale=0.2, action_mod="residual")
+    processor.set_residual_scale_offset(robot)
+    processor.set_reference_joint_position(
+        torch.tensor(
+            [
+                [0.3, 0.0, -0.1],
+                [0.0, 0.2, 0.1],
+            ],
+            dtype=torch.float32,
+        )
+    )
+    processor.pre_process_action(torch.ones((2, 3), dtype=torch.float32))
+
+    processor.set_reference_joint_position(
+        torch.tensor([[0.5, -0.5, 0.25]], dtype=torch.float32),
+        env_ids=[0],
+    )
+    assert torch.allclose(processor.target_joint_position[0], torch.tensor([1.0, 0.0, 0.75], dtype=torch.float32))
+
+    torch.manual_seed(2)
+    processor.set_random_offset_noise([1])
+    expected_target_with_noise = processor.reference_joint_position[1] + processor.scale + processor.offset_noise[1]
+    assert torch.allclose(processor.target_joint_position[1], expected_target_with_noise)
+
+    processor.reset_action_buffer([1])
+    assert torch.allclose(processor.offset_noise[1], torch.zeros(3))
+    assert torch.allclose(processor.applied_action[1], torch.zeros(3))
+    assert torch.allclose(processor.previous_applied_action[1], torch.zeros(3))
+    assert torch.allclose(processor.target_joint_position[1], processor.reference_joint_position[1])
+
+
+def test_current_residual_action_uses_current_joint_positions_and_clamps_targets() -> None:
+    action_mod = _load_action_module()
+    robot = _make_robot()
+    robot.data.joint_pos[:] = torch.tensor(
+        [
+            [0.2, -0.2, 0.0],
+            [0.4, 0.4, 0.4],
+        ],
+        dtype=torch.float32,
+    )
+    processor = action_mod.ActionProcessor(
+        robot,
+        action_buffer_length=2,
+        noise_scale=0.0,
+        action_mod="CurrentResidual",
+    )
+    processor.set_current_residual_scale_offset(robot)
+    processor.set_reference_joint_position(
+        torch.tensor(
+            [
+                [0.9, 0.9, 0.9],
+                [-0.9, -0.9, -0.9],
+            ],
+            dtype=torch.float32,
+        )
+    )
+
+    processor.pre_process_action(
+        torch.tensor(
+            [
+                [1.0, -1.0, 0.5],
+                [-2.0, 2.0, 0.0],
+            ],
+            dtype=torch.float32,
+        )
+    )
+
+    assert torch.allclose(
+        processor.target_joint_position,
+        torch.tensor(
+            [
+                [0.7, -0.7, 0.25],
+                [-0.6, 1.0, 0.4],
+            ],
+            dtype=torch.float32,
+        ),
+    )
+    assert torch.allclose(
+        processor.scale_action(torch.zeros((2, 3), dtype=torch.float32)),
+        robot.data.joint_pos,
+    )
+
+
+def test_current_residual_reference_updates_and_reset_restore_current_joint_baseline() -> None:
+    action_mod = _load_action_module()
+    robot = _make_robot()
+    robot.data.joint_pos[:] = torch.tensor(
+        [
+            [0.3, 0.0, -0.1],
+            [0.0, 0.2, 0.1],
+        ],
+        dtype=torch.float32,
+    )
+    processor = action_mod.ActionProcessor(
+        robot,
+        action_buffer_length=2,
+        noise_scale=0.2,
+        action_mod="current_residual",
+    )
+    processor.set_current_residual_scale_offset(robot)
+    processor.pre_process_action(torch.ones((2, 3), dtype=torch.float32))
+
+    robot.data.joint_pos[0] = torch.tensor([0.5, -0.5, 0.25], dtype=torch.float32)
+    processor.set_reference_joint_position(
+        torch.tensor([[0.9, 0.9, 0.9]], dtype=torch.float32),
+        env_ids=[0],
+    )
+    assert torch.allclose(processor.target_joint_position[0], torch.tensor([1.0, 0.0, 0.75], dtype=torch.float32))
+
+    torch.manual_seed(2)
+    processor.set_random_offset_noise([1])
+    expected_target_with_noise = robot.data.joint_pos[1] + processor.scale + processor.offset_noise[1]
+    assert torch.allclose(processor.target_joint_position[1], expected_target_with_noise)
+
+    robot.data.joint_pos[1] = torch.tensor([-0.2, 0.1, 0.0], dtype=torch.float32)
+    processor.reset_action_buffer([1])
+    assert torch.allclose(processor.offset_noise[1], torch.zeros(3))
+    assert torch.allclose(processor.applied_action[1], torch.zeros(3))
+    assert torch.allclose(processor.previous_applied_action[1], torch.zeros(3))
+    assert torch.allclose(processor.target_joint_position[1], robot.data.joint_pos[1])
