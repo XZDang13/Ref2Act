@@ -171,12 +171,18 @@ class InitialSetting:
         root_index: int,
         add_noise:bool
     ) -> None:
-        joint_pos = motion_samples.joint_pos
-        joint_vel = motion_samples.joint_vel
-        root_pos = motion_samples.body_positions[:, root_index]
-        root_quat = motion_samples.body_quaternions[:, root_index]
-        root_linear_vel = motion_samples.body_linear_velocities[:, root_index]
-        root_angular_vel = motion_samples.body_angular_velocities[:, root_index]
+        if not (0 <= root_index < motion_samples.body_positions.shape[1]):
+            raise IndexError(f"root_index out of range: {root_index}")
+
+        # Reset noise should perturb only the robot state we write to the sim.
+        # Keep the sampled reference motion immutable so tracking targets stay
+        # internally consistent even when root and anchor bodies differ.
+        joint_pos = motion_samples.joint_pos.clone()
+        joint_vel = motion_samples.joint_vel.clone()
+        root_pos = motion_samples.body_positions[:, root_index].clone()
+        root_quat = motion_samples.body_quaternions[:, root_index].clone()
+        root_linear_vel = motion_samples.body_linear_velocities[:, root_index].clone()
+        root_angular_vel = motion_samples.body_angular_velocities[:, root_index].clone()
 
         root_state = robot.data.default_root_state[env_ids].clone()
 
@@ -210,6 +216,7 @@ class Sampler:
         motion_lib: MotionLib,
         dt: float,
         anchor_body_index: int,
+        root_body_index: int | None = None,
         reset_noise:bool=False,
         bin_size: float | None = None,
         failure_decay: float = 1.0,
@@ -221,6 +228,7 @@ class Sampler:
         self.device = device
         self.motion_lib = motion_lib
         self.anchor_body_index = anchor_body_index
+        self.root_body_index = anchor_body_index if root_body_index is None else root_body_index
         self.reset_noise = reset_noise
         if not (0.0 < failure_decay <= 1.0):
             raise ValueError("failure_decay must be in (0, 1].")
@@ -472,7 +480,7 @@ class Sampler:
         self._apply_reset_state(env_ids, motion_ids, times)
 
         motion = self._build_reference_motions(env_ids, robot, scene)
-        InitialSetting.set_robot_initial_state(robot, env_ids, motion, self.anchor_body_index, self.reset_noise)
+        InitialSetting.set_robot_initial_state(robot, env_ids, motion, self.root_body_index, self.reset_noise)
         return motion
 
     # ============================================================

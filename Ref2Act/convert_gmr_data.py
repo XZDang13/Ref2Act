@@ -15,6 +15,7 @@ from .motion_segments import (
     build_contact_segments,
     infer_ground_contact_from_foot_heights,
 )
+from .utils import compute_frame_blend_from_fps, interpolate, slerp
 
 
 @dataclass(frozen=True)
@@ -25,6 +26,7 @@ class ConversionOptions:
     airborne_height_threshold: float
     smooth_motion: bool
     smoothing_profile: str
+    target_fps: int | None
 
     @classmethod
     def from_args(cls, args: argparse.Namespace) -> "ConversionOptions":
@@ -35,6 +37,7 @@ class ConversionOptions:
             airborne_height_threshold=args.airborne_height_threshold,
             smooth_motion=args.smooth_motion,
             smoothing_profile=args.smoothing_profile,
+            target_fps=args.target_fps,
         )
 
 
@@ -53,6 +56,13 @@ class ConversionFailure:
     input_file: Path
     output_file: Path
     error: str
+
+
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("value must be at least 1")
+    return parsed
 
 
 def add_conversion_arguments(parser: argparse.ArgumentParser) -> None:
@@ -85,6 +95,12 @@ def add_conversion_arguments(parser: argparse.ArgumentParser) -> None:
         choices=tuple(SMOOTHING_PROFILES),
         default=DEFAULT_SMOOTHING_PROFILE,
         help="Smoothing strength profile to use when --smooth-motion is enabled.",
+    )
+    parser.add_argument(
+        "--target-fps",
+        type=_positive_int,
+        default=None,
+        help="Resample the exported motion clip to this output frequency in Hz. Defaults to the source fps.",
     )
 
 
@@ -141,6 +157,118 @@ def _axis_angle_from_quat(quaternions: torch.Tensor) -> torch.Tensor:
     axis_angle = axis * angle
     return torch.where(vector_norm > 1.0e-8, axis_angle, 2.0 * vector)
 
+
+def _linear_derivative(values: torch.Tensor, dt: float) -> torch.Tensor:
+    if values.shape[0] <= 1:
+        return torch.zeros_like(values)
+    return torch.gradient(values, spacing=dt, dim=0)[0]
+
+
+def _so3_derivative(rotations: torch.Tensor, dt: float) -> torch.Tensor:
+    num_frames = rotations.shape[0]
+    angular_velocity_shape = (*rotations.shape[:-1], 3)
+    if num_frames == 0:
+        return torch.empty(angular_velocity_shape, device=rotations.device, dtype=rotations.dtype)
+    if num_frames == 1:
+        return torch.zeros(angular_velocity_shape, device=rotations.device, dtype=rotations.dtype)
+    if num_frames == 2:
+        q_rel = _quat_mul(rotations[1:], _quat_conjugate(rotations[:-1]))
+        omega = _axis_angle_from_quat(q_rel) / dt
+        return torch.cat([omega, omega], dim=0)
+
+    q_prev, q_next = rotations[:-2], rotations[2:]
+    q_rel = _quat_mul(q_next, _quat_conjugate(q_prev))
+    omega = _axis_angle_from_quat(q_rel) / (2.0 * dt)
+    return torch.cat([omega[:1], omega, omega[-1:]], dim=0)
+
+
+def _build_frame_times(num_frames: int, fps: int, device: torch.device) -> torch.Tensor:
+    if num_frames < 1:
+        raise ValueError("num_frames must be at least 1.")
+    return torch.arange(num_frames, dtype=torch.float32, device=device) / float(fps)
+
+
+def _normalize_quaternions(quaternions: torch.Tensor) -> torch.Tensor:
+    return quaternions / torch.linalg.norm(quaternions, dim=-1, keepdim=True).clamp_min(1.0e-8)
+
+
+def _resample_frames(
+    values: torch.Tensor,
+    *,
+    source_fps: int,
+    target_fps: int,
+    target_num_frames: int,
+    quaternion: bool = False,
+) -> torch.Tensor:
+    if values.shape[0] == 0:
+        return values.clone()
+
+    target_times = _build_frame_times(target_num_frames, target_fps, values.device)
+    index_0, index_1, blend = compute_frame_blend_from_fps(target_times, source_fps, values.shape[0])
+
+    if quaternion:
+        return _normalize_quaternions(slerp(values, q1=values, blend=blend, start=index_0, end=index_1))
+    return interpolate(values, b=values, blend=blend, start=index_0, end=index_1)
+
+
+def _resample_motion_log(
+    log: dict[str, object],
+    foot_heights: np.ndarray,
+    *,
+    source_fps: int,
+    target_fps: int,
+) -> tuple[dict[str, object], np.ndarray]:
+    source_num_frames = int(np.asarray(log["joint_pos"]).shape[0])
+    if source_num_frames < 1:
+        raise ValueError("Converted motion log must contain at least one frame.")
+
+    target_num_frames = max(int(round(float(source_num_frames) * float(target_fps) / float(source_fps))), 1)
+    target_dt = 1.0 / float(target_fps)
+
+    joint_pos = torch.as_tensor(log["joint_pos"], dtype=torch.float32)
+    body_pos_w = torch.as_tensor(log["body_pos_w"], dtype=torch.float32)
+    body_quat_w = torch.as_tensor(log["body_quat_w"], dtype=torch.float32)
+    foot_height_tensor = torch.as_tensor(foot_heights, dtype=torch.float32)
+
+    resampled_joint_pos = _resample_frames(
+        joint_pos,
+        source_fps=source_fps,
+        target_fps=target_fps,
+        target_num_frames=target_num_frames,
+    )
+    resampled_body_pos_w = _resample_frames(
+        body_pos_w,
+        source_fps=source_fps,
+        target_fps=target_fps,
+        target_num_frames=target_num_frames,
+    )
+    resampled_body_quat_w = _resample_frames(
+        body_quat_w,
+        source_fps=source_fps,
+        target_fps=target_fps,
+        target_num_frames=target_num_frames,
+        quaternion=True,
+    )
+    resampled_foot_heights = _resample_frames(
+        foot_height_tensor,
+        source_fps=source_fps,
+        target_fps=target_fps,
+        target_num_frames=target_num_frames,
+    )
+
+    resampled_log = {
+        "fps": float(target_fps),
+        "joint_names": log["joint_names"],
+        "body_names": log["body_names"],
+        "joint_pos": resampled_joint_pos.cpu().numpy(),
+        "joint_vel": _linear_derivative(resampled_joint_pos, target_dt).cpu().numpy(),
+        "body_pos_w": resampled_body_pos_w.cpu().numpy(),
+        "body_quat_w": resampled_body_quat_w.cpu().numpy(),
+        "body_lin_vel_w": _linear_derivative(resampled_body_pos_w, target_dt).cpu().numpy(),
+        "body_ang_vel_w": _so3_derivative(resampled_body_quat_w, target_dt).cpu().numpy(),
+    }
+    return resampled_log, resampled_foot_heights.cpu().numpy()
+
 class GMRMotionData:
     def __init__(
         self,
@@ -178,32 +306,15 @@ class GMRMotionData:
         self.physic_dt = 1 / (self.render_interval * self.fps)
         self.current_step = 0
 
-        self.root_lin_vel = self._linear_derivative(self.root_pos, self.physic_dt)
-        self.root_ang_vel = self._so3_derivative(self.root_rot, self.physic_dt)
-        self.joint_vel = self._linear_derivative(self.joint_pos, self.physic_dt)
+        self.root_lin_vel = _linear_derivative(self.root_pos, self.physic_dt)
+        self.root_ang_vel = _so3_derivative(self.root_rot, self.physic_dt)
+        self.joint_vel = _linear_derivative(self.joint_pos, self.physic_dt)
 
     def _linear_derivative(self, values: torch.Tensor, dt: float) -> torch.Tensor:
-        if values.shape[0] <= 1:
-            return torch.zeros_like(values)
-        return torch.gradient(values, spacing=dt, dim=0)[0]
+        return _linear_derivative(values, dt)
 
     def _so3_derivative(self, rotations: torch.Tensor, dt: float) -> torch.Tensor:
-        num_frames = rotations.shape[0]
-        if num_frames == 0:
-            return torch.empty((0, 3), device=rotations.device, dtype=rotations.dtype)
-        if num_frames == 1:
-            return torch.zeros((1, 3), device=rotations.device, dtype=rotations.dtype)
-        if num_frames == 2:
-            q_rel = _quat_mul(rotations[1:], _quat_conjugate(rotations[:-1]))
-            omega = _axis_angle_from_quat(q_rel) / dt
-            return omega.repeat(2, 1)
-
-        q_prev, q_next = rotations[:-2], rotations[2:]
-        q_rel = _quat_mul(q_next, _quat_conjugate(q_prev))  # shape (B−2, 4)
-
-        omega = _axis_angle_from_quat(q_rel) / (2.0 * dt)  # shape (B−2, 3)
-        omega = torch.cat([omega[:1], omega, omega[-1:]], dim=0)  # repeat first and last sample
-        return omega
+        return _so3_derivative(rotations, dt)
     
     def get_init_state(self):
         motion = (
@@ -423,6 +534,7 @@ def _finalize_motion_slot(
     *,
     segment_bin_size: float,
     airborne_height_threshold: float,
+    target_fps: int | None,
 ) -> None:
     for key in (
         "joint_pos",
@@ -434,16 +546,33 @@ def _finalize_motion_slot(
     ):
         slot.log[key] = np.stack(slot.log[key], axis=0)
 
+    foot_heights = np.stack(slot.foot_height_frames, axis=0)
+    output_fps = slot.motion_data.fps if target_fps is None else target_fps
+    output_dt = 1.0 / float(output_fps)
+
+    if output_fps != slot.motion_data.fps:
+        slot.log, foot_heights = _resample_motion_log(
+            slot.log,
+            foot_heights,
+            source_fps=slot.motion_data.fps,
+            target_fps=output_fps,
+        )
+    else:
+        slot.log["fps"] = float(output_fps)
+
+    output_num_frames = int(np.asarray(slot.log["joint_pos"]).shape[0])
+    output_duration = output_dt * output_num_frames
+
     ground_contact = infer_ground_contact_from_foot_heights(
-        np.stack(slot.foot_height_frames, axis=0),
+        foot_heights,
         airborne_height_margin=airborne_height_threshold,
     )
-    log_in_air_events(ground_contact, slot.motion_data.physic_dt)
+    log_in_air_events(ground_contact, output_dt)
 
     segment_start_times, segment_end_times, segment_types = build_contact_segments(
         has_ground_contact=ground_contact,
-        dt=slot.motion_data.physic_dt,
-        duration=slot.motion_data.physic_dt * slot.motion_data.num_frames,
+        dt=output_dt,
+        duration=output_duration,
         bin_size=segment_bin_size,
     )
     slot.log["segment_start_times"] = segment_start_times
@@ -463,6 +592,7 @@ def _run_motion_chunk(
     *,
     segment_bin_size: float,
     airborne_height_threshold: float,
+    target_fps: int | None,
     camera_follow: bool,
 ) -> tuple[list[ConversionFailure], bool]:
     robot = scene["robot"]
@@ -525,6 +655,7 @@ def _run_motion_chunk(
                             slot,
                             segment_bin_size=segment_bin_size,
                             airborne_height_threshold=airborne_height_threshold,
+                            target_fps=target_fps,
                         )
                     except Exception as exc:
                         failures.append(
@@ -619,6 +750,7 @@ def convert_motion_files(
         simulation_app,
         segment_bin_size=options.segment_bin_size,
         airborne_height_threshold=options.airborne_height_threshold,
+        target_fps=options.target_fps,
         camera_follow=camera_follow,
     )
     failures.extend(chunk_failures)

@@ -59,6 +59,7 @@ def test_batch_parser_includes_shared_conversion_defaults_and_num_agents() -> No
     assert batch_args.airborne_height_threshold == single_args.airborne_height_threshold
     assert batch_args.smooth_motion == single_args.smooth_motion
     assert batch_args.smoothing_profile == single_args.smoothing_profile
+    assert batch_args.target_fps == single_args.target_fps
     assert not hasattr(single_args, "num_agents")
 
 
@@ -80,6 +81,8 @@ def test_batch_parser_accepts_segment_smoothing_and_num_agents_flags() -> None:
             "--smooth-motion",
             "--smoothing-profile",
             "strong",
+            "--target-fps",
+            "100",
         ]
     )
 
@@ -89,6 +92,7 @@ def test_batch_parser_accepts_segment_smoothing_and_num_agents_flags() -> None:
     assert args.airborne_height_threshold == 0.08
     assert args.smooth_motion is True
     assert args.smoothing_profile == "strong"
+    assert args.target_fps == 100
 
 
 def test_prepare_batch_jobs_skips_existing_outputs_before_scheduling(tmp_path: Path, capsys) -> None:
@@ -303,6 +307,8 @@ def test_main_uses_multi_agent_batch_converter_with_shared_options(monkeypatch) 
             "--smooth-motion",
             "--smoothing-profile",
             "medium",
+            "--target-fps",
+            "50",
         ]
     )
 
@@ -315,6 +321,7 @@ def test_main_uses_multi_agent_batch_converter_with_shared_options(monkeypatch) 
     assert options.airborne_height_threshold == 0.09
     assert options.smooth_motion is True
     assert options.smoothing_profile == "medium"
+    assert options.target_fps == 50
     assert captured["resolver_device"] == options.device
     assert captured["resolver_num_agents"] == 4
     assert captured["runtime_fps"] == 30

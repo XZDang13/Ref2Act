@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 import mpl_toolkits.mplot3d
 from dataclasses import dataclass
 
-from .utils import interpolate, slerp, compute_frame_blend
+from .utils import compute_frame_blend_from_fps, interpolate, slerp
 from .motion_segments import validate_segment_arrays
 
 
@@ -109,6 +109,8 @@ class MotionLib:
     def _load_clip(self, motion_id: int, motion_file: str) -> MotionClip:
         with np.load(motion_file) as motion_data:
             fps = float(np.asarray(motion_data["fps"]).item())
+            if fps <= 0.0:
+                raise ValueError(f"Motion clip {motion_file} has a non-positive fps: {fps}")
             dt = 1.0 / fps
             joint_pos = torch.as_tensor(motion_data["joint_pos"], dtype=torch.float32, device=self.device)
             num_frames = int(joint_pos.shape[0])
@@ -249,7 +251,7 @@ class MotionLib:
         times: torch.Tensor,
         position_offsets: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
-        index_0, index_1, blend = compute_frame_blend(times, clip.duration, clip.num_frames)
+        index_0, index_1, blend = compute_frame_blend_from_fps(times, clip.fps, clip.num_frames)
         index_0 = index_0.to(device=self.device)
         index_1 = index_1.to(device=self.device)
         blend = blend.to(device=self.device, dtype=torch.float32)

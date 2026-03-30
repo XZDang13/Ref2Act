@@ -74,3 +74,13 @@ def compute_frame_blend(times: torch.Tensor,
     blend = frame - index_0
 
     return index_0, index_1, blend
+
+
+def compute_frame_blend_from_fps(times: torch.Tensor, fps: float, num_frames: int):
+    if num_frames < 1:
+        raise ValueError("num_frames must be at least 1.")
+    frame = torch.clamp(times.to(dtype=torch.float32) * float(fps), 0.0, float(num_frames - 1))
+    index_0 = torch.floor(frame).long()
+    index_1 = torch.clamp(index_0 + 1, max=num_frames - 1)
+    blend = frame - index_0.to(dtype=frame.dtype)
+    return index_0, index_1, blend

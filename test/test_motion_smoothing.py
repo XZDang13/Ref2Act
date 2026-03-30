@@ -8,7 +8,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from Ref2Act.convert_gmr_data import GMRMotionData, build_parser
+from Ref2Act.convert_gmr_data import GMRMotionData, _resample_motion_log, build_parser
 from Ref2Act.motion_smoothing import DEFAULT_SMOOTHING_PROFILE, smooth_motion_trajectory
 
 
@@ -125,6 +125,7 @@ def test_parser_includes_motion_smoothing_flags() -> None:
     args = parser.parse_args(["--input_file", "motion.pkl"])
     assert args.smooth_motion is False
     assert args.smoothing_profile == DEFAULT_SMOOTHING_PROFILE
+    assert args.target_fps is None
 
     args = parser.parse_args(
         [
@@ -133,10 +134,79 @@ def test_parser_includes_motion_smoothing_flags() -> None:
             "--smooth-motion",
             "--smoothing-profile",
             "strong",
+            "--target-fps",
+            "100",
         ]
     )
     assert args.smooth_motion is True
     assert args.smoothing_profile == "strong"
+    assert args.target_fps == 100
+
+
+def test_resample_motion_log_updates_frequency_and_recomputes_velocities() -> None:
+    joint_pos = torch.tensor([[0.0], [1.0], [2.0]], dtype=torch.float32).numpy()
+    body_pos_w = torch.tensor(
+        [
+            [[0.0, 0.0, 0.0]],
+            [[1.0, 0.0, 0.0]],
+            [[2.0, 0.0, 0.0]],
+        ],
+        dtype=torch.float32,
+    ).numpy()
+    body_quat_w = torch.zeros((3, 1, 4), dtype=torch.float32).numpy()
+    body_quat_w[..., 0] = 1.0
+    foot_heights = torch.tensor(
+        [
+            [0.0, 0.0],
+            [1.0, 1.0],
+            [2.0, 2.0],
+        ],
+        dtype=torch.float32,
+    ).numpy()
+    log = {
+        "fps": 30.0,
+        "joint_names": ["joint_0"],
+        "body_names": ["body_0"],
+        "joint_pos": joint_pos,
+        "joint_vel": torch.zeros_like(torch.as_tensor(joint_pos)).numpy(),
+        "body_pos_w": body_pos_w,
+        "body_quat_w": body_quat_w,
+        "body_lin_vel_w": torch.zeros_like(torch.as_tensor(body_pos_w)).numpy(),
+        "body_ang_vel_w": torch.zeros((3, 1, 3), dtype=torch.float32).numpy(),
+    }
+
+    resampled_log, resampled_foot_heights = _resample_motion_log(
+        log,
+        foot_heights,
+        source_fps=30,
+        target_fps=60,
+    )
+
+    expected_positions = torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 2.0], dtype=torch.float32).numpy()
+    expected_velocity = torch.gradient(
+        torch.as_tensor(expected_positions).unsqueeze(-1),
+        spacing=1.0 / 60.0,
+        dim=0,
+    )[0].numpy()
+
+    assert resampled_log["fps"] == 60.0
+    assert resampled_log["joint_pos"].shape == (6, 1)
+    assert resampled_log["body_pos_w"].shape == (6, 1, 3)
+    assert resampled_foot_heights.shape == (6, 2)
+    assert torch.isfinite(torch.as_tensor(resampled_log["body_ang_vel_w"])).all()
+    assert torch.allclose(torch.as_tensor(resampled_log["joint_pos"][:, 0]), torch.as_tensor(expected_positions))
+    assert torch.allclose(torch.as_tensor(resampled_foot_heights[:, 0]), torch.as_tensor(expected_positions))
+    assert torch.allclose(torch.as_tensor(resampled_log["joint_vel"]), torch.as_tensor(expected_velocity))
+    assert torch.allclose(
+        torch.as_tensor(resampled_log["body_lin_vel_w"])[:, 0, 0],
+        torch.as_tensor(expected_velocity[:, 0]),
+    )
+    assert torch.count_nonzero(torch.as_tensor(resampled_log["body_ang_vel_w"])) == 0
+    assert torch.allclose(
+        torch.linalg.norm(torch.as_tensor(resampled_log["body_quat_w"]), dim=-1),
+        torch.ones((6, 1), dtype=torch.float32),
+        atol=1.0e-5,
+    )
 
 
 def test_gmr_motion_data_noop_when_smoothing_disabled(tmp_path: Path) -> None:

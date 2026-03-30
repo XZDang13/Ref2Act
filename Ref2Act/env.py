@@ -57,25 +57,26 @@ class G1MotionTrackingEnv(DirectRLEnv):
 
         self.motion_lib = MotionLib(self.cfg.expert_motion_file, self.device)
 
-        anchor_body_index = self.robot.data.body_names.index(self.cfg.anchor_body_name)
-        key_body_indices = [self.robot.data.body_names.index(name) for name in self.cfg.key_body_names]
-        enf_effector_indices = [self.robot.data.body_names.index(name) for name in self.cfg.end_effector_body_names]
+        anchor_body_index = self._resolve_shared_body_index(self.cfg.anchor_body_name)
+        key_body_indices = [self._resolve_shared_body_index(name) for name in self.cfg.key_body_names]
+        enf_effector_indices = [self._resolve_shared_body_index(name) for name in self.cfg.end_effector_body_names]
         foot_body_indices = [self.robot.data.body_names.index(name) for name in self.cfg.foot_body_names]
-        self.root_link_index = self.robot.data.body_names.index(self.cfg.root_link_name)
+        self.root_link_index = self._resolve_shared_body_index(self.cfg.root_link_name)
 
         collision_track_body_indices, _ = self.contact_sensor.find_bodies(self.cfg.collision_track_body_names)
         foot_contact_body_indices, _ = self.contact_sensor.find_bodies(self.cfg.foot_body_names, preserve_order=True)
         self.collision_track_body_indices = collision_track_body_indices
 
         self.sampler = Sampler(
-            self.cfg.scene.num_envs,
-            self.motion_lib,
-            self.step_dt,
-            anchor_body_index,
-            self.cfg.add_reset_noise,
-            self.cfg.bin_size,
-            self.cfg.failure_decay,
-            self.device,
+            num_envs=self.cfg.scene.num_envs,
+            motion_lib=self.motion_lib,
+            dt=self.step_dt,
+            anchor_body_index=anchor_body_index,
+            root_body_index=self.root_link_index,
+            reset_noise=self.cfg.add_reset_noise,
+            bin_size=self.cfg.bin_size,
+            failure_decay=self.cfg.failure_decay,
+            device=self.device,
         )
         if self._get_sampling_strategy() == SamplingStrategy.FailureWeighted and self.cfg.bin_size is None:
             raise ValueError("Failure-weighted sampling requires cfg.bin_size to be set.")
@@ -139,6 +140,26 @@ class G1MotionTrackingEnv(DirectRLEnv):
             getattr(self.cfg, "termination_curriculum", None),
         )
         self._apply_termination_curriculum(step=0)
+
+    def _resolve_shared_body_index(self, body_name: str) -> int:
+        try:
+            robot_index = self.robot.data.body_names.index(body_name)
+        except ValueError as exc:
+            raise ValueError(f"Body '{body_name}' was not found in robot.body_names.") from exc
+
+        try:
+            motion_index = self.motion_lib.body_names.index(body_name)
+        except ValueError as exc:
+            raise ValueError(f"Body '{body_name}' was not found in motion_lib.body_names.") from exc
+
+        if robot_index != motion_index:
+            raise ValueError(
+                f"Body '{body_name}' has mismatched indices between robot ({robot_index}) "
+                f"and motion clip ({motion_index}). Ref2Act requires matching body order "
+                "for shared robot/reference bodies."
+            )
+
+        return robot_index
 
     def _store_reference_motion(self, env_ids: torch.Tensor, reference_motion) -> None:
         if not hasattr(self, "reference_motion") or len(env_ids) == self.num_envs:

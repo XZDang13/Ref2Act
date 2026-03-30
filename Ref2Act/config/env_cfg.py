@@ -396,8 +396,8 @@ class G1MotionTrackingEnvCfg(DirectRLEnvCfg):
     sampling_strategy: SamplingStrategy | None = None
     sampler_mod:SamplerMod = SamplerMod.Clamp
 
-    root_link_name = "pelvis"
-    anchor_body_name = "pelvis"
+    root_link_name = "torso_link"
+    anchor_body_name = "torso_link"
 
     key_body_names = [
         "pelvis",
@@ -438,9 +438,9 @@ class G1MotionTrackingEnvCfg(DirectRLEnvCfg):
     foot_slip_weight = -0.1
     foot_slip_force_threshold = 1.0
 
-    anchor_pos_error_threshold = 0.5
-    anchor_ori_error_threshold = 1.5
-    end_effector_pos_error_threshold = 0.5
+    anchor_pos_error_threshold = 0.25
+    anchor_ori_error_threshold = 0.8
+    end_effector_pos_error_threshold = 0.25
     #termination_curriculum: TerminationCurriculumCfg = TerminationCurriculumCfg()
     probabilistic_error_termination = True
     error_termination_ramp_multiplier = 2.0

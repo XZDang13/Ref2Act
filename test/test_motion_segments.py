@@ -2,6 +2,7 @@ from pathlib import Path
 import sys
 
 import numpy as np
+import torch
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -21,11 +22,16 @@ def _write_motion_file(
     *,
     fps: float = 10.0,
     num_frames: int = 10,
+    joint_pos: np.ndarray | None = None,
     segment_start_times: np.ndarray | None = None,
     segment_end_times: np.ndarray | None = None,
     segment_types: np.ndarray | None = None,
 ) -> None:
-    joint_pos = np.zeros((num_frames, 1), dtype=np.float32)
+    if joint_pos is None:
+        joint_pos = np.zeros((num_frames, 1), dtype=np.float32)
+    else:
+        joint_pos = np.asarray(joint_pos, dtype=np.float32)
+        num_frames = int(joint_pos.shape[0])
     joint_vel = np.zeros_like(joint_pos)
     body_pos_w = np.zeros((num_frames, 1, 3), dtype=np.float32)
     body_quat_w = np.zeros((num_frames, 1, 4), dtype=np.float32)
@@ -138,3 +144,20 @@ def test_motion_lib_loads_segment_metadata(tmp_path: Path) -> None:
     assert motion_lib.all_clips_have_segments
     assert motion_lib.motion_num_segments.tolist() == [3]
     assert np.allclose(clip.segment_start_times.cpu().numpy(), np.asarray([0.0, 0.2, 0.8], dtype=np.float32))
+
+
+def test_motion_lib_samples_using_clip_fps_timeline(tmp_path: Path) -> None:
+    motion_file = tmp_path / "sampled_motion.npz"
+    _write_motion_file(
+        motion_file,
+        fps=30.0,
+        joint_pos=np.asarray([[0.0], [1.0], [2.0]], dtype=np.float32),
+    )
+
+    motion_lib = MotionLib([motion_file])
+    sampled = motion_lib.sample_motion(
+        motion_ids=torch.zeros(3, dtype=torch.long),
+        times=torch.tensor([0.0, 1.0 / 60.0, 3.0 / 30.0], dtype=torch.float32),
+    )
+
+    assert np.allclose(sampled["joint_pos"].cpu().numpy().reshape(-1), np.asarray([0.0, 0.5, 2.0], dtype=np.float32))
