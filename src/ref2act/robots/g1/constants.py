@@ -1,0 +1,20 @@
+from ref2act.robots._env_cfg_shared import (
+    G1_ACTION_LATENCY_RANGE,
+    G1_ARM_JOINTS,
+    G1_CONTACT_BODIES,
+    G1_LEG_JOINTS,
+    G1_PUSH_VELOCITY_RANGE,
+    G1_TORSO_JOINTS,
+    JOINT_ORDER,
+)
+
+__all__ = [
+    "G1_ACTION_LATENCY_RANGE",
+    "G1_ARM_JOINTS",
+    "G1_CONTACT_BODIES",
+    "G1_LEG_JOINTS",
+    "G1_PUSH_VELOCITY_RANGE",
+    "G1_TORSO_JOINTS",
+    "JOINT_ORDER",
+]
+

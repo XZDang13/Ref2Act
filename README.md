@@ -1,93 +1,83 @@
 # Ref2Act
 
-Ref2Act provides motion-tracking environments built on Isaac Lab. The package registers
-`G1MotionTracking-v0`, includes robot and environment configuration, and ships `convert`
-and `convert-batch` CLIs for turning GMR `.pkl` motion files into the `.npz` format
-consumed by the runtime.
+Ref2Act provides motion-tracking environments built on Isaac Lab, offline motion tooling, and a MuJoCo bridge for sim-to-sim evaluation. The codebase now uses a `src/ref2act` layout with explicit subpackages for runtime envs, motion processing, robot configs, shared utilities, and bridge code.
 
-## Prerequisites
+## Installation
 
-- Python 3.10 or newer
-- An Isaac Lab / Isaac Sim environment that provides the `isaaclab` Python package
-- A working PyTorch install compatible with that Isaac Lab environment
-
-## Install
-
-Install the package in editable mode:
+Core install:
 
 ```bash
 python -m pip install -e .
 ```
 
-If you need the MuJoCo bridge in `Ref2Act.sim2sim`, install the optional extra:
+MuJoCo bridge install:
 
 ```bash
 python -m pip install -e ".[sim2sim]"
 ```
 
-## Motion Data
+Dependency boundaries:
 
-Ref2Act expects expert motions in `.npz` format. Convert a GMR pickle file with:
+- `ref2act.common` and `ref2act.motion` are pure Python/Torch modules.
+- `ref2act.envs` and `ref2act.robots` require Isaac Lab.
+- `ref2act.bridges.mujoco` requires the `sim2sim` extra.
 
-```bash
-convert --input_file path/to/motion.pkl --output_file path/to/motion.npz
-```
+## Architecture
 
-If `--output_file` is omitted, the converter writes the `.npz` file next to the input file.
+The package is organized by responsibility:
 
-Convert a whole folder tree while preserving the directory layout under a new output root:
+- `ref2act.common`: shared math, interpolation, and buffer utilities
+- `ref2act.motion`: motion loading, sampling strategies, segmentation, smoothing, and GMR I/O
+- `ref2act.envs.motion_tracking`: the Isaac Lab motion-tracking environment and its action, observation, reward, termination, curriculum, and visualization helpers
+- `ref2act.robots.g1` and `ref2act.robots.pi_plus`: robot-specific articulation and env config exports
+- `ref2act.bridges.mujoco`: MuJoCo runtime bridge
+- `ref2act.assets`: packaged robot and scene assets accessed through `importlib.resources`
 
-```bash
-convert-batch --input_dir path/to/mocap --output_dir path/to/converted_mocap
-```
+See [docs/repo-layout.md](/home/xdang/Desktop/Ref2Act/docs/repo-layout.md) for the layout contract.
 
-Use `--num-agents` to convert multiple same-FPS motions concurrently in one shared Isaac runtime:
+## Training Usage
 
-```bash
-convert-batch --input_dir path/to/mocap --output_dir path/to/converted_mocap --num-agents 4
-```
-
-Batch runs print a summary that now includes total wall-clock time, for example:
-
-```text
-[INFO]: Batch conversion summary: discovered=120, converted=118, skipped=1, failed=1, elapsed=84.237s
-```
-
-## Minimal Usage
+Canonical runtime imports:
 
 ```python
-from Ref2Act.env import G1MotionTrackingEnv
-from Ref2Act.config.env_cfg import G1MotionTrackingEnvCfg
-from Ref2Act.sampler import SamplingStrategy
+from ref2act.envs.motion_tracking import MotionTrackingEnv
+from ref2act.motion import SamplingStrategy
+from ref2act.robots.g1 import G1MotionTrackingEnvCfg
 
 cfg = G1MotionTrackingEnvCfg()
 cfg.expert_motion_file = "path/to/motion.npz"
 cfg.scene.num_envs = 32
 cfg.sampling_strategy = SamplingStrategy.FailureWeighted
 
-env = G1MotionTrackingEnv(cfg)
+env = MotionTrackingEnv(cfg)
 obs, info = env.reset()
 ```
 
-`cfg.expert_motion_file` also accepts a sequence of `.npz` paths, in which case each
-environment samples a clip ID plus a local time inside that clip.
+The package registers these Gym environments when Isaac Lab is available:
 
-The default configs are tuned for large Isaac Lab runs. Lower `cfg.scene.num_envs` for local
-debugging before attempting full-scale training.
+- `G1MotionTracking-v0`
+- `PiPlusMotionTracking-v0`
+- `G1MotionTrackingRough-v0`
+- `PiPlusMotionTrackingRough-v0`
 
-The motion-tracking configs now attach structured domain randomization by default through
-`cfg.events`. For evaluation or ablations, you can drop interval pushes while keeping
-domain randomization with:
+## Motion Conversion
 
-```python
-from Ref2Act.config.env_cfg import G1DomainRandCfg
+Single-file conversion:
 
-cfg.events = G1DomainRandCfg()
+```bash
+ref2act-convert --input_file path/to/motion.pkl --output_file path/to/motion.npz
 ```
 
-## Repository Notes
+Batch conversion:
 
-- Runtime behavior is split across `Ref2Act/env.py`, `Ref2Act/sampler.py`, `Ref2Act/observation.py`,
-  `Ref2Act/rewards.py`, and `Ref2Act/termination.py`.
-- The tracked package surface is the `Ref2Act/` package plus the `convert` console script.
-- Automated tests are not wired up in this repository yet, so verification is currently manual.
+```bash
+ref2act-convert-batch --input_dir path/to/mocap --output_dir path/to/converted_mocap
+```
+
+Useful options:
+
+- `--target-fps`: resample the exported clip
+- `--smooth-motion`: smooth root and joint trajectories before export
+- `--segment-bin-size`: emit segment metadata for failure-weighted sampling
+
+The converter emits `.npz` clips compatible with `ref2act.motion.MotionLib` and the motion-tracking env configs.

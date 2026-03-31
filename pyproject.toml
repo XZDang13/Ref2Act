@@ -17,17 +17,26 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-sim2sim = ["mujoco"]
+sim2sim = [
+    "mujoco",
+    "mujoco-python-viewer",
+]
 
 [project.scripts]
-convert = "Ref2Act.convert_gmr_data:main"
-convert-batch = "Ref2Act.convert_gmr_data_batch:main"
+ref2act-convert = "ref2act.cli.convert:main"
+ref2act-convert-batch = "ref2act.cli.convert_batch:main"
 
 [tool.setuptools]
 include-package-data = true
+package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
-include = ["Ref2Act*"]
+where = ["src"]
+include = ["ref2act*"]
 
 [tool.setuptools.package-data]
-Ref2Act = ["assets/**/*"]
+ref2act = ["assets/**/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

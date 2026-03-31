@@ -1,1 +1,1 @@
-recursive-include Ref2Act/assets *
+recursive-include src/ref2act/assets *
