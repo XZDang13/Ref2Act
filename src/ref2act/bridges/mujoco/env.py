@@ -218,16 +218,19 @@ class MujocoEnv:
         return angular_velocity, linear_velocity
 
     def get_projected_gravity(self):
-        base_quat = torch.from_numpy(
+        anchor_quat_w = torch.from_numpy(
             self._get_body_world_quat(self.anchor_body_id).astype(np.float32, copy=False)
         ).float()
-        projected_gravity = quat_rotate_inverse(base_quat, self.gravity_vector).float()
+        projected_gravity = quat_rotate_inverse(anchor_quat_w, self.gravity_vector).float()
 
         return projected_gravity
-    
-    def get_base_ang_vel(self):
-        base_ang_vel = torch.from_numpy(self._get_body_world_twist(self.anchor_body_id)[0]).float()
-        return base_ang_vel
+
+    def get_anchor_ang_vel_b(self):
+        anchor_quat_w = torch.from_numpy(
+            self._get_body_world_quat(self.anchor_body_id).astype(np.float32, copy=False)
+        ).float()
+        anchor_ang_vel_w = torch.from_numpy(self._get_body_world_twist(self.anchor_body_id)[0]).float()
+        return quat_rotate_inverse(anchor_quat_w, anchor_ang_vel_w).float()
     
     def get_joint_pos(self):
         joint_pos = torch.from_numpy(self.mj_data.qpos[7:]).float()[self.mujoco2isaac]
@@ -281,7 +284,7 @@ class MujocoEnv:
             target_joint_pos=target_joint_pos,
             target_joint_vel=target_joint_vel,
             projected_gravity=self.get_projected_gravity(),
-            base_ang_vel=self.get_base_ang_vel(),
+            anchor_ang_vel_b=self.get_anchor_ang_vel_b(),
             joint_pos=self.get_joint_pos(),
             joint_vel=self.get_joint_vel(),
             previous_action=self.previous_action.clone(),

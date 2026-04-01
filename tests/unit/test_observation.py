@@ -4,12 +4,21 @@ import types
 
 import torch
 
-def _quat_apply_inverse(quat: torch.Tensor, vec: torch.Tensor) -> torch.Tensor:
+def _quat_apply(quat: torch.Tensor, vec: torch.Tensor) -> torch.Tensor:
     if vec.ndim == 1:
         vec = vec.expand(quat.shape[:-1] + (3,))
     elif vec.shape[:-1] != quat.shape[:-1]:
         vec = torch.broadcast_to(vec, quat.shape[:-1] + (3,))
-    return vec.clone()
+
+    xyz = quat[..., 1:]
+    t = 2.0 * torch.cross(xyz, vec, dim=-1)
+    return vec + quat[..., :1] * t + torch.cross(xyz, t, dim=-1)
+
+
+def _quat_apply_inverse(quat: torch.Tensor, vec: torch.Tensor) -> torch.Tensor:
+    quat_conj = quat.clone()
+    quat_conj[..., 1:] = -quat_conj[..., 1:]
+    return _quat_apply(quat_conj, vec)
 
 
 def _relative_transform(
@@ -209,3 +218,69 @@ def test_default_observation_keeps_privileged_observation_clean() -> None:
     assert torch.allclose(privilege_obs[0, joint_pos_start:joint_pos_start + num_joints], joint_pos[0])
     assert torch.allclose(privilege_obs[0, joint_vel_start:joint_vel_start + num_joints], joint_vel[0])
     assert torch.allclose(privilege_obs[0, last_action_start:last_action_start + num_joints], last_action[0])
+
+
+def test_policy_and_privileged_observations_use_anchor_frame_ang_vel() -> None:
+    observation_mod = _load_observation_module()
+    observation = observation_mod.Observation(anchor_body_index=0, key_body_indices=[0, 1], add_noise=False)
+
+    anchor_quat_w = torch.tensor([[0.70710677, 0.0, 0.0, 0.70710677]], dtype=torch.float32)
+    anchor_ang_vel_w = torch.tensor([[1.0, 0.0, 0.0]], dtype=torch.float32)
+    gravity_vector_w = torch.tensor([[0.0, 0.0, -1.0]], dtype=torch.float32)
+
+    robot_state = observation_mod.MotionState(
+        joint_pos=torch.tensor([[0.1, 0.2]], dtype=torch.float32),
+        joint_vel=torch.tensor([[0.3, 0.4]], dtype=torch.float32),
+        anchor_pos=torch.tensor([[0.0, 0.0, 0.0]], dtype=torch.float32),
+        anchor_quat=anchor_quat_w,
+        anchor_lin_vel=torch.tensor([[0.7, 0.8, 0.9]], dtype=torch.float32),
+        anchor_ang_vel=anchor_ang_vel_w,
+        key_pos=torch.tensor([[[0.0, 0.0, 0.0], [0.2, 0.3, 0.4]]], dtype=torch.float32),
+        key_quat=torch.tensor(
+            [[[1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]]],
+            dtype=torch.float32,
+        ),
+        key_lin_vel=torch.zeros((1, 2, 3), dtype=torch.float32),
+        key_ang_vel=torch.zeros((1, 2, 3), dtype=torch.float32),
+    )
+    reference_state = observation_mod.MotionState(
+        joint_pos=torch.zeros((1, 2), dtype=torch.float32),
+        joint_vel=torch.zeros((1, 2), dtype=torch.float32),
+        anchor_pos=torch.zeros((1, 3), dtype=torch.float32),
+        anchor_quat=torch.tensor([[1.0, 0.0, 0.0, 0.0]], dtype=torch.float32),
+        anchor_lin_vel=torch.zeros((1, 3), dtype=torch.float32),
+        anchor_ang_vel=torch.zeros((1, 3), dtype=torch.float32),
+        key_pos=torch.zeros((1, 2, 3), dtype=torch.float32),
+        key_quat=torch.tensor(
+            [[[1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]]],
+            dtype=torch.float32,
+        ),
+        key_lin_vel=torch.zeros((1, 2, 3), dtype=torch.float32),
+        key_ang_vel=torch.zeros((1, 2, 3), dtype=torch.float32),
+    )
+
+    _, robot_obs = observation.get_policy_observation(
+        robot_state,
+        reference_state,
+        gravity_vector=gravity_vector_w,
+        last_applied_action=torch.zeros((1, 2), dtype=torch.float32),
+    )
+    privilege_obs = observation.get_critic_observation(
+        robot_state,
+        reference_state,
+        last_applied_action=torch.zeros((1, 2), dtype=torch.float32),
+    )
+
+    expected_anchor_ang_vel_b = _quat_apply_inverse(anchor_quat_w, anchor_ang_vel_w)
+
+    assert torch.allclose(robot_obs[0, 3:6], expected_anchor_ang_vel_b[0], atol=1.0e-6)
+
+    num_joints = robot_state.joint_pos.shape[1]
+    num_keys = robot_state.key_pos.shape[1]
+    anchor_lin_start = 2 * num_joints + 3 + 6 + num_keys * 3 + num_keys * 6
+    anchor_ang_start = anchor_lin_start + 3
+    assert torch.allclose(
+        privilege_obs[0, anchor_ang_start:anchor_ang_start + 3],
+        expected_anchor_ang_vel_b[0],
+        atol=1.0e-6,
+    )

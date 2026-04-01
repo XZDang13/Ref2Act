@@ -1,9 +1,8 @@
 import torch
-from dataclasses import dataclass
 from isaaclab.assets import Articulation
 from isaaclab.scene import InteractiveScene
-from isaaclab.utils.math import quat_apply_inverse, quat_mul, quat_inv
-from ref2act.common.math import relative_transform, quaternion_to_tangent_and_normal, quat_diff
+from isaaclab.utils.math import quat_apply_inverse
+from ref2act.common.math import relative_transform, quaternion_to_tangent_and_normal
 
 from .types import MotionState, ReferenceMotions
 
@@ -12,6 +11,12 @@ def add_noise_to(data: torch.Tensor, noise_scale: float):
     data += torch.rand_like(data) * noise_scale
 
     return data
+
+
+def _anchor_ang_vel_b(anchor_quat_w: torch.Tensor, anchor_ang_vel_w: torch.Tensor) -> torch.Tensor:
+    """Project anchor angular velocity from world axes into the anchor/body frame."""
+    return quat_apply_inverse(anchor_quat_w, anchor_ang_vel_w)
+
 
 class Observation:
     def __init__(self, anchor_body_index: int, key_body_indices: list[int], add_noise:bool=False) -> None:
@@ -24,20 +29,20 @@ class Observation:
         joint_pos = robot.data.joint_pos
         joint_vel = robot.data.joint_vel
 
-        local_body_positions = robot.data.body_pos_w - scene.env_origins.unsqueeze(1)
-        local_body_quaternions = robot.data.body_quat_w
-        body_linear_velocities = robot.data.body_lin_vel_w
-        body_angular_velocities = robot.data.body_ang_vel_w
+        local_body_positions_w = robot.data.body_pos_w - scene.env_origins.unsqueeze(1)
+        body_quaternions_w = robot.data.body_quat_w
+        body_linear_velocities_w = robot.data.body_lin_vel_w
+        body_angular_velocities_w = robot.data.body_ang_vel_w
 
-        anchor_positions = local_body_positions[:, self.anchor_body_index]
-        anchor_quaternions = local_body_quaternions[:, self.anchor_body_index]
-        anchor_linear_velocities = body_linear_velocities[:, self.anchor_body_index]
-        anchor_angular_velocities = body_angular_velocities[:, self.anchor_body_index]
+        anchor_positions = local_body_positions_w[:, self.anchor_body_index]
+        anchor_quaternions = body_quaternions_w[:, self.anchor_body_index]
+        anchor_linear_velocities = body_linear_velocities_w[:, self.anchor_body_index]
+        anchor_angular_velocities = body_angular_velocities_w[:, self.anchor_body_index]
 
-        key_positions = local_body_positions[:, self.key_body_indices]
-        key_quaternions = local_body_quaternions[:, self.key_body_indices]
-        key_linear_velocities = body_linear_velocities[:, self.key_body_indices]
-        key_angular_velocities = body_angular_velocities[:, self.key_body_indices]
+        key_positions = local_body_positions_w[:, self.key_body_indices]
+        key_quaternions = body_quaternions_w[:, self.key_body_indices]
+        key_linear_velocities = body_linear_velocities_w[:, self.key_body_indices]
+        key_angular_velocities = body_angular_velocities_w[:, self.key_body_indices]
 
         robot_motion_state = MotionState(joint_pos, joint_vel, anchor_positions, anchor_quaternions,
                                          anchor_linear_velocities, anchor_angular_velocities,
@@ -54,20 +59,20 @@ class Observation:
         joint_pos = reference_motion.joint_pos
         joint_vel = reference_motion.joint_vel
 
-        local_body_positions = reference_motion.body_positions - scene.env_origins.unsqueeze(1)
-        local_body_quaternions = reference_motion.body_quaternions
-        body_linear_velocities = reference_motion.body_linear_velocities
-        body_angular_velocities = reference_motion.body_angular_velocities
+        local_body_positions_w = reference_motion.body_positions - scene.env_origins.unsqueeze(1)
+        body_quaternions_w = reference_motion.body_quaternions
+        body_linear_velocities_w = reference_motion.body_linear_velocities
+        body_angular_velocities_w = reference_motion.body_angular_velocities
 
-        anchor_positions = local_body_positions[:, self.anchor_body_index]
-        anchor_quaternions = local_body_quaternions[:, self.anchor_body_index]
-        anchor_linear_velocities = body_linear_velocities[:, self.anchor_body_index]
-        anchor_angular_velocities = body_angular_velocities[:, self.anchor_body_index]
+        anchor_positions = local_body_positions_w[:, self.anchor_body_index]
+        anchor_quaternions = body_quaternions_w[:, self.anchor_body_index]
+        anchor_linear_velocities = body_linear_velocities_w[:, self.anchor_body_index]
+        anchor_angular_velocities = body_angular_velocities_w[:, self.anchor_body_index]
 
-        key_positions = local_body_positions[:, self.key_body_indices]
-        key_quaternions = local_body_quaternions[:, self.key_body_indices]
-        key_linear_velocities = body_linear_velocities[:, self.key_body_indices]
-        key_angular_velocities = body_angular_velocities[:, self.key_body_indices]
+        key_positions = local_body_positions_w[:, self.key_body_indices]
+        key_quaternions = body_quaternions_w[:, self.key_body_indices]
+        key_linear_velocities = body_linear_velocities_w[:, self.key_body_indices]
+        key_angular_velocities = body_angular_velocities_w[:, self.key_body_indices]
 
         reference_motion_state = MotionState(joint_pos, joint_vel, anchor_positions, anchor_quaternions,
                                          anchor_linear_velocities, anchor_angular_velocities,
@@ -102,22 +107,23 @@ class Observation:
         target_joint_pos = reference_state.joint_pos
         target_jiont_vel = reference_state.joint_vel
 
-        target_quat = reference_state.anchor_quat
-        robot_quat = robot_state.anchor_quat
+        target_anchor_quat_w = reference_state.anchor_quat
+        robot_anchor_quat_w = robot_state.anchor_quat
 
-        target_projected_gravity = quat_apply_inverse(target_quat, gravity_vector)
-        robot_projected_gravity = quat_apply_inverse(robot_quat, gravity_vector)
+        target_projected_gravity_b = quat_apply_inverse(target_anchor_quat_w, gravity_vector)
+        robot_projected_gravity_b = quat_apply_inverse(robot_anchor_quat_w, gravity_vector)
+        robot_anchor_ang_vel_w = robot_state.anchor_ang_vel
 
         # Clone tensors before injecting observation noise so we do not mutate
         # the live robot state or contaminate privileged observations.
-        robot_ang_vel = robot_state.anchor_ang_vel.clone()
+        robot_anchor_ang_vel_b = _anchor_ang_vel_b(robot_anchor_quat_w, robot_anchor_ang_vel_w).clone()
         robot_joint_pos = robot_state.joint_pos.clone()
         robot_joint_vel = robot_state.joint_vel.clone()
         last_action = last_applied_action.clone()
 
         if self.add_noise:
-            robot_projected_gravity += torch.empty_like(robot_projected_gravity).uniform_(-0.05, 0.05)
-            robot_ang_vel += torch.empty_like(robot_ang_vel).uniform_(-0.3, 0.3)
+            robot_projected_gravity_b += torch.empty_like(robot_projected_gravity_b).uniform_(-0.05, 0.05)
+            robot_anchor_ang_vel_b += torch.empty_like(robot_anchor_ang_vel_b).uniform_(-0.3, 0.3)
             robot_joint_pos += torch.empty_like(robot_joint_pos).uniform_(-0.01, 0.01)
             robot_joint_vel += torch.empty_like(robot_joint_vel).uniform_(-0.5, 0.5)
 
@@ -134,7 +140,7 @@ class Observation:
         #print("--------------------")
         motion_obs = torch.cat(
             [
-                target_projected_gravity,
+                target_projected_gravity_b,
                 target_joint_pos,
                 target_jiont_vel
             ], dim=-1
@@ -142,8 +148,8 @@ class Observation:
 
         robot_obs = torch.cat(
             [
-                robot_projected_gravity,
-                robot_ang_vel,
+                robot_projected_gravity_b,
+                robot_anchor_ang_vel_b,
                 robot_joint_pos,
                 robot_joint_vel,
                 last_action
@@ -177,8 +183,9 @@ class Observation:
         relative_key_pos = relative_key_pos.flatten(1)
         relative_key_tangent_and_normal = quaternion_to_tangent_and_normal(relative_key_quat).flatten(1)
         
-        anchor_lin_vel = robot_state.anchor_lin_vel
-        anchor_ang_vel = robot_state.anchor_ang_vel
+        anchor_lin_vel_w = robot_state.anchor_lin_vel
+        anchor_ang_vel_w = robot_state.anchor_ang_vel
+        anchor_ang_vel_b = _anchor_ang_vel_b(robot_state.anchor_quat, anchor_ang_vel_w)
 
         joint_pos = robot_state.joint_pos
         joint_vel = robot_state.joint_vel
@@ -193,8 +200,8 @@ class Observation:
                 relative_anchor_tangent_and_normal,
                 relative_key_pos,
                 relative_key_tangent_and_normal,
-                anchor_lin_vel,
-                anchor_ang_vel,
+                anchor_lin_vel_w,
+                anchor_ang_vel_b,
                 joint_pos,
                 joint_vel,
                 last_action

@@ -82,7 +82,7 @@ def _make_observation_env(sim2sim_mod):
         torch.tensor([5.0, 6.0, 7.0], dtype=torch.float32),
     )
     env.get_projected_gravity = lambda: torch.tensor([8.0, 9.0, 10.0], dtype=torch.float32)
-    env.get_base_ang_vel = lambda: torch.tensor([11.0, 12.0, 13.0], dtype=torch.float32)
+    env.get_anchor_ang_vel_b = lambda: torch.tensor([11.0, 12.0, 13.0], dtype=torch.float32)
     env.get_joint_pos = lambda: torch.tensor([14.0, 15.0], dtype=torch.float32)
     env.get_joint_vel = lambda: torch.tensor([16.0, 17.0], dtype=torch.float32)
     return env
@@ -354,7 +354,7 @@ def test_get_motion_command_uses_anchor_body_for_target_projected_gravity() -> N
     assert torch.allclose(projected_gravity, expected_gravity.float())
 
 
-def test_current_anchor_state_uses_anchor_body_quaternion_and_ang_vel() -> None:
+def test_current_anchor_state_uses_anchor_body_quaternion_and_body_frame_ang_vel() -> None:
     sim2sim_mod = _load_sim2sim_module()
     env = object.__new__(sim2sim_mod.MujocoEnv)
     env.anchor_body_id = 2
@@ -366,14 +366,19 @@ def test_current_anchor_state_uses_anchor_body_quaternion_and_ang_vel() -> None:
     )
 
     projected_gravity = env.get_projected_gravity()
-    base_ang_vel = env.get_base_ang_vel()
+    anchor_ang_vel_b = env.get_anchor_ang_vel_b()
 
+    anchor_quat_w = torch.tensor([0.70710677, 0.70710677, 0.0, 0.0], dtype=torch.float32)
     expected_gravity = sim2sim_mod.quat_rotate_inverse(
-        torch.tensor([0.70710677, 0.70710677, 0.0, 0.0], dtype=torch.float32),
+        anchor_quat_w,
         env.gravity_vector,
     )
+    expected_anchor_ang_vel_b = sim2sim_mod.quat_rotate_inverse(
+        anchor_quat_w,
+        torch.tensor([9.0, 8.0, 7.0], dtype=torch.float32),
+    )
     assert torch.allclose(projected_gravity, expected_gravity.float())
-    assert torch.allclose(base_ang_vel, torch.tensor([9.0, 8.0, 7.0], dtype=torch.float32))
+    assert torch.allclose(anchor_ang_vel_b, expected_anchor_ang_vel_b.float())
 
 
 def test_reset_with_pelvis_root_keeps_free_joint_aligned_to_pelvis_reference() -> None:

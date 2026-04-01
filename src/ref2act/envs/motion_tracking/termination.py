@@ -43,6 +43,10 @@ class Termination:
     def time_out(self, episode_length_buf: torch.Tensor, max_episode_length: torch.Tensor) -> torch.Tensor:
         return episode_length_buf >= (max_episode_length - 1)
 
+    def _projected_gravity_b(self, anchor_quat_w: torch.Tensor, gravity_vector_w: torch.Tensor) -> torch.Tensor:
+        """Project world gravity into the anchor/body frame used by the IMU-style orientation check."""
+        return quat_apply_inverse(anchor_quat_w, gravity_vector_w)
+
     def anchor_pos_error(self, robot: Articulation, reference_motion: ReferenceMotions) -> torch.Tensor:
         robot_pos = robot.data.body_pos_w[:, self.anchor_body_index]
         ref_pos = reference_motion.body_positions[:, self.anchor_body_index]
@@ -54,11 +58,14 @@ class Termination:
         return torch.norm(diff, dim=-1)
 
     def anchor_ori_error(self, robot: Articulation, reference_motion: ReferenceMotions) -> torch.Tensor:
-        robot_anchor_quat = robot.data.body_quat_w[:, self.anchor_body_index]
-        reference_anchor_quat = reference_motion.body_quaternions[:, self.anchor_body_index]
+        robot_anchor_quat_w = robot.data.body_quat_w[:, self.anchor_body_index]
+        reference_anchor_quat_w = reference_motion.body_quaternions[:, self.anchor_body_index]
 
-        robot_projected_gravity_b = quat_apply_inverse(robot_anchor_quat, robot.data.GRAVITY_VEC_W)
-        reference_projected_gravity_b = quat_apply_inverse(reference_anchor_quat, robot.data.GRAVITY_VEC_W)
+        robot_projected_gravity_b = self._projected_gravity_b(robot_anchor_quat_w, robot.data.GRAVITY_VEC_W)
+        reference_projected_gravity_b = self._projected_gravity_b(
+            reference_anchor_quat_w,
+            robot.data.GRAVITY_VEC_W,
+        )
 
         return torch.abs(robot_projected_gravity_b[:, 2] - reference_projected_gravity_b[:, 2])
 

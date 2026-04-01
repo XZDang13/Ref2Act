@@ -366,23 +366,25 @@ class MimicRewards:
         return position_error, quaternion_error
     
     def key_body_state_error(self, robot: Articulation, reference_motion: ReferenceMotions) -> tuple[torch.Tensor, torch.Tensor]:
-        robot_key_body_lin_vel = robot.data.body_lin_vel_w[:, self.cfg.key_body_indices]
-        robot_key_body_ang_vel = robot.data.body_ang_vel_w[:, self.cfg.key_body_indices]
+        # Keep reward terms in world frame so observation-frame changes do not
+        # silently alter the existing mimic objective.
+        robot_key_body_lin_vel_w = robot.data.body_lin_vel_w[:, self.cfg.key_body_indices]
+        robot_key_body_ang_vel_w = robot.data.body_ang_vel_w[:, self.cfg.key_body_indices]
 
-        alignment_quaternion = self.reference_alignment_quaternion(robot, reference_motion)
-        alignment_quaternion = alignment_quaternion[:, None, :].expand(-1, len(self.cfg.key_body_indices), -1)
+        alignment_quaternion_w = self.reference_alignment_quaternion(robot, reference_motion)
+        alignment_quaternion_w = alignment_quaternion_w[:, None, :].expand(-1, len(self.cfg.key_body_indices), -1)
 
-        reference_key_body_lin_vel = quat_apply(
-            alignment_quaternion,
+        reference_key_body_lin_vel_w = quat_apply(
+            alignment_quaternion_w,
             reference_motion.body_linear_velocities[:, self.cfg.key_body_indices],
         )
-        reference_key_body_ang_vel = quat_apply(
-            alignment_quaternion,
+        reference_key_body_ang_vel_w = quat_apply(
+            alignment_quaternion_w,
             reference_motion.body_angular_velocities[:, self.cfg.key_body_indices],
         )
 
-        lin_vel_error = (robot_key_body_lin_vel-reference_key_body_lin_vel).square().sum(-1).mean(-1)
-        ang_vel_error = (robot_key_body_ang_vel-reference_key_body_ang_vel).square().sum(-1).mean(-1)
+        lin_vel_error = (robot_key_body_lin_vel_w-reference_key_body_lin_vel_w).square().sum(-1).mean(-1)
+        ang_vel_error = (robot_key_body_ang_vel_w-reference_key_body_ang_vel_w).square().sum(-1).mean(-1)
 
         return lin_vel_error, ang_vel_error
 

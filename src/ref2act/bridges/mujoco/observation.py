@@ -15,7 +15,7 @@ class MujocoObservationContext:
     target_joint_pos: torch.Tensor
     target_joint_vel: torch.Tensor
     projected_gravity: torch.Tensor
-    base_ang_vel: torch.Tensor
+    anchor_ang_vel_b: torch.Tensor
     joint_pos: torch.Tensor
     joint_vel: torch.Tensor
     previous_action: torch.Tensor
@@ -51,7 +51,7 @@ class IsaacLabMujocoObservation:
         return torch.cat(
             [
                 context.projected_gravity,
-                context.base_ang_vel,
+                context.anchor_ang_vel_b,
                 context.joint_pos,
                 context.joint_vel,
                 context.previous_action,
