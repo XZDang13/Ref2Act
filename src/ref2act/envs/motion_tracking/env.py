@@ -11,15 +11,15 @@ from isaaclab.envs import DirectRLEnv
 from isaaclab.sensors import ContactSensor
 
 from ref2act.common.math import quat_mul
+from ref2act.common.observation_spec import ObservationLayout
 from ref2act.motion import MotionLib, MotionSampler, SamplingStrategy
 
 from .action import ActionProcessor
 from .curriculum import TerminationThresholdCurriculum
 from .observation import Observation
-from .rewards import Rewards, RewardsCfg
-from .termination import Termination
+from .rewards import RewardSpec, Rewards
+from .termination import Termination, TerminationSpec
 from .types import (
-    ActionMod,
     JOINT_POSITION_RANGE,
     POSE_RANGE,
     VELOCITY_RANGE,
@@ -63,27 +63,11 @@ class MotionTrackingEnv(DirectRLEnv):
             if cfg_factory is None:
                 raise ValueError("Either cfg or cfg_factory must be provided.")
             cfg = _resolve_cfg_factory(cfg_factory)
+        self._derive_observation_spaces(cfg)
         super().__init__(cfg, render_mode, **kwargs)
 
-        action_history_length = self.cfg.action_buffer_length
-        if hasattr(self.cfg, "action_latency_range"):
-            action_history_length = max(action_history_length, self.cfg.action_latency_range[1] + 1)
-        self.action_processer = ActionProcessor(
-            self.robot,
-            action_history_length,
-            self.cfg.action_noise,
-            action_mod=self.cfg.action_mod,
-        )
-        if self.cfg.action_mod == ActionMod.Median:
-            self.action_processer.set_median_scale_offset(self.robot)
-        elif self.cfg.action_mod == ActionMod.Offset:
-            self.action_processer.set_robot_default_scale_offset(self.robot)
-        elif self.cfg.action_mod == ActionMod.Residual:
-            self.action_processer.set_residual_scale_offset(self.robot)
-        elif self.cfg.action_mod == ActionMod.CurrentResidual:
-            self.action_processer.set_current_residual_scale_offset(self.robot)
-        else:
-            raise ValueError(f"Unsupported action mode: {self.cfg.action_mod}")
+        self.action_processer = ActionProcessor(self.robot, self.cfg.action)
+        self.action_processor = self.action_processer
 
         self.motion_lib = MotionLib(self.cfg.expert_motion_file, self.device)
 
@@ -118,58 +102,86 @@ class MotionTrackingEnv(DirectRLEnv):
                 "Reconvert the motion .npz files with `ref2act-convert --segment-bin-size ...`."
             )
 
-        self.observation_model = Observation(self.anchor_body_index, self.key_body_indices, self.cfg.add_obs_noise)
-
-        reward_cfg_kwargs = {
-            "anchor_height_only": getattr(self.cfg, "anchor_height_only", self.cfg.height_only),
-        }
-        for field in dataclasses.fields(RewardsCfg):
-            if field.name in {
-                "anchor_body_index",
-                "key_body_indices",
-                "collision_track_body_indices",
-                "foot_body_indices",
-                "foot_contact_body_indices",
-                "dt",
-                "anchor_height_only",
-            }:
-                continue
-            if hasattr(self.cfg, field.name):
-                reward_cfg_kwargs[field.name] = getattr(self.cfg, field.name)
-        reward_cfg = RewardsCfg(
+        observation_layout = ObservationLayout(
+            joint_dim=int(self.robot.data.joint_pos.shape[1]),
+            action_dim=int(self.robot.data.joint_pos.shape[1]),
+            key_body_count=len(self.key_body_indices),
+        )
+        self.observation_model = Observation(
+            spec=self.cfg.observation,
+            layout=observation_layout,
+            num_envs=self.cfg.scene.num_envs,
+            device=self.device,
             anchor_body_index=self.anchor_body_index,
             key_body_indices=self.key_body_indices,
-            collision_track_body_indices=collision_track_body_indices,
-            foot_body_indices=foot_body_indices,
-            foot_contact_body_indices=foot_contact_body_indices,
-            dt=self.step_dt,
-            **reward_cfg_kwargs,
         )
-        self.reward_model = Rewards(reward_cfg)
+
+        reward_spec = self._build_reward_spec(
+            collision_track_body_indices=tuple(int(index) for index in collision_track_body_indices),
+            foot_body_indices=tuple(int(index) for index in foot_body_indices),
+            foot_contact_body_indices=tuple(int(index) for index in foot_contact_body_indices),
+        )
+        self.reward_model = Rewards(reward_spec)
 
         viewer_enabled = getattr(self.cfg, "reference_motion_viewer_enabled", True)
         self.reference_motion_viewer = ReferenceMotionViewer(self.key_body_indices) if viewer_enabled else None
-        self.termination_model = Termination(
-            anchor_body_index=self.anchor_body_index,
-            end_effector_body_indices=self.end_effector_body_indices,
-            anchor_pos_error_threshold=self.cfg.anchor_pos_error_threshold,
-            anchor_ori_error_threshold=self.cfg.anchor_ori_error_threshold,
-            end_effector_pos_error_threshold=self.cfg.end_effector_pos_error_threshold,
-            height_only=self.cfg.height_only,
-            end_effector_height_only=getattr(self.cfg, "end_effector_height_only", False),
-            probabilistic_error_termination=getattr(self.cfg, "probabilistic_error_termination", False),
-            error_termination_ramp_multiplier=getattr(self.cfg, "error_termination_ramp_multiplier", 2.0),
-            error_termination_sigmoid_steepness=getattr(
-                self.cfg,
-                "error_termination_sigmoid_steepness",
-                8.0,
-            ),
-        )
+        self.termination_model = Termination(self._build_termination_spec())
         self.termination_curriculum = TerminationThresholdCurriculum(
             self.termination_model,
             getattr(self.cfg, "termination_curriculum", None),
         )
         self._apply_termination_curriculum(step=0)
+
+    @staticmethod
+    def _derive_observation_spaces(cfg) -> None:
+        description = cfg.observation.describe(
+            ObservationLayout(
+                joint_dim=int(cfg.action_space),
+                action_dim=int(cfg.action_space),
+                key_body_count=len(cfg.key_body_names),
+            )
+        )
+        cfg.motion_observation_space = description.group_dims.get("motion", 0)
+        cfg.robot_observation_space = description.group_dims.get("robot", 0)
+        cfg.critic_observation_space = description.group_dims.get("privilege", 0)
+        cfg.policy_observation_space = sum(
+            dim for group_name, dim in description.group_dims.items() if group_name != "privilege"
+        )
+        cfg.observation_space = cfg.policy_observation_space
+
+    def _build_reward_spec(
+        self,
+        *,
+        collision_track_body_indices: tuple[int, ...],
+        foot_body_indices: tuple[int, ...],
+        foot_contact_body_indices: tuple[int, ...],
+    ) -> RewardSpec:
+        terms = []
+        for term_cfg in self.cfg.rewards.terms:
+            updates = {}
+            if hasattr(term_cfg, "anchor_body_index"):
+                updates["anchor_body_index"] = self.anchor_body_index
+            if hasattr(term_cfg, "key_body_indices"):
+                updates["key_body_indices"] = tuple(self.key_body_indices)
+            if hasattr(term_cfg, "body_indices"):
+                updates["body_indices"] = collision_track_body_indices
+            if hasattr(term_cfg, "foot_body_indices"):
+                updates["foot_body_indices"] = foot_body_indices
+            if hasattr(term_cfg, "foot_contact_body_indices"):
+                updates["foot_contact_body_indices"] = foot_contact_body_indices
+            terms.append(dataclasses.replace(term_cfg, **updates) if updates else term_cfg)
+        return dataclasses.replace(self.cfg.rewards, dt=self.step_dt, terms=tuple(terms))
+
+    def _build_termination_spec(self) -> TerminationSpec:
+        failure_rules = []
+        for rule_cfg in self.cfg.termination.failure_rules:
+            updates = {}
+            if hasattr(rule_cfg, "anchor_body_index"):
+                updates["anchor_body_index"] = self.anchor_body_index
+            if hasattr(rule_cfg, "end_effector_body_indices"):
+                updates["end_effector_body_indices"] = tuple(self.end_effector_body_indices)
+            failure_rules.append(dataclasses.replace(rule_cfg, **updates) if updates else rule_cfg)
+        return dataclasses.replace(self.cfg.termination, failure_rules=tuple(failure_rules))
 
     def _resolve_shared_body_index(self, body_name: str) -> int:
         try:
@@ -365,7 +377,7 @@ class MotionTrackingEnv(DirectRLEnv):
         super()._reset_idx(env_ids)
 
         self.action_processer.reset_action_buffer(env_ids)
-        if self.cfg.add_action_noise:
+        if self.cfg.action.noise_scale > 0.0:
             self.action_processer.set_random_offset_noise(env_ids)
 
         self.sampler.reset(
@@ -378,4 +390,11 @@ class MotionTrackingEnv(DirectRLEnv):
         self._initialize_robot_from_reference(env_ids, reference_motion)
         self._store_reference_motion(env_ids, reference_motion)
         self.action_processer.set_reference_joint_position(reference_motion.joint_pos, env_ids)
+        self.observation_model.reset(
+            env_ids,
+            self.robot,
+            self.reference_motion,
+            self.scene,
+            self.action_processer.applied_action,
+        )
         self.target_pos = self.reference_motion.joint_pos

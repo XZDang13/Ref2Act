@@ -24,7 +24,11 @@ def _load_action_module():
 
     try:
         sys.modules.pop("ref2act.envs.motion_tracking.action", None)
-        return importlib.import_module("ref2act.envs.motion_tracking.action")
+        sys.modules.pop("ref2act.bridges.mujoco.action", None)
+        return (
+            importlib.import_module("ref2act.envs.motion_tracking.action"),
+            importlib.import_module("ref2act.bridges.mujoco.action"),
+        )
     finally:
         for module_name, previous_module in previous_modules.items():
             if previous_module is None:
@@ -60,11 +64,13 @@ def _make_robot(num_envs: int = 2, num_joints: int = 3):
     )
 
 
-def test_reset_action_buffer_clears_noise_and_resets_target() -> None:
-    action_mod = _load_action_module()
+def test_action_processor_resets_noise_and_target_from_structured_spec() -> None:
+    action_mod, _ = _load_action_module()
     robot = _make_robot()
-    processor = action_mod.ActionProcessor(robot, action_buffer_length=3, noise_scale=0.2)
-    processor.set_median_scale_offset(robot)
+    processor = action_mod.ActionProcessor(
+        robot,
+        action_mod.ActionSpec(mode="median", buffer_length=3, noise_scale=0.2),
+    )
 
     torch.manual_seed(0)
     processor.set_random_offset_noise([0, 1])
@@ -81,27 +87,13 @@ def test_reset_action_buffer_clears_noise_and_resets_target() -> None:
     assert not torch.allclose(processor.target_joint_position[1], torch.zeros(3))
 
 
-def test_random_offset_noise_updates_target_for_selected_envs() -> None:
-    action_mod = _load_action_module()
+def test_residual_mode_uses_reference_positions_and_clamps_targets() -> None:
+    action_mod, _ = _load_action_module()
     robot = _make_robot()
-    processor = action_mod.ActionProcessor(robot, action_buffer_length=2, noise_scale=0.2)
-    processor.set_median_scale_offset(robot)
-
-    assert torch.allclose(processor.target_joint_position, torch.zeros((2, 3)))
-
-    torch.manual_seed(1)
-    processor.set_random_offset_noise(torch.tensor([1]))
-
-    assert torch.allclose(processor.target_joint_position[0], torch.zeros(3))
-    assert torch.allclose(processor.target_joint_position[1], processor.offset_noise[1])
-    assert not torch.allclose(processor.target_joint_position[1], torch.zeros(3))
-
-
-def test_residual_action_uses_reference_positions_and_clamps_targets() -> None:
-    action_mod = _load_action_module()
-    robot = _make_robot()
-    processor = action_mod.ActionProcessor(robot, action_buffer_length=2, noise_scale=0.0, action_mod="residual")
-    processor.set_residual_scale_offset(robot)
+    processor = action_mod.ActionProcessor(
+        robot,
+        action_mod.ActionSpec(mode="residual", buffer_length=2, noise_scale=0.0),
+    )
     processor.set_reference_joint_position(
         torch.tensor(
             [
@@ -138,42 +130,8 @@ def test_residual_action_uses_reference_positions_and_clamps_targets() -> None:
     )
 
 
-def test_residual_reference_updates_and_reset_restore_reference_baseline() -> None:
-    action_mod = _load_action_module()
-    robot = _make_robot()
-    processor = action_mod.ActionProcessor(robot, action_buffer_length=2, noise_scale=0.2, action_mod="residual")
-    processor.set_residual_scale_offset(robot)
-    processor.set_reference_joint_position(
-        torch.tensor(
-            [
-                [0.3, 0.0, -0.1],
-                [0.0, 0.2, 0.1],
-            ],
-            dtype=torch.float32,
-        )
-    )
-    processor.pre_process_action(torch.ones((2, 3), dtype=torch.float32))
-
-    processor.set_reference_joint_position(
-        torch.tensor([[0.5, -0.5, 0.25]], dtype=torch.float32),
-        env_ids=[0],
-    )
-    assert torch.allclose(processor.target_joint_position[0], torch.tensor([1.0, 0.0, 0.75], dtype=torch.float32))
-
-    torch.manual_seed(2)
-    processor.set_random_offset_noise([1])
-    expected_target_with_noise = processor.reference_joint_position[1] + processor.scale + processor.offset_noise[1]
-    assert torch.allclose(processor.target_joint_position[1], expected_target_with_noise)
-
-    processor.reset_action_buffer([1])
-    assert torch.allclose(processor.offset_noise[1], torch.zeros(3))
-    assert torch.allclose(processor.applied_action[1], torch.zeros(3))
-    assert torch.allclose(processor.previous_applied_action[1], torch.zeros(3))
-    assert torch.allclose(processor.target_joint_position[1], processor.reference_joint_position[1])
-
-
-def test_current_residual_action_uses_current_joint_positions_and_clamps_targets() -> None:
-    action_mod = _load_action_module()
+def test_current_residual_mode_uses_current_joint_positions_and_clamps_targets() -> None:
+    action_mod, _ = _load_action_module()
     robot = _make_robot()
     robot.data.joint_pos[:] = torch.tensor(
         [
@@ -184,20 +142,9 @@ def test_current_residual_action_uses_current_joint_positions_and_clamps_targets
     )
     processor = action_mod.ActionProcessor(
         robot,
-        action_buffer_length=2,
-        noise_scale=0.0,
-        action_mod="CurrentResidual",
+        action_mod.ActionSpec(mode="current_residual", buffer_length=2, noise_scale=0.0),
     )
-    processor.set_current_residual_scale_offset(robot)
-    processor.set_reference_joint_position(
-        torch.tensor(
-            [
-                [0.9, 0.9, 0.9],
-                [-0.9, -0.9, -0.9],
-            ],
-            dtype=torch.float32,
-        )
-    )
+    processor.set_reference_joint_position(torch.full((2, 3), 0.9, dtype=torch.float32))
 
     processor.pre_process_action(
         torch.tensor(
@@ -225,40 +172,35 @@ def test_current_residual_action_uses_current_joint_positions_and_clamps_targets
     )
 
 
-def test_current_residual_reference_updates_and_reset_restore_current_joint_baseline() -> None:
-    action_mod = _load_action_module()
-    robot = _make_robot()
-    robot.data.joint_pos[:] = torch.tensor(
-        [
-            [0.3, 0.0, -0.1],
-            [0.0, 0.2, 0.1],
-        ],
-        dtype=torch.float32,
-    )
-    processor = action_mod.ActionProcessor(
-        robot,
-        action_buffer_length=2,
-        noise_scale=0.2,
-        action_mod="current_residual",
-    )
-    processor.set_current_residual_scale_offset(robot)
-    processor.pre_process_action(torch.ones((2, 3), dtype=torch.float32))
+def test_env_and_mujoco_action_modes_share_the_same_target_semantics() -> None:
+    action_mod, bridge_action_mod = _load_action_module()
 
-    robot.data.joint_pos[0] = torch.tensor([0.5, -0.5, 0.25], dtype=torch.float32)
-    processor.set_reference_joint_position(
-        torch.tensor([[0.9, 0.9, 0.9]], dtype=torch.float32),
-        env_ids=[0],
-    )
-    assert torch.allclose(processor.target_joint_position[0], torch.tensor([1.0, 0.0, 0.75], dtype=torch.float32))
+    raw_action = torch.tensor([[0.8, -0.4, 0.2]], dtype=torch.float32)
+    reference_joint_pos = torch.tensor([[0.25, -0.1, 0.5]], dtype=torch.float32)
+    current_joint_pos = torch.tensor([[0.2, -0.2, 0.0]], dtype=torch.float32)
 
-    torch.manual_seed(2)
-    processor.set_random_offset_noise([1])
-    expected_target_with_noise = robot.data.joint_pos[1] + processor.scale + processor.offset_noise[1]
-    assert torch.allclose(processor.target_joint_position[1], expected_target_with_noise)
+    for mode in ("median", "offset", "residual", "current_residual"):
+        robot = _make_robot(num_envs=1, num_joints=3)
+        robot.data.joint_pos[:] = current_joint_pos
+        processor = action_mod.ActionProcessor(
+            robot,
+            action_mod.ActionSpec(mode=mode, buffer_length=1, noise_scale=0.0),
+        )
+        processor.set_reference_joint_position(reference_joint_pos)
 
-    robot.data.joint_pos[1] = torch.tensor([-0.2, 0.1, 0.0], dtype=torch.float32)
-    processor.reset_action_buffer([1])
-    assert torch.allclose(processor.offset_noise[1], torch.zeros(3))
-    assert torch.allclose(processor.applied_action[1], torch.zeros(3))
-    assert torch.allclose(processor.previous_applied_action[1], torch.zeros(3))
-    assert torch.allclose(processor.target_joint_position[1], robot.data.joint_pos[1])
+        env_target = processor.scale_action(raw_action)
+
+        builder = bridge_action_mod.IsaacLabMujocoAction()
+        context = bridge_action_mod.MujocoActionContext(
+            raw_action=raw_action.squeeze(0),
+            action_mode=mode,
+            action_scale=processor.scale,
+            action_offset=processor.offset.squeeze(0) if processor.offset.ndim == 2 else processor.offset,
+            joint_pos_limits_lower=processor.joint_low_limit,
+            joint_pos_limits_upper=processor.joint_up_limit,
+            current_joint_pos_loader=lambda current_joint_pos=current_joint_pos: current_joint_pos.squeeze(0),
+            reference_joint_pos_loader=lambda reference_joint_pos=reference_joint_pos: reference_joint_pos.squeeze(0),
+        )
+        mujoco_target = builder.process_action(types.SimpleNamespace(), context).target_joint_pos.unsqueeze(0)
+
+        assert torch.allclose(env_target, mujoco_target)

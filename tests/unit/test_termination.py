@@ -4,6 +4,7 @@ import types
 
 import torch
 
+
 def _quat_apply(quat: torch.Tensor, vec: torch.Tensor) -> torch.Tensor:
     if vec.ndim == 1:
         vec = vec.expand(quat.shape[:-1] + (3,))
@@ -74,15 +75,22 @@ def _make_sampler(num_envs: int) -> types.SimpleNamespace:
     )
 
 
-def test_anchor_orientation_termination_uses_body_quat_world() -> None:
+def _make_context_inputs(num_envs: int = 1):
+    return torch.zeros(num_envs, dtype=torch.long), torch.full((num_envs,), 100, dtype=torch.long), _make_sampler(num_envs)
+
+
+def test_anchor_orientation_failure_rule_uses_body_quat_world() -> None:
     termination_mod = _load_termination_module()
     termination = termination_mod.Termination(
-        anchor_body_index=0,
-        end_effector_body_indices=[0],
-        anchor_pos_error_threshold=1.0,
-        anchor_ori_error_threshold=0.1,
-        end_effector_pos_error_threshold=1.0,
-        height_only=True,
+        termination_mod.TerminationSpec(
+            timeout_rules=(),
+            failure_rules=(
+                termination_mod.AnchorOrientationFailureRuleCfg(
+                    anchor_body_index=0,
+                    threshold=0.1,
+                ),
+            ),
+        )
     )
 
     robot = types.SimpleNamespace(
@@ -93,158 +101,147 @@ def test_anchor_orientation_termination_uses_body_quat_world() -> None:
         )
     )
     reference_motion = types.SimpleNamespace(
+        body_positions=torch.zeros((1, 1, 3), dtype=torch.float32),
         body_quaternions=torch.tensor([[[1.0, 0.0, 0.0, 0.0]]], dtype=torch.float32),
+        body_pos_relative=torch.zeros((1, 1, 3), dtype=torch.float32),
     )
 
-    terminated = termination.anchor_ori_error_terminate(robot, reference_motion)
+    episode_length_buf, max_episode_length, sampler = _make_context_inputs()
+    terminate, time_out = termination.get_dones(
+        episode_length_buf,
+        max_episode_length,
+        robot,
+        reference_motion,
+        sampler,
+    )
 
-    assert torch.equal(terminated, torch.tensor([False]))
+    assert torch.equal(terminate, torch.tensor([False]))
+    assert torch.equal(time_out, torch.tensor([False]))
 
 
-def test_probabilistic_error_probability_is_zero_at_or_below_threshold() -> None:
+def test_probabilistic_threshold_policy_probability_is_monotonic_before_ramp_limit() -> None:
     termination_mod = _load_termination_module()
-    termination = termination_mod.Termination(
-        anchor_body_index=0,
-        end_effector_body_indices=[0],
-        anchor_pos_error_threshold=0.25,
-        anchor_ori_error_threshold=1.0,
-        end_effector_pos_error_threshold=1.0,
-        probabilistic_error_termination=True,
+    policy = termination_mod.ThresholdPolicy(
+        termination_mod.ThresholdPolicyCfg(probabilistic=True, ramp_multiplier=2.0, sigmoid_steepness=8.0)
     )
 
-    probabilities = termination._error_to_termination_probability(torch.tensor([0.2, 0.25]), 0.25)
-
-    assert torch.equal(probabilities, torch.zeros(2))
-
-
-def test_probabilistic_error_probability_is_monotonic_before_ramp_limit() -> None:
-    termination_mod = _load_termination_module()
-    termination = termination_mod.Termination(
-        anchor_body_index=0,
-        end_effector_body_indices=[0],
-        anchor_pos_error_threshold=0.25,
-        anchor_ori_error_threshold=1.0,
-        end_effector_pos_error_threshold=1.0,
-        probabilistic_error_termination=True,
+    probabilities = policy._error_to_termination_probability(
+        torch.tensor([0.3, 0.375, 0.45], dtype=torch.float32),
+        0.25,
     )
-
-    errors = torch.tensor([0.3, 0.375, 0.45], dtype=torch.float32)
-    probabilities = termination._error_to_termination_probability(errors, 0.25)
 
     assert torch.all(probabilities > 0.0)
     assert torch.all(probabilities < 1.0)
     assert torch.all(probabilities[1:] > probabilities[:-1])
 
 
-def test_anchor_position_probabilistic_termination_is_certain_at_ramp_limit() -> None:
+def test_end_effector_position_rule_supports_full_3d_and_height_only_modes() -> None:
     termination_mod = _load_termination_module()
-    termination = termination_mod.Termination(
-        anchor_body_index=0,
-        end_effector_body_indices=[0],
-        anchor_pos_error_threshold=0.25,
-        anchor_ori_error_threshold=1.0,
-        end_effector_pos_error_threshold=1.0,
-        height_only=True,
-        probabilistic_error_termination=True,
-    )
-
     robot = types.SimpleNamespace(
         data=types.SimpleNamespace(
-            body_pos_w=torch.tensor([[[0.0, 0.0, 0.5]]], dtype=torch.float32),
+            body_pos_w=torch.tensor([[[0.0, 0.0, 0.0], [0.2, 0.2, 0.0]]], dtype=torch.float32),
+            body_quat_w=torch.tensor([[[1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]]], dtype=torch.float32),
+            GRAVITY_VEC_W=torch.tensor([[0.0, 0.0, -1.0]], dtype=torch.float32),
         )
     )
     reference_motion = types.SimpleNamespace(
-        body_positions=torch.zeros((1, 1, 3), dtype=torch.float32),
-    )
-
-    terminated = termination.anchor_pos_error_terminate(robot, reference_motion)
-
-    assert torch.equal(terminated, torch.tensor([True]))
-
-
-def test_end_effector_termination_keeps_full_3d_error_when_height_only() -> None:
-    termination_mod = _load_termination_module()
-    termination = termination_mod.Termination(
-        anchor_body_index=0,
-        end_effector_body_indices=[1],
-        anchor_pos_error_threshold=1.0,
-        anchor_ori_error_threshold=1.0,
-        end_effector_pos_error_threshold=0.25,
-        height_only=True,
-    )
-
-    robot = types.SimpleNamespace(
-        data=types.SimpleNamespace(
-            body_pos_w=torch.tensor(
-                [[[0.0, 0.0, 0.0], [0.3, 0.0, 0.0]]],
-                dtype=torch.float32,
-            ),
-        )
-    )
-    reference_motion = types.SimpleNamespace(
+        body_positions=torch.zeros((1, 2, 3), dtype=torch.float32),
+        body_quaternions=torch.tensor(
+            [[[1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]]],
+            dtype=torch.float32,
+        ),
         body_pos_relative=torch.zeros((1, 2, 3), dtype=torch.float32),
     )
 
-    terminated = termination.end_effector_pos_error_terminate(robot, reference_motion)
-
-    assert torch.equal(terminated, torch.tensor([True]))
-
-
-def test_end_effector_termination_can_use_height_only_mode() -> None:
-    termination_mod = _load_termination_module()
-    termination = termination_mod.Termination(
-        anchor_body_index=0,
-        end_effector_body_indices=[1],
-        anchor_pos_error_threshold=1.0,
-        anchor_ori_error_threshold=1.0,
-        end_effector_pos_error_threshold=0.25,
-        height_only=True,
-        end_effector_height_only=True,
-    )
-
-    robot = types.SimpleNamespace(
-        data=types.SimpleNamespace(
-            body_pos_w=torch.tensor(
-                [[[0.0, 0.0, 0.0], [0.3, 0.0, 0.1]]],
-                dtype=torch.float32,
+    full_3d = termination_mod.Termination(
+        termination_mod.TerminationSpec(
+            timeout_rules=(),
+            failure_rules=(
+                termination_mod.EndEffectorPositionFailureRuleCfg(
+                    end_effector_body_indices=(1,),
+                    threshold=0.25,
+                    height_only=False,
+                ),
             ),
         )
     )
-    reference_motion = types.SimpleNamespace(
-        body_pos_relative=torch.zeros((1, 2, 3), dtype=torch.float32),
+    height_only = termination_mod.Termination(
+        termination_mod.TerminationSpec(
+            timeout_rules=(),
+            failure_rules=(
+                termination_mod.EndEffectorPositionFailureRuleCfg(
+                    end_effector_body_indices=(1,),
+                    threshold=0.25,
+                    height_only=True,
+                ),
+            ),
+        )
     )
 
-    terminated = termination.end_effector_pos_error_terminate(robot, reference_motion)
+    episode_length_buf, max_episode_length, sampler = _make_context_inputs()
+    full_terminate, _ = full_3d.get_dones(
+        episode_length_buf,
+        max_episode_length,
+        robot,
+        reference_motion,
+        sampler,
+    )
+    height_terminate, _ = height_only.get_dones(
+        episode_length_buf,
+        max_episode_length,
+        robot,
+        reference_motion,
+        sampler,
+    )
 
-    assert torch.equal(terminated, torch.tensor([False]))
+    assert torch.equal(full_terminate, torch.tensor([True]))
+    assert torch.equal(height_terminate, torch.tensor([False]))
 
 
 def test_runtime_threshold_update_takes_effect_without_recreating_termination() -> None:
     termination_mod = _load_termination_module()
     termination = termination_mod.Termination(
-        anchor_body_index=0,
-        end_effector_body_indices=[1],
-        anchor_pos_error_threshold=0.25,
-        anchor_ori_error_threshold=1.0,
-        end_effector_pos_error_threshold=1.0,
-        height_only=True,
+        termination_mod.TerminationSpec(
+            timeout_rules=(),
+            failure_rules=(
+                termination_mod.AnchorPositionFailureRuleCfg(
+                    anchor_body_index=0,
+                    threshold=0.25,
+                    height_only=True,
+                ),
+            ),
+        )
     )
 
     robot = types.SimpleNamespace(
         data=types.SimpleNamespace(
-            body_pos_w=torch.tensor(
-                [[[0.0, 0.0, 0.3], [0.0, 0.0, 0.0]]],
-                dtype=torch.float32,
-            ),
+            body_pos_w=torch.tensor([[[0.0, 0.0, 0.3]]], dtype=torch.float32),
+            body_quat_w=torch.tensor([[[1.0, 0.0, 0.0, 0.0]]], dtype=torch.float32),
+            GRAVITY_VEC_W=torch.tensor([[0.0, 0.0, -1.0]], dtype=torch.float32),
         )
     )
     reference_motion = types.SimpleNamespace(
-        body_positions=torch.zeros((1, 2, 3), dtype=torch.float32),
+        body_positions=torch.zeros((1, 1, 3), dtype=torch.float32),
+        body_quaternions=torch.tensor([[[1.0, 0.0, 0.0, 0.0]]], dtype=torch.float32),
+        body_pos_relative=torch.zeros((1, 1, 3), dtype=torch.float32),
     )
 
-    initial_terminated = termination.anchor_pos_error_terminate(robot, reference_motion)
-    termination.anchor_pos_error_threshold = 0.35
-    updated_terminated = termination.anchor_pos_error_terminate(robot, reference_motion)
+    episode_length_buf, max_episode_length, sampler = _make_context_inputs()
+    initial_terminated, _ = termination.get_dones(
+        episode_length_buf,
+        max_episode_length,
+        robot,
+        reference_motion,
+        sampler,
+    )
+    termination.get_failure_rule("anchor_position_failure").threshold = 0.35
+    updated_terminated, _ = termination.get_dones(
+        episode_length_buf,
+        max_episode_length,
+        robot,
+        reference_motion,
+        sampler,
+    )
 
     assert torch.equal(initial_terminated, torch.tensor([True]))
     assert torch.equal(updated_terminated, torch.tensor([False]))
@@ -252,15 +249,30 @@ def test_runtime_threshold_update_takes_effect_without_recreating_termination() 
 
 def test_probabilistic_get_dones_samples_each_branch_independently(monkeypatch) -> None:
     termination_mod = _load_termination_module()
+    policy = termination_mod.ThresholdPolicyCfg(probabilistic=True)
     termination = termination_mod.Termination(
-        anchor_body_index=0,
-        end_effector_body_indices=[1, 2],
-        anchor_pos_error_threshold=0.25,
-        anchor_ori_error_threshold=0.75,
-        end_effector_pos_error_threshold=0.25,
-        height_only=True,
-        end_effector_height_only=True,
-        probabilistic_error_termination=True,
+        termination_mod.TerminationSpec(
+            timeout_rules=(),
+            failure_rules=(
+                termination_mod.AnchorPositionFailureRuleCfg(
+                    anchor_body_index=0,
+                    threshold=0.25,
+                    height_only=True,
+                    policy=policy,
+                ),
+                termination_mod.AnchorOrientationFailureRuleCfg(
+                    anchor_body_index=0,
+                    threshold=0.75,
+                    policy=policy,
+                ),
+                termination_mod.EndEffectorPositionFailureRuleCfg(
+                    end_effector_body_indices=(1, 2),
+                    threshold=0.25,
+                    height_only=True,
+                    policy=policy,
+                ),
+            ),
+        )
     )
 
     robot = types.SimpleNamespace(
@@ -300,89 +312,16 @@ def test_probabilistic_get_dones_samples_each_branch_independently(monkeypatch) 
 
     monkeypatch.setattr(termination_mod.torch, "rand_like", fake_rand_like)
 
+    episode_length_buf, max_episode_length, sampler = _make_context_inputs()
     terminate, time_out = termination.get_dones(
-        torch.zeros(1, dtype=torch.long),
-        torch.full((1,), 100, dtype=torch.long),
+        episode_length_buf,
+        max_episode_length,
         robot,
         reference_motion,
-        _make_sampler(1),
+        sampler,
     )
 
     assert torch.equal(terminate, torch.tensor([True]))
     assert torch.equal(time_out, torch.tensor([False]))
     assert rand_shapes == [(1,), (1,), (1, 2)]
     assert torch.equal(termination.terminated_env_ids, torch.tensor([0]))
-
-
-def test_probabilistic_get_dones_tracks_only_sampled_terminated_env_ids(monkeypatch) -> None:
-    termination_mod = _load_termination_module()
-    termination = termination_mod.Termination(
-        anchor_body_index=0,
-        end_effector_body_indices=[1],
-        anchor_pos_error_threshold=0.25,
-        anchor_ori_error_threshold=1.0,
-        end_effector_pos_error_threshold=1.0,
-        height_only=True,
-        probabilistic_error_termination=True,
-    )
-
-    robot = types.SimpleNamespace(
-        data=types.SimpleNamespace(
-            body_pos_w=torch.tensor(
-                [
-                    [[0.0, 0.0, 0.375], [0.0, 0.0, 0.0]],
-                    [[0.0, 0.0, 0.375], [0.0, 0.0, 0.0]],
-                ],
-                dtype=torch.float32,
-            ),
-            body_quat_w=torch.tensor(
-                [
-                    [[1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]],
-                    [[1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]],
-                ],
-                dtype=torch.float32,
-            ),
-            GRAVITY_VEC_W=torch.tensor(
-                [[0.0, 0.0, -1.0], [0.0, 0.0, -1.0]],
-                dtype=torch.float32,
-            ),
-        )
-    )
-    reference_motion = types.SimpleNamespace(
-        body_positions=torch.zeros((2, 2, 3), dtype=torch.float32),
-        body_quaternions=torch.tensor(
-            [
-                [[1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]],
-                [[1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]],
-            ],
-            dtype=torch.float32,
-        ),
-        body_pos_relative=torch.zeros((2, 2, 3), dtype=torch.float32),
-    )
-
-    draws = [
-        torch.tensor([0.6, 0.4], dtype=torch.float32),
-        torch.tensor([0.9, 0.9], dtype=torch.float32),
-        torch.tensor([[0.9], [0.9]], dtype=torch.float32),
-    ]
-    call_count = 0
-
-    def fake_rand_like(tensor: torch.Tensor) -> torch.Tensor:
-        nonlocal call_count
-        draw = draws[min(call_count, len(draws) - 1)].to(device=tensor.device, dtype=tensor.dtype)
-        call_count += 1
-        assert draw.shape == tensor.shape
-        return draw
-
-    monkeypatch.setattr(termination_mod.torch, "rand_like", fake_rand_like)
-
-    terminate, _ = termination.get_dones(
-        torch.zeros(2, dtype=torch.long),
-        torch.full((2,), 100, dtype=torch.long),
-        robot,
-        reference_motion,
-        _make_sampler(2),
-    )
-
-    assert torch.equal(terminate, torch.tensor([False, True]))
-    assert torch.equal(termination.terminated_env_ids, torch.tensor([1]))

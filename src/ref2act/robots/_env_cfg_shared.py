@@ -12,7 +12,9 @@ from isaaclab.managers import SceneEntityCfg
 from isaaclab.sensors import ContactSensorCfg
 from isaaclab.markers import VisualizationMarkersCfg
 from isaaclab.markers.config import FRAME_MARKER_CFG
+from ref2act.envs.motion_tracking.action import ActionSpec
 from ref2act.envs.motion_tracking.curriculum import TerminationCurriculumCfg
+from ref2act.envs.motion_tracking.observation import default_training_observation_spec
 from ref2act.envs.motion_tracking.randomization import (
     randomize_action_latency,
     randomize_group_actuator_gains,
@@ -20,7 +22,8 @@ from ref2act.envs.motion_tracking.randomization import (
     randomize_rigid_body_collider_offsets_by_body,
     randomize_rigid_body_com_from_default,
 )
-from ref2act.envs.motion_tracking.types import ActionMod
+from ref2act.envs.motion_tracking.rewards import default_reward_spec
+from ref2act.envs.motion_tracking.termination import default_termination_spec
 from ref2act.motion.sampling import SamplerMod, SamplingStrategy
 from ref2act.robots._articulation_shared import G1_CFG, PI_PLUS_CFG
 
@@ -364,19 +367,21 @@ class G1MotionTrackingEnvCfg(DirectRLEnvCfg):
 
     decimation = 4
 
-    observation_space = 124
-    policy_observation_space = 124
-    motion_observation_space = 49
-    robot_observation_space = 75
-
-    critic_observation_space = 256
+    observation_space = 0
+    policy_observation_space = 0
+    motion_observation_space = 0
+    robot_observation_space = 0
+    critic_observation_space = 0
     action_space = 23
     state_space = 0
 
-    action_buffer_length = G1_ACTION_LATENCY_RANGE[1] + 1
-    action_latency_range = G1_ACTION_LATENCY_RANGE
-    action_mod = ActionMod.Median
-    action_noise = 0.025
+    observation = default_training_observation_spec(add_noise=True)
+    action = ActionSpec(
+        mode="median",
+        buffer_length=G1_ACTION_LATENCY_RANGE[1] + 1,
+        latency_range=G1_ACTION_LATENCY_RANGE,
+        noise_scale=0.025,
+    )
 
     expert_motion_file = None
 
@@ -387,8 +392,8 @@ class G1MotionTrackingEnvCfg(DirectRLEnvCfg):
     sampling_strategy: SamplingStrategy | None = None
     sampler_mod:SamplerMod = SamplerMod.Clamp
 
-    root_link_name = "torso_link"
-    anchor_body_name = "torso_link"
+    root_link_name = "pelvis"
+    anchor_body_name = "pelvis"
 
     key_body_names = [
         "pelvis",
@@ -426,22 +431,17 @@ class G1MotionTrackingEnvCfg(DirectRLEnvCfg):
         "right_ankle_roll_link",
     ]
 
-    foot_slip_weight = -0.1
-    foot_slip_force_threshold = 1.0
-
-    anchor_pos_error_threshold = 0.25
-    anchor_ori_error_threshold = 0.8
-    end_effector_pos_error_threshold = 0.25
-    #termination_curriculum: TerminationCurriculumCfg = TerminationCurriculumCfg()
-    probabilistic_error_termination = True
-    error_termination_ramp_multiplier = 2.0
-    error_termination_sigmoid_steepness = 8.0
-    height_only = True
-    end_effector_height_only = True
+    rewards = default_reward_spec(dt=0.0, anchor_height_only=True)
+    termination = default_termination_spec(
+        anchor_height_only=True,
+        end_effector_height_only=False,
+        probabilistic_error_termination=True,
+        error_termination_ramp_multiplier=2.0,
+        error_termination_sigmoid_steepness=8.0,
+    )
+    termination_curriculum: TerminationCurriculumCfg | None = None
 
     training = True
-    add_obs_noise = True
-    add_action_noise = True
     add_reset_noise = True
     random_start = True
 
@@ -489,16 +489,21 @@ class PiPlusMotionTrackingEnvCfg(DirectRLEnvCfg):
 
     decimation = 4
 
-    observation_space = 124
-    policy_observation_space = 124
-    critic_observation_space = 256
+    observation_space = 0
+    policy_observation_space = 0
+    motion_observation_space = 0
+    robot_observation_space = 0
+    critic_observation_space = 0
     action_space = 23
     state_space = 0
 
-    action_buffer_length = PI_PLUS_ACTION_LATENCY_RANGE[1] + 1
-    action_latency_range = PI_PLUS_ACTION_LATENCY_RANGE
-    action_mod = ActionMod.Median
-    action_noise = 0.01
+    observation = default_training_observation_spec(add_noise=True)
+    action = ActionSpec(
+        mode="median",
+        buffer_length=PI_PLUS_ACTION_LATENCY_RANGE[1] + 1,
+        latency_range=PI_PLUS_ACTION_LATENCY_RANGE,
+        noise_scale=0.01,
+    )
 
     expert_motion_file = None
 
@@ -548,22 +553,17 @@ class PiPlusMotionTrackingEnvCfg(DirectRLEnvCfg):
         "r_ankle_roll_link",
     ]
 
-    foot_slip_weight = -0.1
-    foot_slip_force_threshold = 1.0
-
-    anchor_pos_error_threshold = 0.25
-    anchor_ori_error_threshold = 0.8
-    end_effector_pos_error_threshold = 0.15
+    rewards = default_reward_spec(dt=0.0, anchor_height_only=True)
+    termination = default_termination_spec(
+        anchor_height_only=True,
+        end_effector_height_only=False,
+        probabilistic_error_termination=True,
+        error_termination_ramp_multiplier=2.0,
+        error_termination_sigmoid_steepness=8.0,
+    )
     termination_curriculum: TerminationCurriculumCfg = TerminationCurriculumCfg()
-    probabilistic_error_termination = True
-    error_termination_ramp_multiplier = 2.0
-    error_termination_sigmoid_steepness = 8.0
-    height_only = True
-    end_effector_height_only = False
 
     training = True
-    add_obs_noise = True
-    add_action_noise = True
     add_reset_noise = True
     random_start = True
 

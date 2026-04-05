@@ -1,419 +1,527 @@
-import dataclasses
-import torch
+from __future__ import annotations
 
+import dataclasses
+from dataclasses import dataclass, field
+from typing import Protocol
+
+import torch
 from isaaclab.assets import Articulation
-from isaaclab.utils.math import quat_apply, quat_error_magnitude, quat_inv, quat_mul, yaw_quat
 from isaaclab.sensors import ContactSensor
-from ref2act.common.utils import IndexLike
+from isaaclab.utils.math import quat_apply, quat_error_magnitude, quat_inv, quat_mul, yaw_quat
 
 from .action import ActionProcessor
 from .types import ReferenceMotions
 
-@dataclasses.dataclass
-class PenaltyRewardCfg:
-    collision_track_body_indices: list[int] = dataclasses.MISSING
-    foot_body_indices: list[int] = dataclasses.MISSING
-    foot_contact_body_indices: list[int] = dataclasses.MISSING
-    joint_acc_weight:float = -2.5e-7
-    joint_torque_wegiht:float = -1e-5
-    joint_limit_weight:float = -10.0
-    self_collision_weight:float = -1.0
-    self_collision_force_threshold:float = 10.0
-    foot_slip_weight: float = -0.1
-    foot_slip_force_threshold: float = 1.0
-    action_rate_weight:float = -1e-2
 
-@dataclasses.dataclass
-class MimicRewardsCfg:
-    anchor_body_index:int = dataclasses.MISSING
-    key_body_indices:list[int] = dataclasses.MISSING
+@dataclass(frozen=True)
+class RewardTermCfg:
+    id: str
+    type: str
+    weight: float = 1.0
+    enabled: bool = True
 
-    position_std:float = 0.3 ** 2
-    quaternion_std:float = 0.4 ** 2
-    linear_vel_std:float = 1.0 ** 2
-    ang_vel_std:float = 3.14 ** 2
-    joint_position_std:float = 0.5 ** 2
-    joint_vel_std:float = 1.0 ** 2
 
-    mimic_anchor_position_weight:float = 0.5
-    mimic_anchor_quaternion_weight:float = 0.5
-    mimic_key_position_wegiht:float = 1.0
-    mimic_key_quaternion_weight:float = 1.0
-    mimic_key_linear_vel_weight:float = 1.0
-    mimic_key_ang_vel_weight:float = 1.0
-    mimic_joint_position_weight:float = 0.0
-    mimic_joint_vel_weight:float = 0.0
+@dataclass(frozen=True)
+class JointAccPenaltyTermCfg(RewardTermCfg):
+    id: str = "joint_acc_penalty"
+    type: str = "joint_acc_penalty"
+    weight: float = -2.5e-7
 
-    anchor_height_only:bool = False
 
-@dataclasses.dataclass
-class AMPRewardsCfg:
-    discriminator_reward_scale: float = 2.0
-    discriminator_reward_weight: float = 1.0
+@dataclass(frozen=True)
+class JointTorquePenaltyTermCfg(RewardTermCfg):
+    id: str = "joint_torque_penalty"
+    type: str = "joint_torque_penalty"
+    weight: float = -1e-5
 
-@dataclasses.dataclass
-class RewardsCfg:
-    # Mimic reward indices.
-    anchor_body_index: int = dataclasses.MISSING
-    key_body_indices: list[int] = dataclasses.MISSING
-    # Penalty reward indices.
-    collision_track_body_indices: list[int] = dataclasses.MISSING
-    foot_body_indices: list[int] = dataclasses.MISSING
-    foot_contact_body_indices: list[int] = dataclasses.MISSING
-    # Shared options.
-    dt: float = dataclasses.MISSING
 
-    return_vector: bool = False
-    # Mimic reward weights.
-    position_std:float = 0.3 ** 2
-    quaternion_std:float = 0.4 ** 2
-    linear_vel_std:float = 1.0 ** 2
-    ang_vel_std:float = 3.14 ** 2
-    joint_position_std:float = 0.5 ** 2
-    joint_vel_std:float = 1.0 ** 2
+@dataclass(frozen=True)
+class JointLimitPenaltyTermCfg(RewardTermCfg):
+    id: str = "joint_limit_penalty"
+    type: str = "joint_limit_penalty"
+    weight: float = -10.0
 
-    mimic_anchor_position_weight:float = 0.5
-    mimic_anchor_quaternion_weight:float = 0.5
-    mimic_key_position_wegiht:float = 1.0
-    mimic_key_quaternion_weight:float = 1.0
-    mimic_key_linear_vel_weight:float = 1.0
-    mimic_key_ang_vel_weight:float = 1.0
-    mimic_joint_position_weight:float = 1.0
-    mimic_joint_vel_weight:float = 1.0
-    anchor_height_only:bool = False
-    # Penalty reward weights.
-    joint_acc_weight:float = -2.5e-7
-    joint_torque_wegiht:float = -1e-5
-    joint_limit_weight:float = -10.0
-    self_collision_weight:float = -0.1
-    self_collision_force_threshold:float = 1.0
-    foot_slip_weight: float = -0.1
-    foot_slip_force_threshold: float = 1.0
-    action_rate_weight:float = -1e-3
+
+@dataclass(frozen=True)
+class SelfCollisionPenaltyTermCfg(RewardTermCfg):
+    id: str = "self_collision_penalty"
+    type: str = "self_collision_penalty"
+    weight: float = -0.1
+    body_indices: tuple[int, ...] = ()
+    force_threshold: float = 1.0
+
+
+@dataclass(frozen=True)
+class FootSlipPenaltyTermCfg(RewardTermCfg):
+    id: str = "foot_slip_penalty"
+    type: str = "foot_slip_penalty"
+    weight: float = -0.1
+    foot_body_indices: tuple[int, ...] = ()
+    foot_contact_body_indices: tuple[int, ...] = ()
+    force_threshold: float = 1.0
+
+
+@dataclass(frozen=True)
+class ActionRatePenaltyTermCfg(RewardTermCfg):
+    id: str = "action_rate_penalty"
+    type: str = "action_rate_penalty"
+    weight: float = -1e-3
+
+
+@dataclass(frozen=True)
+class AnchorPositionRewardTermCfg(RewardTermCfg):
+    id: str = "anchor_position_reward"
+    type: str = "anchor_position_reward"
+    weight: float = 0.5
+    anchor_body_index: int = -1
+    std: float = 0.3**2
+    height_only: bool = False
+
+
+@dataclass(frozen=True)
+class AnchorQuaternionRewardTermCfg(RewardTermCfg):
+    id: str = "anchor_quaternion_reward"
+    type: str = "anchor_quaternion_reward"
+    weight: float = 0.5
+    anchor_body_index: int = -1
+    std: float = 0.4**2
+
+
+@dataclass(frozen=True)
+class KeyPositionRewardTermCfg(RewardTermCfg):
+    id: str = "key_position_reward"
+    type: str = "key_position_reward"
+    weight: float = 1.0
+    key_body_indices: tuple[int, ...] = ()
+    std: float = 0.3**2
+
+
+@dataclass(frozen=True)
+class KeyQuaternionRewardTermCfg(RewardTermCfg):
+    id: str = "key_quaternion_reward"
+    type: str = "key_quaternion_reward"
+    weight: float = 1.0
+    key_body_indices: tuple[int, ...] = ()
+    std: float = 0.4**2
+
+
+@dataclass(frozen=True)
+class KeyLinearVelocityRewardTermCfg(RewardTermCfg):
+    id: str = "key_linear_velocity_reward"
+    type: str = "key_linear_velocity_reward"
+    weight: float = 1.0
+    anchor_body_index: int = -1
+    key_body_indices: tuple[int, ...] = ()
+    std: float = 1.0**2
+
+
+@dataclass(frozen=True)
+class KeyAngularVelocityRewardTermCfg(RewardTermCfg):
+    id: str = "key_angular_velocity_reward"
+    type: str = "key_angular_velocity_reward"
+    weight: float = 1.0
+    anchor_body_index: int = -1
+    key_body_indices: tuple[int, ...] = ()
+    std: float = 3.14**2
+
+
+@dataclass(frozen=True)
+class RewardSpec:
+    terms: tuple[RewardTermCfg, ...]
+    dt: float
+    output_mode: str = "sum"
+
+    def enabled_terms(self) -> tuple[RewardTermCfg, ...]:
+        return tuple(term for term in self.terms if term.enabled)
+
+
+@dataclass
+class RewardTermResult:
+    value: torch.Tensor
+    metrics: dict[str, torch.Tensor] = field(default_factory=dict)
+
+
+@dataclass
+class RewardComputation:
+    vector: torch.Tensor
+    total: torch.Tensor
+    components: dict[str, torch.Tensor]
+    metrics: dict[str, dict[str, torch.Tensor]]
+
+
+class RewardTerm(Protocol):
+    type_name: str
+
+    def compute(self, context: "RewardContext", spec: RewardTermCfg) -> RewardTermResult:
+        ...
+
+
+@dataclass
+class RewardContext:
+    robot: Articulation
+    reference_motion: ReferenceMotions
+    contact_sensor: ContactSensor
+    action_model: ActionProcessor
+    _cache: dict[tuple, tuple[torch.Tensor, ...] | torch.Tensor] = field(default_factory=dict, init=False, repr=False)
+
+    def anchor_body_pose_error(
+        self,
+        anchor_body_index: int,
+        *,
+        height_only: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        cache_key = ("anchor_body_pose_error", anchor_body_index, height_only)
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            return cached  # type: ignore[return-value]
+
+        position_slice = slice(2, 3) if height_only else slice(None)
+        robot_anchor_body_positions = self.robot.data.body_pos_w[:, anchor_body_index, position_slice]
+        robot_anchor_body_quaternions = self.robot.data.body_quat_w[:, anchor_body_index]
+
+        reference_anchor_body_positions = self.reference_motion.body_positions[:, anchor_body_index, position_slice]
+        reference_anchor_body_quaternions = self.reference_motion.body_quaternions[:, anchor_body_index]
+
+        position_error = (robot_anchor_body_positions - reference_anchor_body_positions).square().sum(-1)
+        quaternion_error = quat_error_magnitude(robot_anchor_body_quaternions, reference_anchor_body_quaternions).square()
+        result = (position_error, quaternion_error)
+        self._cache[cache_key] = result
+        return result
+
+    def key_body_pose_error(self, key_body_indices: tuple[int, ...]) -> tuple[torch.Tensor, torch.Tensor]:
+        cache_key = ("key_body_pose_error", key_body_indices)
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            return cached  # type: ignore[return-value]
+
+        robot_key_body_positions = self.robot.data.body_pos_w[:, key_body_indices]
+        robot_key_body_quaternions = self.robot.data.body_quat_w[:, key_body_indices]
+
+        reference_relative_key_body_positions = self.reference_motion.body_pos_relative[:, key_body_indices]
+        reference_relative_key_body_quaternions = self.reference_motion.body_quat_relative[:, key_body_indices]
+
+        position_error = (robot_key_body_positions - reference_relative_key_body_positions).square().sum(-1).mean(-1)
+        quaternion_error = (
+            quat_error_magnitude(robot_key_body_quaternions, reference_relative_key_body_quaternions).square().mean(-1)
+        )
+        result = (position_error, quaternion_error)
+        self._cache[cache_key] = result
+        return result
+
+    def reference_alignment_quaternion(self, anchor_body_index: int) -> torch.Tensor:
+        cache_key = ("reference_alignment_quaternion", anchor_body_index)
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            return cached  # type: ignore[return-value]
+
+        robot_anchor_quaternion = self.robot.data.body_quat_w[:, anchor_body_index]
+        reference_anchor_quaternion = self.reference_motion.body_quaternions[:, anchor_body_index]
+        result = yaw_quat(quat_mul(robot_anchor_quaternion, quat_inv(reference_anchor_quaternion)))
+        self._cache[cache_key] = result
+        return result
+
+    def key_body_state_error(
+        self,
+        anchor_body_index: int,
+        key_body_indices: tuple[int, ...],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        cache_key = ("key_body_state_error", anchor_body_index, key_body_indices)
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            return cached  # type: ignore[return-value]
+
+        robot_key_body_lin_vel_w = self.robot.data.body_lin_vel_w[:, key_body_indices]
+        robot_key_body_ang_vel_w = self.robot.data.body_ang_vel_w[:, key_body_indices]
+
+        alignment_quaternion_w = self.reference_alignment_quaternion(anchor_body_index)
+        alignment_quaternion_w = alignment_quaternion_w[:, None, :].expand(-1, len(key_body_indices), -1)
+
+        reference_key_body_lin_vel_w = quat_apply(
+            alignment_quaternion_w,
+            self.reference_motion.body_linear_velocities[:, key_body_indices],
+        )
+        reference_key_body_ang_vel_w = quat_apply(
+            alignment_quaternion_w,
+            self.reference_motion.body_angular_velocities[:, key_body_indices],
+        )
+
+        lin_vel_error = (robot_key_body_lin_vel_w - reference_key_body_lin_vel_w).square().sum(-1).mean(-1)
+        ang_vel_error = (robot_key_body_ang_vel_w - reference_key_body_ang_vel_w).square().sum(-1).mean(-1)
+        result = (lin_vel_error, ang_vel_error)
+        self._cache[cache_key] = result
+        return result
+
+    def joint_state_error(self) -> tuple[torch.Tensor, torch.Tensor]:
+        cache_key = ("joint_state_error",)
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            return cached  # type: ignore[return-value]
+
+        pos_error = (self.robot.data.joint_pos - self.reference_motion.joint_pos).square().sum(-1)
+        vel_error = (self.robot.data.joint_vel - self.reference_motion.joint_vel).square().sum(-1)
+        result = (pos_error, vel_error)
+        self._cache[cache_key] = result
+        return result
+
+
+def _weighted_result(raw: torch.Tensor, weight: float, *, metrics: dict[str, torch.Tensor] | None = None) -> RewardTermResult:
+    value = raw * weight
+    term_metrics = {"raw": raw, "weighted": value}
+    if metrics:
+        term_metrics.update(metrics)
+    return RewardTermResult(value=value, metrics=term_metrics)
+
+
+class JointAccPenaltyTerm:
+    type_name = "joint_acc_penalty"
+
+    def compute(self, context: RewardContext, spec: JointAccPenaltyTermCfg) -> RewardTermResult:
+        raw = torch.sum(torch.square(context.robot.data.joint_acc), dim=1)
+        return _weighted_result(raw, spec.weight)
+
+
+class JointTorquePenaltyTerm:
+    type_name = "joint_torque_penalty"
+
+    def compute(self, context: RewardContext, spec: JointTorquePenaltyTermCfg) -> RewardTermResult:
+        raw = torch.sum(torch.square(context.robot.data.applied_torque), dim=1)
+        return _weighted_result(raw, spec.weight)
+
+
+class JointLimitPenaltyTerm:
+    type_name = "joint_limit_penalty"
+
+    def compute(self, context: RewardContext, spec: JointLimitPenaltyTermCfg) -> RewardTermResult:
+        out_of_limits = -(context.robot.data.joint_pos - context.robot.data.soft_joint_pos_limits[:, :, 0]).clip(max=0.0)
+        out_of_limits += (context.robot.data.joint_pos - context.robot.data.soft_joint_pos_limits[:, :, 1]).clip(min=0.0)
+        raw = torch.sum(out_of_limits, dim=1)
+        return _weighted_result(raw, spec.weight)
+
+
+class SelfCollisionPenaltyTerm:
+    type_name = "self_collision_penalty"
+
+    def compute(self, context: RewardContext, spec: SelfCollisionPenaltyTermCfg) -> RewardTermResult:
+        net_contact_forces = context.contact_sensor.data.net_forces_w_history
+        if len(spec.body_indices) == 0:
+            if net_contact_forces is not None:
+                raw = torch.zeros(net_contact_forces.shape[0], device=net_contact_forces.device)
+            else:
+                net_contact_forces = context.contact_sensor.data.net_forces_w
+                num_envs = 0 if net_contact_forces is None else net_contact_forces.shape[0]
+                device = context.contact_sensor.device if net_contact_forces is None else net_contact_forces.device
+                raw = torch.zeros(num_envs, device=device)
+            return _weighted_result(raw, spec.weight)
+
+        if net_contact_forces is None:
+            net_contact_forces = context.contact_sensor.data.net_forces_w
+            num_envs = 0 if net_contact_forces is None else net_contact_forces.shape[0]
+            device = context.contact_sensor.device if net_contact_forces is None else net_contact_forces.device
+            return _weighted_result(torch.zeros(num_envs, device=device), spec.weight)
+
+        filtered_contact_forces = context.contact_sensor.data.force_matrix_w_history
+        if filtered_contact_forces is None:
+            raw = torch.zeros(net_contact_forces.shape[0], device=net_contact_forces.device)
+            return _weighted_result(raw, spec.weight)
+
+        contact_magnitudes = torch.norm(filtered_contact_forces[:, :, spec.body_indices], dim=-1)
+        is_contact = contact_magnitudes.amax(dim=1).amax(dim=-1) > spec.force_threshold
+        raw = torch.sum(is_contact, dim=1)
+        return _weighted_result(raw, spec.weight)
+
+
+class FootSlipPenaltyTerm:
+    type_name = "foot_slip_penalty"
+
+    def compute(self, context: RewardContext, spec: FootSlipPenaltyTermCfg) -> RewardTermResult:
+        num_envs = context.robot.data.body_lin_vel_w.shape[0]
+        device = context.robot.data.body_lin_vel_w.device
+        if len(spec.foot_body_indices) == 0 or len(spec.foot_contact_body_indices) == 0:
+            return _weighted_result(torch.zeros(num_envs, device=device), spec.weight)
+
+        contact_history = context.contact_sensor.data.net_forces_w_history
+        if contact_history is None:
+            net_contact_forces = context.contact_sensor.data.net_forces_w
+            if net_contact_forces is None:
+                return _weighted_result(torch.zeros(num_envs, device=device), spec.weight)
+            contact_history = net_contact_forces.unsqueeze(1)
+
+        is_contact = (
+            torch.norm(contact_history[:, :, spec.foot_contact_body_indices], dim=-1).amax(dim=1) > spec.force_threshold
+        ).to(context.robot.data.body_lin_vel_w.dtype)
+        foot_planar_vel = torch.linalg.norm(context.robot.data.body_lin_vel_w[:, spec.foot_body_indices, :2], dim=-1)
+        raw = torch.sum(foot_planar_vel * is_contact, dim=1)
+        return _weighted_result(raw, spec.weight)
+
+
+class ActionRatePenaltyTerm:
+    type_name = "action_rate_penalty"
+
+    def compute(self, context: RewardContext, spec: ActionRatePenaltyTermCfg) -> RewardTermResult:
+        action_delta = context.action_model.applied_action - context.action_model.previous_applied_action
+        raw = torch.sum(torch.square(action_delta), dim=1)
+        return _weighted_result(raw, spec.weight)
+
+
+class AnchorPositionRewardTerm:
+    type_name = "anchor_position_reward"
+
+    def compute(self, context: RewardContext, spec: AnchorPositionRewardTermCfg) -> RewardTermResult:
+        position_error, _ = context.anchor_body_pose_error(spec.anchor_body_index, height_only=spec.height_only)
+        raw = torch.exp(-position_error / spec.std)
+        return _weighted_result(raw, spec.weight, metrics={"error": position_error})
+
+
+class AnchorQuaternionRewardTerm:
+    type_name = "anchor_quaternion_reward"
+
+    def compute(self, context: RewardContext, spec: AnchorQuaternionRewardTermCfg) -> RewardTermResult:
+        _, quaternion_error = context.anchor_body_pose_error(spec.anchor_body_index, height_only=False)
+        raw = torch.exp(-quaternion_error / spec.std)
+        return _weighted_result(raw, spec.weight, metrics={"error": quaternion_error})
+
+
+class KeyPositionRewardTerm:
+    type_name = "key_position_reward"
+
+    def compute(self, context: RewardContext, spec: KeyPositionRewardTermCfg) -> RewardTermResult:
+        position_error, _ = context.key_body_pose_error(spec.key_body_indices)
+        raw = torch.exp(-position_error / spec.std)
+        return _weighted_result(raw, spec.weight, metrics={"error": position_error})
+
+
+class KeyQuaternionRewardTerm:
+    type_name = "key_quaternion_reward"
+
+    def compute(self, context: RewardContext, spec: KeyQuaternionRewardTermCfg) -> RewardTermResult:
+        _, quaternion_error = context.key_body_pose_error(spec.key_body_indices)
+        raw = torch.exp(-quaternion_error / spec.std)
+        return _weighted_result(raw, spec.weight, metrics={"error": quaternion_error})
+
+
+class KeyLinearVelocityRewardTerm:
+    type_name = "key_linear_velocity_reward"
+
+    def compute(self, context: RewardContext, spec: KeyLinearVelocityRewardTermCfg) -> RewardTermResult:
+        lin_vel_error, _ = context.key_body_state_error(spec.anchor_body_index, spec.key_body_indices)
+        raw = torch.exp(-lin_vel_error / spec.std)
+        return _weighted_result(raw, spec.weight, metrics={"error": lin_vel_error})
+
+
+class KeyAngularVelocityRewardTerm:
+    type_name = "key_angular_velocity_reward"
+
+    def compute(self, context: RewardContext, spec: KeyAngularVelocityRewardTermCfg) -> RewardTermResult:
+        _, ang_vel_error = context.key_body_state_error(spec.anchor_body_index, spec.key_body_indices)
+        raw = torch.exp(-ang_vel_error / spec.std)
+        return _weighted_result(raw, spec.weight, metrics={"error": ang_vel_error})
+
+
+REWARD_TERM_REGISTRY: dict[str, RewardTerm] = {
+    term.type_name: term
+    for term in (
+        JointAccPenaltyTerm(),
+        JointTorquePenaltyTerm(),
+        JointLimitPenaltyTerm(),
+        SelfCollisionPenaltyTerm(),
+        FootSlipPenaltyTerm(),
+        ActionRatePenaltyTerm(),
+        AnchorPositionRewardTerm(),
+        AnchorQuaternionRewardTerm(),
+        KeyPositionRewardTerm(),
+        KeyQuaternionRewardTerm(),
+        KeyLinearVelocityRewardTerm(),
+        KeyAngularVelocityRewardTerm(),
+    )
+}
+
+
+def register_reward_term(term: RewardTerm) -> None:
+    REWARD_TERM_REGISTRY[term.type_name] = term
+
+
+def default_reward_spec(*, dt: float, anchor_height_only: bool = False) -> RewardSpec:
+    return RewardSpec(
+        dt=dt,
+        terms=(
+            JointAccPenaltyTermCfg(),
+            JointTorquePenaltyTermCfg(),
+            JointLimitPenaltyTermCfg(),
+            SelfCollisionPenaltyTermCfg(),
+            FootSlipPenaltyTermCfg(),
+            ActionRatePenaltyTermCfg(),
+            AnchorPositionRewardTermCfg(height_only=anchor_height_only),
+            AnchorQuaternionRewardTermCfg(),
+            KeyPositionRewardTermCfg(),
+            KeyQuaternionRewardTermCfg(),
+            KeyLinearVelocityRewardTermCfg(),
+            KeyAngularVelocityRewardTermCfg(),
+        ),
+    )
+
 
 class Rewards:
-    def __init__(self, cfg:RewardsCfg):
-        self.cfg = cfg
-        penalty_cfg = PenaltyRewardCfg(
-            collision_track_body_indices=cfg.collision_track_body_indices,
-            foot_body_indices=cfg.foot_body_indices,
-            foot_contact_body_indices=cfg.foot_contact_body_indices,
-            joint_acc_weight=cfg.joint_acc_weight,
-            joint_torque_wegiht=cfg.joint_torque_wegiht,
-            joint_limit_weight=cfg.joint_limit_weight,
-            self_collision_weight=cfg.self_collision_weight,
-            self_collision_force_threshold=cfg.self_collision_force_threshold,
-            foot_slip_weight=cfg.foot_slip_weight,
-            foot_slip_force_threshold=cfg.foot_slip_force_threshold,
-            action_rate_weight=cfg.action_rate_weight,
-        )
-        mimic_cfg = MimicRewardsCfg(
-            anchor_body_index=cfg.anchor_body_index,
-            key_body_indices=cfg.key_body_indices,
-            position_std=cfg.position_std,
-            quaternion_std=cfg.quaternion_std,
-            linear_vel_std=cfg.linear_vel_std,
-            ang_vel_std=cfg.ang_vel_std,
-            joint_position_std=cfg.joint_position_std,
-            joint_vel_std = cfg.joint_vel_std,
-            mimic_anchor_position_weight=cfg.mimic_anchor_position_weight,
-            mimic_anchor_quaternion_weight=cfg.mimic_anchor_quaternion_weight,
-            mimic_key_position_wegiht=cfg.mimic_key_position_wegiht,
-            mimic_key_quaternion_weight=cfg.mimic_key_quaternion_weight,
-            mimic_key_linear_vel_weight=cfg.mimic_key_linear_vel_weight,
-            mimic_key_ang_vel_weight=cfg.mimic_key_ang_vel_weight,
-            mimic_joint_position_weight=cfg.mimic_joint_position_weight,
-            mimic_joint_vel_weight=cfg.mimic_joint_vel_weight,
-            anchor_height_only=cfg.anchor_height_only,
-        )
-        self.regulation_reward = RegulationReward(penalty_cfg)
-        self.mimic_reward = MimicRewards(mimic_cfg)
+    def __init__(self, spec: RewardSpec):
+        self.spec = spec
+        self.last_result: RewardComputation | None = None
+        self.last_metrics: dict[str, dict[str, float]] = {}
 
     def get_task_reward(
         self,
         robot: Articulation,
         reference_motion: ReferenceMotions,
         contact_sensor: ContactSensor,
-        action_model: ActionProcessor
+        action_model: ActionProcessor,
     ) -> torch.Tensor:
-        regulation_reward = self.regulation_reward.get_reward(robot, contact_sensor, action_model)
-        mimic_reward = self.mimic_reward.get_reward(robot, reference_motion)
-        reward_vector = torch.cat([regulation_reward, mimic_reward], dim=-1) * self.cfg.dt
-        if self.cfg.return_vector:
+        context = RewardContext(robot=robot, reference_motion=reference_motion, contact_sensor=contact_sensor, action_model=action_model)
+        components: list[torch.Tensor] = []
+        component_map: dict[str, torch.Tensor] = {}
+        metrics_map: dict[str, dict[str, torch.Tensor]] = {}
+
+        for term_cfg in self.spec.enabled_terms():
+            term = REWARD_TERM_REGISTRY[term_cfg.type]
+            result = term.compute(context, term_cfg)
+            scaled_value = result.value * self.spec.dt
+            components.append(scaled_value)
+            component_map[term_cfg.id] = scaled_value
+            metrics_map[term_cfg.id] = {
+                metric_name: metric_value * self.spec.dt if metric_name == "weighted" else metric_value
+                for metric_name, metric_value in result.metrics.items()
+            }
+
+        if components:
+            reward_vector = torch.stack(components, dim=-1)
+        else:
+            reward_vector = torch.zeros(robot.data.joint_pos.shape[0], 0, device=robot.data.joint_pos.device)
+        total_reward = reward_vector.sum(-1)
+
+        self.last_result = RewardComputation(
+            vector=reward_vector,
+            total=total_reward,
+            components=component_map,
+            metrics=metrics_map,
+        )
+        self.last_metrics = {
+            term_id: {name: float(value.mean().item()) for name, value in metrics.items()}
+            for term_id, metrics in metrics_map.items()
+        }
+
+        if self.spec.output_mode == "vector":
             return reward_vector
-        return reward_vector.sum(-1)
-
-class RegulationReward:
-    def __init__(self, cfg:PenaltyRewardCfg):
-        self.cfg = cfg
-
-    def get_reward(self, robot:Articulation, contact_sensor: ContactSensor, action_model: ActionProcessor) -> torch.Tensor:
-        joint_acc_penalty = self.joint_acc_l2(robot) * self.cfg.joint_acc_weight
-        joint_torque_penalty = self.joint_torque_l2(robot) * self.cfg.joint_torque_wegiht
-        joint_limit_penalty = self.joint_limit(robot) * self.cfg.joint_limit_weight
-        self_collision_penalty = self.self_collision_penalty(
-            contact_sensor,
-            self.cfg.collision_track_body_indices,
-            self.cfg.self_collision_force_threshold,
-        ) * self.cfg.self_collision_weight
-        foot_slip_penalty = self.foot_slip_penalty(
-            robot,
-            contact_sensor,
-            self.cfg.foot_body_indices,
-            self.cfg.foot_contact_body_indices,
-            self.cfg.foot_slip_force_threshold,
-        ) * self.cfg.foot_slip_weight
-        action_rate_penalty = self.action_rate_l2(action_model) * self.cfg.action_rate_weight
-        
-        reward = torch.stack(
-            [
-                joint_acc_penalty,
-                joint_torque_penalty,
-                joint_limit_penalty,
-                self_collision_penalty,
-                foot_slip_penalty,
-                action_rate_penalty,
-            ],
-            dim=-1
-        )
-
-        return reward
-    
-    def feet_contact_time(self, sensor: ContactSensor, step_dt:float, physics_dt: float,
-                          body_ids: IndexLike, threshold: float) -> torch.Tensor:
-        first_air = sensor.compute_first_air(step_dt, physics_dt)[:, body_ids]
-        last_contact_time = sensor.data.last_contact_time[:, body_ids]
-        reward = torch.sum((last_contact_time < threshold) * first_air, dim=-1)
-
-        return reward
-    
-    def action_rate_l2(self, action_model: ActionProcessor) -> torch.Tensor:
-        action_delta = action_model.applied_action - action_model.previous_applied_action
-        return torch.sum(torch.square(action_delta), dim=1)
-
-    def foot_slip_penalty(
-        self,
-        robot: Articulation,
-        sensor: ContactSensor,
-        foot_body_ids: list[int],
-        foot_contact_body_ids: list[int],
-        threshold: float,
-    ) -> torch.Tensor:
-        num_envs = robot.data.body_lin_vel_w.shape[0]
-        device = robot.data.body_lin_vel_w.device
-        if len(foot_body_ids) == 0 or len(foot_contact_body_ids) == 0:
-            return torch.zeros(num_envs, device=device)
-
-        contact_history = sensor.data.net_forces_w_history
-        if contact_history is None:
-            net_contact_forces = sensor.data.net_forces_w
-            if net_contact_forces is None:
-                return torch.zeros(num_envs, device=device)
-            contact_history = net_contact_forces.unsqueeze(1)
-
-        is_contact = (
-            torch.norm(contact_history[:, :, foot_contact_body_ids], dim=-1).amax(dim=1) > threshold
-        ).to(robot.data.body_lin_vel_w.dtype)
-        foot_planar_vel = torch.linalg.norm(robot.data.body_lin_vel_w[:, foot_body_ids, :2], dim=-1)
-        return torch.sum(foot_planar_vel * is_contact, dim=1)
-
-    def self_collision_penalty(
-        self,
-        sensor: ContactSensor,
-        body_ids: list[int],
-        threshold: float,
-    ) -> torch.Tensor:
-        net_contact_forces = sensor.data.net_forces_w_history
-        if len(body_ids) == 0:
-            if net_contact_forces is not None:
-                return torch.zeros(net_contact_forces.shape[0], device=net_contact_forces.device)
-            net_contact_forces = sensor.data.net_forces_w
-            num_envs = 0 if net_contact_forces is None else net_contact_forces.shape[0]
-            device = sensor.device if net_contact_forces is None else net_contact_forces.device
-            return torch.zeros(num_envs, device=device)
-
-        if net_contact_forces is None:
-            net_contact_forces = sensor.data.net_forces_w
-            num_envs = 0 if net_contact_forces is None else net_contact_forces.shape[0]
-            device = sensor.device if net_contact_forces is None else net_contact_forces.device
-            return torch.zeros(num_envs, device=device)
-
-        filtered_contact_forces = sensor.data.force_matrix_w_history
-        if filtered_contact_forces is None:
-            # Unfiltered net forces cannot distinguish self-contact from expected
-            # contacts such as feet on the ground, so do not use them here.
-            return torch.zeros(net_contact_forces.shape[0], device=net_contact_forces.device)
-
-        contact_magnitudes = torch.norm(filtered_contact_forces[:, :, body_ids], dim=-1)
-        is_contact = contact_magnitudes.amax(dim=1).amax(dim=-1) > threshold
-        return torch.sum(is_contact, dim=1)
-    
-    def joint_acc_l2(self, robot: Articulation) -> torch.Tensor:
-        return torch.sum(torch.square(robot.data.joint_acc), dim=1)
-    
-    def joint_torque_l2(self, robot: Articulation) -> torch.Tensor:
-        return torch.sum(torch.square(robot.data.applied_torque), dim=1)
-    
-    def joint_limit(self, robot: Articulation) -> torch.Tensor:
-        out_of_limits = -(
-            robot.data.joint_pos[:, :] - robot.data.soft_joint_pos_limits[:, :, 0]
-        ).clip(max=0.0)
-        out_of_limits += (
-            robot.data.joint_pos[:, :] - robot.data.soft_joint_pos_limits[:, :, 1]
-        ).clip(min=0.0)
-
-        return torch.sum(out_of_limits, dim=1)
+        if self.spec.output_mode != "sum":
+            raise ValueError(f"Unsupported reward output mode: {self.spec.output_mode}")
+        return total_reward
 
 
-class MimicRewards:
-    def __init__(self, cfg:MimicRewardsCfg) -> None:
-        self.cfg = cfg
-        self.anchor_position_error = 0
-        self.anchor_quaternion_error = 0
-        self.key_position_error = 0
-        self.key_ang_vel_error = 0
+@dataclass(frozen=True)
+class AMPRewardsCfg:
+    discriminator_reward_scale: float = 2.0
+    discriminator_reward_weight: float = 1.0
 
-    #def get_logs(self) -> dict[str, torch.Tensor]:
-    #    return {
-    #        "anchor_position_error": self.anchor_position_error,
-    #        "anchor_quaternion_error": self.anchor_quaternion_error,
-    #        "anchor_linear_vel_error": self.anchor_linear_vel_error,
-    #        "anchor_ang_vel_error": self.anchor_ang_vel_error,
-    #        "key_position_error": self.key_position_error,
-    #        "key_quaternion_error": self.key_quaternion_error,
-    #        "key_linear_vel_error": self.key_linear_vel_error,
-    #        "key_ang_vel_error": self.key_ang_vel_error,
-    #        "anchor_position_reward": self.anchor_position_reward,
-    #        "anchor_quaternion_reward": self.anchor_quaternion_reward,
-    #        "anchor_linear_vel_reward": self.anchor_linear_vel_reward,
-    #        "anchor_ang_vel_reward": self.anchor_ang_vel_reward,
-    #        "key_position_reward": self.key_position_reward,
-    #        "key_quaternion_reward": self.key_quaternion_reward,
-    #        "key_linear_vel_reward": self.key_linear_vel_reward,
-    #        "key_ang_vel_reward": self.key_ang_vel_reward,
-    #    }
-
-    def get_reward(self, robot: Articulation, reference_motion: ReferenceMotions) -> torch.Tensor:
-        
-        anchor_position_error, anchor_quaternion_error = self.anchor_body_pose_error(robot, reference_motion)
-        relative_key_body_position_error, relative_key_body_quaternion_error = self.key_body_pose_error(robot, reference_motion)
-        key_body_lin_vel_error, key_body_ang_vel_error = self.key_body_state_error(robot, reference_motion)
-        joint_position_error, joint_vel_error = self.joint_state_error(robot, reference_motion)
-
-        self.anchor_position_error = anchor_position_error.mean().item()
-        self.anchor_quaternion_error = anchor_quaternion_error.mean().item()
-        self.relative_key_body_position_error = relative_key_body_position_error.mean().item()
-        self.relative_key_body_quaternion_error = relative_key_body_quaternion_error.mean().item()
-        self.key_body_lin_vel_error = key_body_lin_vel_error.mean().item()
-        self.key_body_ang_vel_error = key_body_ang_vel_error.mean().item()
-        self.joint_position_error = joint_position_error.mean().item()
-        self.joint_vel_error = joint_vel_error.mean().item()
-
-        anchor_position_reward = torch.exp(-anchor_position_error / self.cfg.position_std) * self.cfg.mimic_anchor_position_weight
-        anchor_quaternion_reward = torch.exp(-anchor_quaternion_error / self.cfg.quaternion_std) * self.cfg.mimic_anchor_quaternion_weight
-        
-        relative_key_body_position_reward = torch.exp(-relative_key_body_position_error / self.cfg.position_std) * self.cfg.mimic_key_position_wegiht
-        relative_key_body_quaternion_reward = torch.exp(-relative_key_body_quaternion_error / self.cfg.quaternion_std) * self.cfg.mimic_key_quaternion_weight
-        
-        key_body_lin_vel_reward = torch.exp(-key_body_lin_vel_error / self.cfg.linear_vel_std) * self.cfg.mimic_key_linear_vel_weight
-        key_body_ang_vel_reward = torch.exp(-key_body_ang_vel_error / self.cfg.ang_vel_std) * self.cfg.mimic_key_ang_vel_weight
-
-        self.anchor_position_reward = anchor_position_reward.mean().item()
-        self.anchor_quaternion_reward = anchor_quaternion_reward.mean().item()
-        self.relative_key_body_position_reward = relative_key_body_position_reward.mean().item()
-        self.relative_key_body_quaternion_reward = relative_key_body_quaternion_reward.mean().item()
-        self.key_body_lin_vel_reward = key_body_lin_vel_reward.mean().item()
-        self.key_body_ang_vel_reward = key_body_ang_vel_reward.mean().item()
-        self.joint_position_reward = 0.0
-        self.joint_vel_reward = 0.0
-
-        reward = torch.stack(
-            [
-                anchor_position_reward, anchor_quaternion_reward,
-                relative_key_body_position_reward, relative_key_body_quaternion_reward,
-                key_body_lin_vel_reward, key_body_ang_vel_reward,
-            ],dim=-1
-        )
-        
-        return reward
-
-    def anchor_body_pose_error(self, robot: Articulation, reference_motion: ReferenceMotions) -> tuple[torch.Tensor, torch.Tensor]:
-        position_slice = slice(None)
-        if self.cfg.anchor_height_only:
-            position_slice = slice(2, 3)
-
-        robot_anchor_body_positions = robot.data.body_pos_w[:, self.cfg.anchor_body_index, position_slice]
-        robot_anchor_body_quaternions = robot.data.body_quat_w[:, self.cfg.anchor_body_index]
-
-        reference_anchor_body_positions = reference_motion.body_positions[:, self.cfg.anchor_body_index, position_slice]
-        reference_anchor_body_quaternions = reference_motion.body_quaternions[:, self.cfg.anchor_body_index]
-
-        position_error = (robot_anchor_body_positions-reference_anchor_body_positions).square().sum(-1)
-        quaternion_error = quat_error_magnitude(robot_anchor_body_quaternions, reference_anchor_body_quaternions).square()
-
-        return position_error, quaternion_error
-    
-    def key_body_pose_error(self, robot: Articulation, reference_motion: ReferenceMotions) -> tuple[torch.Tensor, torch.Tensor]:
-        robot_key_body_positions = robot.data.body_pos_w[:, self.cfg.key_body_indices]
-        robot_key_body_quaternions = robot.data.body_quat_w[:, self.cfg.key_body_indices]
-
-        reference_relative_key_body_positions = reference_motion.body_pos_relative[:, self.cfg.key_body_indices]
-        reference_relative_key_body_quaternions = reference_motion.body_quat_relative[:, self.cfg.key_body_indices]
-
-        position_error = (robot_key_body_positions-reference_relative_key_body_positions).square().sum(-1).mean(-1)
-        quaternion_error = quat_error_magnitude(robot_key_body_quaternions, reference_relative_key_body_quaternions).square().mean(-1)
-        
-        return position_error, quaternion_error
-    
-    def key_body_state_error(self, robot: Articulation, reference_motion: ReferenceMotions) -> tuple[torch.Tensor, torch.Tensor]:
-        # Keep reward terms in world frame so observation-frame changes do not
-        # silently alter the existing mimic objective.
-        robot_key_body_lin_vel_w = robot.data.body_lin_vel_w[:, self.cfg.key_body_indices]
-        robot_key_body_ang_vel_w = robot.data.body_ang_vel_w[:, self.cfg.key_body_indices]
-
-        alignment_quaternion_w = self.reference_alignment_quaternion(robot, reference_motion)
-        alignment_quaternion_w = alignment_quaternion_w[:, None, :].expand(-1, len(self.cfg.key_body_indices), -1)
-
-        reference_key_body_lin_vel_w = quat_apply(
-            alignment_quaternion_w,
-            reference_motion.body_linear_velocities[:, self.cfg.key_body_indices],
-        )
-        reference_key_body_ang_vel_w = quat_apply(
-            alignment_quaternion_w,
-            reference_motion.body_angular_velocities[:, self.cfg.key_body_indices],
-        )
-
-        lin_vel_error = (robot_key_body_lin_vel_w-reference_key_body_lin_vel_w).square().sum(-1).mean(-1)
-        ang_vel_error = (robot_key_body_ang_vel_w-reference_key_body_ang_vel_w).square().sum(-1).mean(-1)
-
-        return lin_vel_error, ang_vel_error
-
-    def reference_alignment_quaternion(
-        self,
-        robot: Articulation,
-        reference_motion: ReferenceMotions,
-    ) -> torch.Tensor:
-        robot_anchor_quaternion = robot.data.body_quat_w[:, self.cfg.anchor_body_index]
-        reference_anchor_quaternion = reference_motion.body_quaternions[:, self.cfg.anchor_body_index]
-        return yaw_quat(quat_mul(robot_anchor_quaternion, quat_inv(reference_anchor_quaternion)))
-        
-    def joint_state_error(self, robot: Articulation, reference_motion: ReferenceMotions) -> tuple[torch.Tensor, torch.Tensor]:
-        robot_joint_pos = robot.data.joint_pos
-        robot_joint_vel = robot.data.joint_vel
-
-        reference_joint_pos = reference_motion.joint_pos
-        reference_joint_vel = reference_motion.joint_vel
-
-        pos_error = (robot_joint_pos-reference_joint_pos).square().sum(-1)
-        vel_error = (robot_joint_vel-reference_joint_vel).square().sum(-1)
-
-        return pos_error, vel_error
 
 class AMPReward:
     def __init__(self, cfg: AMPRewardsCfg):
         self.cfg = cfg
 
     def get_rewards(self, logits: torch.Tensor) -> torch.Tensor:
-        rewards = torch.nn.functional.softplus(logits)
-
-        return rewards
+        return torch.nn.functional.softplus(logits)

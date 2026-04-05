@@ -393,7 +393,14 @@ class MujocoEnv:
             # viewer was closed manually -> stop touching it
             self.mj_viewer = None
 
-        obs = self.get_obs(advance_time=False)
+        observation_builder = self._get_observation_builder()
+        if hasattr(self.motion_lib, "get_duration"):
+            context = self._build_observation_context(advance_time=False)
+            if hasattr(observation_builder, "reset"):
+                observation_builder.reset(self, context)
+            obs = observation_builder.get_policy_observation(self, context)
+        else:
+            obs = self.get_obs(advance_time=False)
 
         self.target_pos = reference_motion["joint_pos"].squeeze(0).clone()
 

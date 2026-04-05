@@ -1,24 +1,23 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
 import torch
+
+from ref2act.common.observation_spec import (
+    ObservationComposer,
+    ObservationContext,
+    ObservationGroupSpec,
+    ObservationLayout,
+    ObservationSpec,
+    ObservationTermSpec,
+)
 
 if TYPE_CHECKING:
     from .env import MujocoEnv
 
 
-@dataclass(frozen=True)
-class MujocoObservationContext:
-    target_projected_gravity: torch.Tensor
-    target_joint_pos: torch.Tensor
-    target_joint_vel: torch.Tensor
-    projected_gravity: torch.Tensor
-    anchor_ang_vel_b: torch.Tensor
-    joint_pos: torch.Tensor
-    joint_vel: torch.Tensor
-    previous_action: torch.Tensor
+MujocoObservationContext = ObservationContext
 
 
 class MujocoObservationBuilder(Protocol):
@@ -35,37 +34,81 @@ class MujocoObservationBuilder(Protocol):
         ...
 
 
+def default_mujoco_observation_spec() -> ObservationSpec:
+    return ObservationSpec(
+        groups=(
+            ObservationGroupSpec(
+                name="motion",
+                terms=(
+                    ObservationTermSpec(id="target_projected_gravity", type="target_projected_gravity"),
+                    ObservationTermSpec(id="target_joint_pos", type="target_joint_pos"),
+                    ObservationTermSpec(id="target_joint_vel", type="target_joint_vel"),
+                ),
+            ),
+            ObservationGroupSpec(
+                name="robot",
+                terms=(
+                    ObservationTermSpec(id="projected_gravity", type="projected_gravity"),
+                    ObservationTermSpec(id="anchor_ang_vel_b", type="anchor_ang_vel_b"),
+                    ObservationTermSpec(id="joint_pos", type="joint_pos"),
+                    ObservationTermSpec(id="joint_vel", type="joint_vel"),
+                    ObservationTermSpec(id="previous_action", type="previous_action"),
+                ),
+            ),
+        )
+    )
+
+
 class IsaacLabMujocoObservation:
     """Mirror the Isaac policy observation layout while keeping the bridge extensible."""
 
+    def __init__(self, spec: ObservationSpec | None = None) -> None:
+        self.spec = spec or default_mujoco_observation_spec()
+        self._composer: ObservationComposer | None = None
+        self._layout: ObservationLayout | None = None
+
+    def _get_layout(self, env: MujocoEnv) -> ObservationLayout:
+        if self._layout is None:
+            action_source = getattr(env, "action_offset", None)
+            if action_source is None:
+                action_source = getattr(env, "previous_action", None)
+            if action_source is None:
+                action_source = env.get_joint_pos()
+            action_dim = int(torch.as_tensor(action_source).numel())
+            self._layout = ObservationLayout(
+                joint_dim=action_dim,
+                action_dim=action_dim,
+                key_body_count=0,
+            )
+        return self._layout
+
+    def _get_composer(self, env: MujocoEnv) -> ObservationComposer:
+        if self._composer is None:
+            self._composer = ObservationComposer(
+                spec=self.spec,
+                layout=self._get_layout(env),
+                num_envs=1,
+                device="cpu",
+            )
+        return self._composer
+
+    @staticmethod
+    def _squeeze_batch(value: torch.Tensor) -> torch.Tensor:
+        return value.squeeze(0) if value.ndim >= 2 and value.shape[0] == 1 else value
+
+    def reset(self, env: MujocoEnv, context: MujocoObservationContext) -> None:
+        self._get_composer(env).reset(torch.tensor([0], dtype=torch.long), context)
+
     def get_motion_observation(self, env: MujocoEnv, context: MujocoObservationContext) -> torch.Tensor:
-        return torch.cat(
-            [
-                context.target_projected_gravity,
-                context.target_joint_pos,
-                context.target_joint_vel,
-            ]
-        )
+        return self.get_default_observation(env, context)["motion"]
 
     def get_robot_observation(self, env: MujocoEnv, context: MujocoObservationContext) -> torch.Tensor:
-        return torch.cat(
-            [
-                context.projected_gravity,
-                context.anchor_ang_vel_b,
-                context.joint_pos,
-                context.joint_vel,
-                context.previous_action,
-            ]
-        )
+        return self.get_default_observation(env, context)["robot"]
 
     def get_default_observation(self, env: MujocoEnv, context: MujocoObservationContext) -> dict[str, torch.Tensor]:
-        motion_obs = self.get_motion_observation(env, context)
-        robot_obs = self.get_robot_observation(env, context)
-        return {
-            "motion": motion_obs,
-            "robot": robot_obs,
-        }
+        outputs = self._get_composer(env).compose(context)
+        return {name: self._squeeze_batch(value) for name, value in outputs.items()}
 
     def get_policy_observation(self, env: MujocoEnv, context: MujocoObservationContext) -> torch.Tensor:
         default_observation = self.get_default_observation(env, context)
-        return torch.cat([default_observation["motion"], default_observation["robot"]])
+        return torch.cat([default_observation[group.name] for group in self.spec.enabled_groups()])

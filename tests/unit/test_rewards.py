@@ -1,8 +1,10 @@
+import dataclasses
 import importlib
 import sys
 import types
 
 import torch
+
 
 def _quat_apply(quat: torch.Tensor, vec: torch.Tensor) -> torch.Tensor:
     return vec.clone()
@@ -129,13 +131,20 @@ def _make_reference_motion(num_envs: int = 1, num_bodies: int = 3, num_joints: i
     )
 
 
-def test_foot_slip_penalty_only_counts_contacting_feet() -> None:
+def test_foot_slip_term_only_counts_contacting_feet() -> None:
     rewards_mod = _load_rewards_module()
-    penalty = rewards_mod.RegulationReward(
-        rewards_mod.PenaltyRewardCfg(
-            collision_track_body_indices=[],
-            foot_body_indices=[0, 1],
-            foot_contact_body_indices=[0, 1],
+    rewards = rewards_mod.Rewards(
+        rewards_mod.RewardSpec(
+            dt=1.0,
+            output_mode="vector",
+            terms=(
+                rewards_mod.FootSlipPenaltyTermCfg(
+                    foot_body_indices=(0, 1),
+                    foot_contact_body_indices=(0, 1),
+                    force_threshold=1.0,
+                    weight=-0.1,
+                ),
+            ),
         )
     )
 
@@ -152,72 +161,33 @@ def test_foot_slip_penalty_only_counts_contacting_feet() -> None:
         )
     )
 
-    penalty_value = penalty.foot_slip_penalty(robot, contact_sensor, [0, 1], [0, 1], threshold=1.0)
+    reward_vector = rewards.get_task_reward(robot, _make_reference_motion(), contact_sensor, _make_action_model())
 
-    assert torch.allclose(penalty_value, torch.tensor([0.5], dtype=torch.float32))
+    assert reward_vector.shape == (1, 1)
+    assert torch.allclose(reward_vector[:, 0], torch.tensor([-0.05], dtype=torch.float32))
 
 
-def test_foot_slip_penalty_is_zero_without_contact_or_planar_speed() -> None:
+def test_default_reward_vector_keeps_existing_term_order() -> None:
     rewards_mod = _load_rewards_module()
-    penalty = rewards_mod.RegulationReward(
-        rewards_mod.PenaltyRewardCfg(
-            collision_track_body_indices=[],
-            foot_body_indices=[0, 1],
-            foot_contact_body_indices=[0, 1],
-        )
+    terms = (
+        rewards_mod.JointAccPenaltyTermCfg(weight=0.0),
+        rewards_mod.JointTorquePenaltyTermCfg(weight=0.0),
+        rewards_mod.JointLimitPenaltyTermCfg(weight=0.0),
+        rewards_mod.SelfCollisionPenaltyTermCfg(weight=0.0, body_indices=()),
+        rewards_mod.FootSlipPenaltyTermCfg(
+            weight=-0.1,
+            foot_body_indices=(0, 1),
+            foot_contact_body_indices=(0, 1),
+        ),
+        rewards_mod.ActionRatePenaltyTermCfg(weight=0.0),
+        rewards_mod.AnchorPositionRewardTermCfg(weight=0.0, anchor_body_index=0),
+        rewards_mod.AnchorQuaternionRewardTermCfg(weight=0.0, anchor_body_index=0),
+        rewards_mod.KeyPositionRewardTermCfg(weight=0.0, key_body_indices=(0, 1)),
+        rewards_mod.KeyQuaternionRewardTermCfg(weight=0.0, key_body_indices=(0, 1)),
+        rewards_mod.KeyLinearVelocityRewardTermCfg(weight=0.0, anchor_body_index=0, key_body_indices=(0, 1)),
+        rewards_mod.KeyAngularVelocityRewardTermCfg(weight=0.0, anchor_body_index=0, key_body_indices=(0, 1)),
     )
-
-    robot = _make_robot(
-        torch.tensor(
-            [[[0.0, 0.0, 1.0], [0.0, 0.0, 2.0], [1.0, 1.0, 0.0]]],
-            dtype=torch.float32,
-        )
-    )
-    no_contact_sensor = _make_contact_sensor(
-        torch.zeros((1, 1, 3, 3), dtype=torch.float32),
-    )
-    zero_planar_vel_sensor = _make_contact_sensor(
-        torch.tensor(
-            [[[[2.0, 0.0, 0.0], [2.0, 0.0, 0.0], [0.0, 0.0, 0.0]]]],
-            dtype=torch.float32,
-        )
-    )
-
-    assert torch.allclose(
-        penalty.foot_slip_penalty(robot, no_contact_sensor, [0, 1], [0, 1], threshold=1.0),
-        torch.zeros(1, dtype=torch.float32),
-    )
-    assert torch.allclose(
-        penalty.foot_slip_penalty(robot, zero_planar_vel_sensor, [0, 1], [0, 1], threshold=1.0),
-        torch.zeros(1, dtype=torch.float32),
-    )
-
-
-def test_reward_vector_includes_foot_slip_as_fifth_penalty_term() -> None:
-    rewards_mod = _load_rewards_module()
-    rewards = rewards_mod.Rewards(
-        rewards_mod.RewardsCfg(
-            anchor_body_index=0,
-            key_body_indices=[0, 1],
-            collision_track_body_indices=[],
-            foot_body_indices=[0, 1],
-            foot_contact_body_indices=[0, 1],
-            dt=1.0,
-            return_vector=True,
-            joint_acc_weight=0.0,
-            joint_torque_wegiht=0.0,
-            joint_limit_weight=0.0,
-            self_collision_weight=0.0,
-            action_rate_weight=0.0,
-            foot_slip_weight=-0.1,
-            mimic_anchor_position_weight=0.0,
-            mimic_anchor_quaternion_weight=0.0,
-            mimic_key_position_wegiht=0.0,
-            mimic_key_quaternion_weight=0.0,
-            mimic_key_linear_vel_weight=0.0,
-            mimic_key_ang_vel_weight=0.0,
-        )
-    )
+    rewards = rewards_mod.Rewards(rewards_mod.RewardSpec(dt=1.0, output_mode="vector", terms=terms))
 
     robot = _make_robot(
         torch.tensor(
@@ -232,14 +202,42 @@ def test_reward_vector_includes_foot_slip_as_fifth_penalty_term() -> None:
         )
     )
 
-    reward_vector = rewards.get_task_reward(
-        robot,
-        _make_reference_motion(),
-        contact_sensor,
-        _make_action_model(),
-    )
+    reward_vector = rewards.get_task_reward(robot, _make_reference_motion(), contact_sensor, _make_action_model())
 
     assert reward_vector.shape == (1, 12)
     assert torch.allclose(reward_vector[0, 4], torch.tensor(-0.05, dtype=torch.float32))
     assert torch.allclose(reward_vector[0, :4], torch.zeros(4, dtype=torch.float32))
     assert torch.allclose(reward_vector[0, 5:], torch.zeros(7, dtype=torch.float32))
+
+
+def test_register_reward_term_extends_composer_without_changing_rewards_class() -> None:
+    rewards_mod = _load_rewards_module()
+
+    class ConstantBonusReward:
+        type_name = "constant_bonus"
+
+        def compute(self, context, spec):
+            raw = torch.ones(context.robot.data.joint_pos.shape[0], dtype=torch.float32)
+            return rewards_mod.RewardTermResult(
+                value=raw * spec.weight,
+                metrics={"raw": raw, "weighted": raw * spec.weight},
+            )
+
+    rewards_mod.register_reward_term(ConstantBonusReward())
+    rewards = rewards_mod.Rewards(
+        rewards_mod.RewardSpec(
+            dt=1.0,
+            output_mode="sum",
+            terms=(rewards_mod.RewardTermCfg(id="bonus", type="constant_bonus", weight=2.0),),
+        )
+    )
+
+    reward = rewards.get_task_reward(
+        _make_robot(torch.zeros((1, 3, 3), dtype=torch.float32)),
+        _make_reference_motion(),
+        _make_contact_sensor(torch.zeros((1, 1, 3, 3), dtype=torch.float32)),
+        _make_action_model(),
+    )
+
+    assert torch.allclose(reward, torch.tensor([2.0], dtype=torch.float32))
+    assert rewards.last_metrics["bonus"]["weighted"] == 2.0

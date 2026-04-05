@@ -47,22 +47,23 @@ def _load_curriculum_module():
 curriculum_mod = _load_curriculum_module()
 CurriculumPointCfg = curriculum_mod.CurriculumPointCfg
 TerminationCurriculumCfg = curriculum_mod.TerminationCurriculumCfg
+TerminationRuleScheduleCfg = curriculum_mod.TerminationRuleScheduleCfg
 TerminationThresholdCurriculum = curriculum_mod.TerminationThresholdCurriculum
-TerminationThresholdField = curriculum_mod.TerminationThresholdField
-TerminationThresholdScheduleCfg = curriculum_mod.TerminationThresholdScheduleCfg
+
+
+class _DummyRule:
+    def __init__(self, rule_id: str, threshold: float) -> None:
+        self.id = rule_id
+        self.threshold = threshold
 
 
 class _DummyTermination:
-    def __init__(
-        self,
-        *,
-        anchor_pos_error_threshold: float = 0.25,
-        anchor_ori_error_threshold: float = 0.8,
-        end_effector_pos_error_threshold: float = 0.25,
-    ) -> None:
-        self.anchor_pos_error_threshold = anchor_pos_error_threshold
-        self.anchor_ori_error_threshold = anchor_ori_error_threshold
-        self.end_effector_pos_error_threshold = end_effector_pos_error_threshold
+    def __init__(self) -> None:
+        self.failure_rules = [
+            _DummyRule("anchor_position_failure", 0.25),
+            _DummyRule("anchor_orientation_failure", 0.8),
+            _DummyRule("end_effector_position_failure", 0.25),
+        ]
 
 
 def test_empty_curriculum_is_a_no_op() -> None:
@@ -73,112 +74,61 @@ def test_empty_curriculum_is_a_no_op() -> None:
 
     assert not curriculum.has_schedules
     assert values == {
-        "anchor_pos_error_threshold": 0.25,
-        "anchor_ori_error_threshold": 0.8,
-        "end_effector_pos_error_threshold": 0.25,
+        "anchor_position_failure": 0.25,
+        "anchor_orientation_failure": 0.8,
+        "end_effector_position_failure": 0.25,
     }
-    assert termination.anchor_pos_error_threshold == pytest.approx(0.25)
-    assert termination.anchor_ori_error_threshold == pytest.approx(0.8)
-    assert termination.end_effector_pos_error_threshold == pytest.approx(0.25)
 
 
-def test_single_segment_schedule_interpolates_from_static_threshold() -> None:
-    termination = _DummyTermination(anchor_pos_error_threshold=0.25)
+def test_rule_id_schedule_interpolates_and_only_updates_target_rule() -> None:
+    termination = _DummyTermination()
     curriculum = TerminationThresholdCurriculum(
         termination,
         TerminationCurriculumCfg(
             schedules=[
-                TerminationThresholdScheduleCfg(
-                    field=TerminationThresholdField.AnchorPosErrorThreshold,
+                TerminationRuleScheduleCfg(
+                    rule_id="anchor_position_failure",
                     points=[CurriculumPointCfg(step=10, value=0.05)],
                 )
             ]
         ),
     )
 
-    curriculum.apply(step=0)
-    assert termination.anchor_pos_error_threshold == pytest.approx(0.25)
-
     curriculum.apply(step=5)
-    assert termination.anchor_pos_error_threshold == pytest.approx(0.15)
 
-    curriculum.apply(step=10)
-    assert termination.anchor_pos_error_threshold == pytest.approx(0.05)
-
-    curriculum.apply(step=20)
-    assert termination.anchor_pos_error_threshold == pytest.approx(0.05)
-
-
-def test_multi_segment_schedule_interpolates_between_points_and_holds_tail() -> None:
-    termination = _DummyTermination(anchor_ori_error_threshold=0.8)
-    curriculum = TerminationThresholdCurriculum(
-        termination,
-        TerminationCurriculumCfg(
-            schedules=[
-                TerminationThresholdScheduleCfg(
-                    field=TerminationThresholdField.AnchorOriErrorThreshold,
-                    points=[
-                        CurriculumPointCfg(step=10, value=0.6),
-                        CurriculumPointCfg(step=20, value=0.2),
-                    ],
-                )
-            ]
-        ),
-    )
-
-    curriculum.apply(step=15)
-    assert termination.anchor_ori_error_threshold == pytest.approx(0.4)
-
-    curriculum.apply(step=25)
-    assert termination.anchor_ori_error_threshold == pytest.approx(0.2)
-
-
-def test_first_point_after_step_zero_interpolates_from_static_threshold() -> None:
-    termination = _DummyTermination(end_effector_pos_error_threshold=0.25)
-    curriculum = TerminationThresholdCurriculum(
-        termination,
-        TerminationCurriculumCfg(
-            schedules=[
-                TerminationThresholdScheduleCfg(
-                    field=TerminationThresholdField.EndEffectorPosErrorThreshold,
-                    points=[CurriculumPointCfg(step=4, value=0.05)],
-                )
-            ]
-        ),
-    )
-
-    curriculum.apply(step=2)
-
-    assert termination.end_effector_pos_error_threshold == pytest.approx(0.15)
+    thresholds = {rule.id: rule.threshold for rule in termination.failure_rules}
+    assert thresholds["anchor_position_failure"] == pytest.approx(0.15)
+    assert thresholds["anchor_orientation_failure"] == pytest.approx(0.8)
+    assert thresholds["end_effector_position_failure"] == pytest.approx(0.25)
 
 
 def test_invalid_curriculum_configurations_raise_value_error() -> None:
     termination = _DummyTermination()
+
+    with pytest.raises(ValueError, match="Unknown termination rule id"):
+        TerminationThresholdCurriculum(
+            termination,
+            TerminationCurriculumCfg(
+                schedules=[
+                    TerminationRuleScheduleCfg(
+                        rule_id="missing_rule",
+                        points=[CurriculumPointCfg(step=5, value=0.2)],
+                    )
+                ]
+            ),
+        )
 
     with pytest.raises(ValueError, match="strictly increasing"):
         TerminationThresholdCurriculum(
             termination,
             TerminationCurriculumCfg(
                 schedules=[
-                    TerminationThresholdScheduleCfg(
-                        field=TerminationThresholdField.AnchorPosErrorThreshold,
+                    TerminationRuleScheduleCfg(
+                        rule_id="anchor_position_failure",
                         points=[
                             CurriculumPointCfg(step=5, value=0.2),
                             CurriculumPointCfg(step=5, value=0.1),
                         ],
-                    )
-                ]
-            ),
-        )
-
-    with pytest.raises(ValueError, match="non-negative"):
-        TerminationThresholdCurriculum(
-            termination,
-            TerminationCurriculumCfg(
-                schedules=[
-                    TerminationThresholdScheduleCfg(
-                        field=TerminationThresholdField.AnchorPosErrorThreshold,
-                        points=[CurriculumPointCfg(step=-1, value=0.2)],
                     )
                 ]
             ),
@@ -189,12 +139,12 @@ def test_invalid_curriculum_configurations_raise_value_error() -> None:
             termination,
             TerminationCurriculumCfg(
                 schedules=[
-                    TerminationThresholdScheduleCfg(
-                        field=TerminationThresholdField.AnchorPosErrorThreshold,
+                    TerminationRuleScheduleCfg(
+                        rule_id="anchor_position_failure",
                         points=[CurriculumPointCfg(step=5, value=0.2)],
                     ),
-                    TerminationThresholdScheduleCfg(
-                        field=TerminationThresholdField.AnchorPosErrorThreshold,
+                    TerminationRuleScheduleCfg(
+                        rule_id="anchor_position_failure",
                         points=[CurriculumPointCfg(step=10, value=0.1)],
                     ),
                 ]
