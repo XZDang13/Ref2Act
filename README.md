@@ -49,12 +49,13 @@ cfg.expert_motion_file = "path/to/motion.npz"
 cfg.scene.num_envs = 32
 cfg.sampling_strategy = SamplingStrategy.FailureWeighted
 cfg.failure_weight_uniform_mix = 0.1
+cfg.failure_weight_max_uniform_ratio = 2.5
 
 env = MotionTrackingEnv(cfg)
 obs, info = env.reset()
 ```
 
-With `SamplingStrategy.FailureWeighted`, Ref2Act now biases both motion choice across clips and reset-bin choice within the chosen clip. `cfg.failure_weight_uniform_mix` blends each learned failure distribution with uniform mass so the sampler does not collapse onto only a few motions or bins.
+With `SamplingStrategy.FailureWeighted`, Ref2Act now biases both motion choice across clips and reset-bin choice within the chosen clip. `cfg.failure_weight_uniform_mix` blends each learned failure distribution with uniform mass, and `cfg.failure_weight_max_uniform_ratio` caps each eligible motion/bin at a multiple of its uniform share so the sampler cannot collapse onto only a few motions or bins.
 
 The package registers these Gym environments when Isaac Lab is available:
 

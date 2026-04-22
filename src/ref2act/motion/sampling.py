@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from enum import Enum
 
@@ -46,6 +47,7 @@ class MotionSampler:
         bin_size: float | None = None,
         failure_decay: float = 1.0,
         failure_weight_uniform_mix: float = 0.1,
+        failure_weight_max_uniform_ratio: float | None = 2.5,
         segment_source: SegmentSource = SegmentSource.Time,
         device: torch.device = torch.device("cpu"),
     ) -> None:
@@ -61,6 +63,13 @@ class MotionSampler:
         if not (0.0 <= failure_weight_uniform_mix <= 1.0):
             raise ValueError("failure_weight_uniform_mix must be in [0, 1].")
         self.failure_weight_uniform_mix = float(failure_weight_uniform_mix)
+        if failure_weight_max_uniform_ratio is None:
+            self.failure_weight_max_uniform_ratio = None
+        else:
+            resolved_max_uniform_ratio = float(failure_weight_max_uniform_ratio)
+            if not math.isfinite(resolved_max_uniform_ratio) or resolved_max_uniform_ratio < 1.0:
+                raise ValueError("failure_weight_max_uniform_ratio must be None or a finite float >= 1.")
+            self.failure_weight_max_uniform_ratio = resolved_max_uniform_ratio
 
         self.current_motion_ids = torch.zeros(num_envs, dtype=torch.long, device=self.device)
         self.current_times = torch.zeros(num_envs, device=self.device)
@@ -145,7 +154,68 @@ class MotionSampler:
             learned_probs = uniform_probs
 
         probs = (1.0 - self.failure_weight_uniform_mix) * learned_probs + self.failure_weight_uniform_mix * uniform_probs
-        return probs / torch.clamp(torch.sum(probs), min=torch.finfo(probs.dtype).eps)
+        probs = probs / torch.clamp(torch.sum(probs), min=torch.finfo(probs.dtype).eps)
+        return self._apply_max_uniform_probability_cap(
+            probs,
+            eligible_mask=eligible,
+            uniform_probs=uniform_probs,
+        )
+
+    def _apply_max_uniform_probability_cap(
+        self,
+        probs: torch.Tensor,
+        *,
+        eligible_mask: torch.Tensor,
+        uniform_probs: torch.Tensor,
+    ) -> torch.Tensor:
+        probs = torch.as_tensor(probs, dtype=torch.float32, device=self.device).reshape(-1)
+        eligible = torch.as_tensor(eligible_mask, dtype=torch.bool, device=self.device).reshape(-1)
+        uniform_probs = torch.as_tensor(uniform_probs, dtype=torch.float32, device=self.device).reshape(-1)
+        if probs.shape != eligible.shape or probs.shape != uniform_probs.shape:
+            raise ValueError("Probability cap inputs must have the same shape.")
+
+        probs = torch.where(eligible, probs, torch.zeros_like(probs))
+        probs = probs / torch.clamp(torch.sum(probs), min=torch.finfo(probs.dtype).eps)
+
+        if self.failure_weight_max_uniform_ratio is None:
+            return probs
+
+        eligible_count = int(torch.sum(eligible).item())
+        if eligible_count == 0:
+            raise ValueError("eligible_mask must include at least one entry.")
+
+        max_prob = float(self.failure_weight_max_uniform_ratio) / float(eligible_count)
+        if max_prob >= 1.0:
+            return probs
+
+        eps = torch.finfo(probs.dtype).eps
+        if not bool(torch.all(torch.isfinite(probs)).item()):
+            return uniform_probs
+        if float(torch.sum(probs).item()) <= eps:
+            return uniform_probs
+        if bool(torch.all(probs[eligible] <= max_prob + eps).item()):
+            return probs
+
+        # Project onto the simplex with a shared upper bound so no eligible entry exceeds max_prob.
+        eligible_probs = probs[eligible]
+        lower = torch.min(eligible_probs - max_prob)
+        upper = torch.max(eligible_probs)
+        for _ in range(64):
+            threshold = 0.5 * (lower + upper)
+            projected_probs = torch.clamp(eligible_probs - threshold, min=0.0, max=max_prob)
+            if float(torch.sum(projected_probs).item()) > 1.0:
+                lower = threshold
+            else:
+                upper = threshold
+
+        eligible_projected_probs = torch.clamp(eligible_probs - upper, min=0.0, max=max_prob)
+        projected_sum = torch.sum(eligible_projected_probs)
+        if not bool(torch.isfinite(projected_sum).item()) or float(projected_sum.item()) <= eps:
+            return uniform_probs
+
+        capped_probs = torch.zeros_like(probs)
+        capped_probs[eligible] = eligible_projected_probs
+        return capped_probs / projected_sum
 
     def _sample_failure_weighted_motion_ids(
         self,

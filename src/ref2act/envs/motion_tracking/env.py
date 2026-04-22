@@ -90,6 +90,7 @@ class MotionTrackingEnv(DirectRLEnv):
             bin_size=self.cfg.bin_size,
             failure_decay=self.cfg.failure_decay,
             failure_weight_uniform_mix=self.cfg.failure_weight_uniform_mix,
+            failure_weight_max_uniform_ratio=self.cfg.failure_weight_max_uniform_ratio,
             segment_source=self.cfg.segment_source,
             device=self.device,
         )

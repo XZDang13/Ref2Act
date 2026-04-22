@@ -388,6 +388,7 @@ class G1MotionTrackingEnvCfg(DirectRLEnvCfg):
     bin_size = 0.3
     failure_decay = 0.99
     failure_weight_uniform_mix = 0.1
+    failure_weight_max_uniform_ratio = 2.5
     failure_temperature = 1.0
     segment_source: SegmentSource = SegmentSource.Time
     sampling_strategy: SamplingStrategy | None = None
@@ -511,6 +512,7 @@ class PiPlusMotionTrackingEnvCfg(DirectRLEnvCfg):
     bin_size = 0.2
     failure_decay = 1.0
     failure_weight_uniform_mix = 0.1
+    failure_weight_max_uniform_ratio = 2.5
     failure_temperature = 1.0
     segment_source: SegmentSource = SegmentSource.Time
     sampling_strategy: SamplingStrategy | None = None

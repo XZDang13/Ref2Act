@@ -280,6 +280,42 @@ def test_failure_weighted_motion_selection_guard_keeps_all_motions_live(tmp_path
     assert counts[1] > 200
 
 
+def test_failure_weighted_motion_selection_probability_cap_limits_max_share(tmp_path: Path) -> None:
+    motion_files = [tmp_path / f"motion_{motion_idx}.npz" for motion_idx in range(4)]
+    for motion_file in motion_files:
+        _write_motion_file(
+            motion_file,
+            segment_start_times=np.asarray([0.0], dtype=np.float32),
+            segment_end_times=np.asarray([1.0], dtype=np.float32),
+            segment_types=np.asarray([SEGMENT_TYPE_TIME_BIN], dtype=np.int64),
+        )
+
+    motion_lib = MotionLib(motion_files)
+    sampler_mod = _load_sampler_module()
+    sampler = sampler_mod.Sampler(
+        num_envs=1,
+        motion_lib=motion_lib,
+        dt=0.05,
+        anchor_body_index=0,
+        failure_weight_uniform_mix=0.0,
+        failure_weight_max_uniform_ratio=2.5,
+        device=torch.device("cpu"),
+    )
+
+    motion_fail_counts = torch.tensor([100.0, 0.0, 0.0, 0.0], dtype=torch.float32)
+    motion_sample_counts = torch.ones(4, dtype=torch.float32)
+    motion_probs = sampler._build_guarded_sampling_probabilities(
+        motion_fail_counts,
+        motion_sample_counts,
+        temperature=1.0,
+    )
+
+    max_allowed_prob = sampler.failure_weight_max_uniform_ratio / 4.0
+    assert bool(torch.isclose(motion_probs.sum(), torch.tensor(1.0, dtype=torch.float32)).item())
+    assert motion_probs[0] > motion_probs[1]
+    assert float(motion_probs.max().item()) <= max_allowed_prob + 1.0e-6
+
+
 def test_failure_weighted_bin_guard_keeps_all_bins_live(tmp_path: Path) -> None:
     motion_file = tmp_path / "jump_segmented.npz"
     _write_motion_file(
@@ -312,6 +348,38 @@ def test_failure_weighted_bin_guard_keeps_all_bins_live(tmp_path: Path) -> None:
     counts = torch.bincount(target_bin_indices, minlength=3)
 
     assert torch.all(counts > 0)
+
+
+def test_failure_weighted_bin_probability_cap_limits_max_share(tmp_path: Path) -> None:
+    motion_file = tmp_path / "jump_segmented.npz"
+    _write_motion_file(
+        motion_file,
+        segment_start_times=np.asarray([0.0, 0.25, 0.5, 0.75], dtype=np.float32),
+        segment_end_times=np.asarray([0.25, 0.5, 0.75, 1.0], dtype=np.float32),
+        segment_types=np.asarray([SEGMENT_TYPE_TIME_BIN] * 4, dtype=np.int64),
+    )
+    motion_lib = MotionLib([motion_file])
+    sampler_mod = _load_sampler_module()
+    sampler = sampler_mod.Sampler(
+        num_envs=1,
+        motion_lib=motion_lib,
+        dt=0.05,
+        anchor_body_index=0,
+        failure_weight_uniform_mix=0.0,
+        failure_weight_max_uniform_ratio=2.5,
+        device=torch.device("cpu"),
+    )
+
+    bin_probs = sampler._build_guarded_sampling_probabilities(
+        torch.tensor([100.0, 0.0, 0.0, 0.0], dtype=torch.float32),
+        torch.ones(4, dtype=torch.float32),
+        temperature=1.0,
+    )
+
+    max_allowed_prob = sampler.failure_weight_max_uniform_ratio / 4.0
+    assert bool(torch.isclose(bin_probs.sum(), torch.tensor(1.0, dtype=torch.float32)).item())
+    assert bin_probs[0] > bin_probs[1]
+    assert float(bin_probs.max().item()) <= max_allowed_prob + 1.0e-6
 
 
 def test_random_strategy_keeps_uniform_motion_selection(tmp_path: Path) -> None:
@@ -523,6 +591,48 @@ def test_anchor_failure_weighted_guard_only_uses_eligible_bins(tmp_path: Path) -
     assert counts[1] > 0
     assert counts[2] > 0
     assert torch.all((times == 0.3) | (times == 0.7))
+
+
+def test_anchor_failure_weighted_probability_cap_preserves_ineligible_bins(tmp_path: Path) -> None:
+    motion_file = tmp_path / "anchor_guarded_bins.npz"
+    _write_motion_file(
+        motion_file,
+        anchor_segment_start_times=np.asarray([0.0, 0.2, 0.6, 0.8], dtype=np.float32),
+        anchor_segment_end_times=np.asarray([0.2, 0.6, 0.8, 1.0], dtype=np.float32),
+        anchor_segment_labels=np.asarray(
+            [ANCHOR_FRAME_LABEL_RED, ANCHOR_FRAME_LABEL_GREEN, ANCHOR_FRAME_LABEL_GREEN, ANCHOR_FRAME_LABEL_GREEN],
+            dtype=np.int64,
+        ),
+        anchor_frame_indices=np.asarray([3, 7], dtype=np.int64),
+        anchor_times=np.asarray([0.3, 0.7], dtype=np.float32),
+    )
+    motion_lib = MotionLib([motion_file])
+    sampler_mod = _load_sampler_module()
+    sampler = sampler_mod.Sampler(
+        num_envs=1,
+        motion_lib=motion_lib,
+        dt=0.05,
+        anchor_body_index=0,
+        failure_weight_uniform_mix=0.0,
+        failure_weight_max_uniform_ratio=2.5,
+        segment_source=sampler_mod.SegmentSource.Anchor,
+        device=torch.device("cpu"),
+    )
+
+    probs = sampler._build_guarded_sampling_probabilities(
+        torch.tensor([500.0, 100.0, 0.0, 0.0], dtype=torch.float32),
+        torch.ones(4, dtype=torch.float32),
+        temperature=1.0,
+        eligible_mask=sampler.bin_reset_eligible[0],
+    )
+
+    eligible_mask = sampler.bin_reset_eligible[0]
+    num_eligible = int(eligible_mask.sum().item())
+    max_allowed_prob = sampler.failure_weight_max_uniform_ratio / float(num_eligible)
+    assert not bool(eligible_mask[0].item())
+    assert float(probs[0].item()) == 0.0
+    assert bool(torch.isclose(probs.sum(), torch.tensor(1.0, dtype=torch.float32)).item())
+    assert float(probs[eligible_mask].max().item()) <= max_allowed_prob + 1.0e-6
 
 
 def test_anchor_sample_and_fail_counts_accumulate_on_target_bins(tmp_path: Path, monkeypatch) -> None:

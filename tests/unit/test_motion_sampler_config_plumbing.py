@@ -47,6 +47,16 @@ def test_shared_env_cfg_defaults_failure_weight_uniform_mix() -> None:
         assert value.value == 0.1
 
 
+def test_shared_env_cfg_defaults_failure_weight_max_uniform_ratio() -> None:
+    tree = ast.parse(ENV_CFG_SHARED.read_text())
+
+    for class_name in ("G1MotionTrackingEnvCfg", "PiPlusMotionTrackingEnvCfg"):
+        class_def = _find_class(tree, class_name)
+        value = _find_class_assignment(class_def, "failure_weight_max_uniform_ratio")
+        assert isinstance(value, ast.Constant)
+        assert value.value == 2.5
+
+
 def test_motion_tracking_env_threads_segment_source_into_sampler() -> None:
     tree = ast.parse(MOTION_TRACKING_ENV.read_text())
 
@@ -95,6 +105,35 @@ def test_motion_tracking_env_threads_failure_weight_uniform_mix_into_sampler() -
     value = uniform_mix_keywords[0].value
     assert isinstance(value, ast.Attribute)
     assert value.attr == "failure_weight_uniform_mix"
+    assert isinstance(value.value, ast.Attribute)
+    assert value.value.attr == "cfg"
+    assert isinstance(value.value.value, ast.Name)
+    assert value.value.value.id == "self"
+
+
+def test_motion_tracking_env_threads_failure_weight_max_uniform_ratio_into_sampler() -> None:
+    tree = ast.parse(MOTION_TRACKING_ENV.read_text())
+
+    sampler_calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "MotionSampler"
+    ]
+    assert sampler_calls, "Expected MotionSampler(...) call in motion_tracking/env.py."
+
+    max_uniform_ratio_keywords = [
+        keyword
+        for call in sampler_calls
+        for keyword in call.keywords
+        if keyword.arg == "failure_weight_max_uniform_ratio"
+    ]
+    assert (
+        max_uniform_ratio_keywords
+    ), "Expected MotionSampler(...) to receive failure_weight_max_uniform_ratio=..."
+
+    value = max_uniform_ratio_keywords[0].value
+    assert isinstance(value, ast.Attribute)
+    assert value.attr == "failure_weight_max_uniform_ratio"
     assert isinstance(value.value, ast.Attribute)
     assert value.value.attr == "cfg"
     assert isinstance(value.value.value, ast.Name)
