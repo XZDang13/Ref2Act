@@ -11,10 +11,57 @@ from dataclasses import dataclass
 
 from ref2act.common.utils import compute_frame_blend_from_fps, interpolate, slerp
 
-from .segments import validate_segment_arrays
+from .segments import (
+    ANCHOR_FRAME_LABEL_GREEN,
+    ANCHOR_FRAME_LABEL_RED,
+    ANCHOR_FRAME_LABEL_YELLOW,
+    validate_segment_arrays,
+)
 
 
 MotionFileInput = str | PathLike[str] | Sequence[str | PathLike[str]]
+_ANCHOR_SEGMENT_LABELS = (
+    int(ANCHOR_FRAME_LABEL_RED),
+    int(ANCHOR_FRAME_LABEL_YELLOW),
+    int(ANCHOR_FRAME_LABEL_GREEN),
+)
+
+
+def _validate_anchor_segment_arrays(
+    start_times: np.ndarray,
+    end_times: np.ndarray,
+    labels: np.ndarray,
+    *,
+    duration: float,
+) -> None:
+    validate_segment_arrays(start_times, end_times, duration=duration)
+    resolved_labels = np.asarray(labels, dtype=np.int64).reshape(-1)
+    if resolved_labels.shape != np.asarray(start_times).reshape(-1).shape:
+        raise ValueError("anchor_segment_labels must have the same shape as anchor_segment_start_times.")
+    if np.any(~np.isin(resolved_labels, _ANCHOR_SEGMENT_LABELS)):
+        raise ValueError("anchor_segment_labels contains unknown anchor label ids.")
+
+
+def _validate_anchor_selection_arrays(
+    frame_indices: np.ndarray,
+    times: np.ndarray,
+    *,
+    num_frames: int,
+    duration: float,
+    atol: float = 1.0e-5,
+) -> None:
+    resolved_frame_indices = np.asarray(frame_indices, dtype=np.int64).reshape(-1)
+    resolved_times = np.asarray(times, dtype=np.float64).reshape(-1)
+    if resolved_frame_indices.shape != resolved_times.shape:
+        raise ValueError("anchor_frame_indices and anchor_times must have the same shape.")
+    if np.any(resolved_frame_indices[1:] < resolved_frame_indices[:-1]):
+        raise ValueError("anchor_frame_indices must be sorted in non-decreasing order.")
+    if np.any(resolved_times[1:] + atol < resolved_times[:-1]):
+        raise ValueError("anchor_times must be sorted in non-decreasing order.")
+    if np.any(resolved_frame_indices < 0) or np.any(resolved_frame_indices >= num_frames):
+        raise ValueError("anchor_frame_indices contain values outside the clip frame range.")
+    if np.any(resolved_times < -atol) or np.any(resolved_times > duration + atol):
+        raise ValueError("anchor_times contain values outside the clip duration.")
 
 
 @dataclass
@@ -35,6 +82,11 @@ class MotionClip:
     segment_start_times: torch.Tensor | None = None
     segment_end_times: torch.Tensor | None = None
     segment_types: torch.Tensor | None = None
+    anchor_segment_start_times: torch.Tensor | None = None
+    anchor_segment_end_times: torch.Tensor | None = None
+    anchor_segment_labels: torch.Tensor | None = None
+    anchor_frame_indices: torch.Tensor | None = None
+    anchor_times: torch.Tensor | None = None
 
     @property
     def has_segments(self) -> bool:
@@ -45,6 +97,16 @@ class MotionClip:
         if self.segment_start_times is None:
             return 0
         return int(self.segment_start_times.shape[0])
+
+    @property
+    def has_anchor_segments(self) -> bool:
+        return self.anchor_segment_start_times is not None
+
+    @property
+    def num_anchor_segments(self) -> int:
+        if self.anchor_segment_start_times is None:
+            return 0
+        return int(self.anchor_segment_start_times.shape[0])
 
 
 class MotionLib:
@@ -83,7 +145,19 @@ class MotionLib:
         self.motion_segment_start_times = [clip.segment_start_times for clip in self.clips]
         self.motion_segment_end_times = [clip.segment_end_times for clip in self.clips]
         self.motion_segment_types = [clip.segment_types for clip in self.clips]
+        self.motion_has_anchor_segments = torch.tensor(
+            [clip.has_anchor_segments for clip in self.clips], dtype=torch.bool, device=self.device
+        )
+        self.motion_num_anchor_segments = torch.tensor(
+            [clip.num_anchor_segments for clip in self.clips], dtype=torch.long, device=self.device
+        )
+        self.motion_anchor_segment_start_times = [clip.anchor_segment_start_times for clip in self.clips]
+        self.motion_anchor_segment_end_times = [clip.anchor_segment_end_times for clip in self.clips]
+        self.motion_anchor_segment_labels = [clip.anchor_segment_labels for clip in self.clips]
+        self.motion_anchor_frame_indices = [clip.anchor_frame_indices for clip in self.clips]
+        self.motion_anchor_times = [clip.anchor_times for clip in self.clips]
         self.all_clips_have_segments = bool(torch.all(self.motion_has_segments).item())
+        self.all_clips_have_anchor_segments = bool(torch.all(self.motion_has_anchor_segments).item())
         print(
             f"motion data loaded: {self.num_motions} clip(s), "
             f"durations={[round(float(duration), 3) for duration in self.motion_durations.tolist()]} s"
@@ -119,6 +193,11 @@ class MotionLib:
             segment_start_times = None
             segment_end_times = None
             segment_types = None
+            anchor_segment_start_times = None
+            anchor_segment_end_times = None
+            anchor_segment_labels = None
+            anchor_frame_indices = None
+            anchor_times = None
 
             segment_keys = ("segment_start_times", "segment_end_times", "segment_types")
             has_segment_keys = [key in motion_data for key in segment_keys]
@@ -143,6 +222,47 @@ class MotionLib:
                     segment_types=segment_types.detach().cpu().numpy(),
                 )
 
+            anchor_keys = (
+                "anchor_segment_start_times",
+                "anchor_segment_end_times",
+                "anchor_segment_labels",
+                "anchor_frame_indices",
+                "anchor_times",
+            )
+            has_anchor_keys = [key in motion_data for key in anchor_keys]
+            if any(has_anchor_keys):
+                if not all(has_anchor_keys):
+                    raise ValueError(
+                        f"Motion clip {motion_file} is missing part of the anchor metadata: {anchor_keys}"
+                    )
+                anchor_segment_start_times = torch.as_tensor(
+                    motion_data["anchor_segment_start_times"], dtype=torch.float32, device=self.device
+                ).reshape(-1)
+                anchor_segment_end_times = torch.as_tensor(
+                    motion_data["anchor_segment_end_times"], dtype=torch.float32, device=self.device
+                ).reshape(-1)
+                anchor_segment_labels = torch.as_tensor(
+                    motion_data["anchor_segment_labels"], dtype=torch.long, device=self.device
+                ).reshape(-1)
+                anchor_frame_indices = torch.as_tensor(
+                    motion_data["anchor_frame_indices"], dtype=torch.long, device=self.device
+                ).reshape(-1)
+                anchor_times = torch.as_tensor(
+                    motion_data["anchor_times"], dtype=torch.float32, device=self.device
+                ).reshape(-1)
+                _validate_anchor_segment_arrays(
+                    anchor_segment_start_times.detach().cpu().numpy(),
+                    anchor_segment_end_times.detach().cpu().numpy(),
+                    anchor_segment_labels.detach().cpu().numpy(),
+                    duration=duration,
+                )
+                _validate_anchor_selection_arrays(
+                    anchor_frame_indices.detach().cpu().numpy(),
+                    anchor_times.detach().cpu().numpy(),
+                    num_frames=num_frames,
+                    duration=duration,
+                )
+
             return MotionClip(
                 motion_id=motion_id,
                 name=str(motion_data["name"].item()) if "name" in motion_data else Path(motion_file).stem,
@@ -164,6 +284,11 @@ class MotionLib:
                 segment_start_times=segment_start_times,
                 segment_end_times=segment_end_times,
                 segment_types=segment_types,
+                anchor_segment_start_times=anchor_segment_start_times,
+                anchor_segment_end_times=anchor_segment_end_times,
+                anchor_segment_labels=anchor_segment_labels,
+                anchor_frame_indices=anchor_frame_indices,
+                anchor_times=anchor_times,
             )
 
     def _validate_clip_compatibility(self) -> None:

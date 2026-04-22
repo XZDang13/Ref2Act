@@ -24,7 +24,7 @@ from ref2act.envs.motion_tracking.randomization import (
 )
 from ref2act.envs.motion_tracking.rewards import default_reward_spec
 from ref2act.envs.motion_tracking.termination import default_termination_spec
-from ref2act.motion.sampling import SamplerMod, SamplingStrategy
+from ref2act.motion.sampling import SamplerMod, SamplingStrategy, SegmentSource
 from ref2act.robots._articulation_shared import G1_CFG, PI_PLUS_CFG
 
 G1_ACTION_LATENCY_RANGE = (0, 2)
@@ -387,8 +387,9 @@ class G1MotionTrackingEnvCfg(DirectRLEnvCfg):
 
     bin_size = 0.3
     failure_decay = 0.99
-    failure_weight_min = 0.001
+    failure_weight_uniform_mix = 0.1
     failure_temperature = 1.0
+    segment_source: SegmentSource = SegmentSource.Time
     sampling_strategy: SamplingStrategy | None = None
     sampler_mod:SamplerMod = SamplerMod.Clamp
 
@@ -509,8 +510,9 @@ class PiPlusMotionTrackingEnvCfg(DirectRLEnvCfg):
 
     bin_size = 0.2
     failure_decay = 1.0
-    failure_weight_min = 0.001
+    failure_weight_uniform_mix = 0.1
     failure_temperature = 1.0
+    segment_source: SegmentSource = SegmentSource.Time
     sampling_strategy: SamplingStrategy | None = None
     sampler_mod:SamplerMod = SamplerMod.Clamp
 

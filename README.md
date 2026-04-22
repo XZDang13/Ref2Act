@@ -48,10 +48,13 @@ cfg = G1MotionTrackingEnvCfg()
 cfg.expert_motion_file = "path/to/motion.npz"
 cfg.scene.num_envs = 32
 cfg.sampling_strategy = SamplingStrategy.FailureWeighted
+cfg.failure_weight_uniform_mix = 0.1
 
 env = MotionTrackingEnv(cfg)
 obs, info = env.reset()
 ```
+
+With `SamplingStrategy.FailureWeighted`, Ref2Act now biases both motion choice across clips and reset-bin choice within the chosen clip. `cfg.failure_weight_uniform_mix` blends each learned failure distribution with uniform mass so the sampler does not collapse onto only a few motions or bins.
 
 The package registers these Gym environments when Isaac Lab is available:
 
@@ -79,5 +82,130 @@ Useful options:
 - `--target-fps`: resample the exported clip
 - `--smooth-motion`: smooth root and joint trajectories before export
 - `--segment-bin-size`: emit segment metadata for failure-weighted sampling
+- `--segment-method anchor`: keep legacy `segment_*` output and also export anchor metadata
 
 The converter emits `.npz` clips compatible with `ref2act.motion.MotionLib` and the motion-tracking env configs.
+
+### Tutorial: Using `ref2act-convert`
+
+`ref2act-convert` converts one retargeted GMR `.pkl` motion file into the `.npz` format used by Ref2Act training and tooling.
+
+1. Install the package in editable mode:
+
+```bash
+python -m pip install -e .
+```
+
+2. Check the available flags:
+
+```bash
+ref2act-convert --help
+```
+
+3. Run the simplest conversion:
+
+```bash
+ref2act-convert \
+  --input_file data/motions/walk.pkl \
+  --output_file data/motions/walk.npz
+```
+
+If `--output_file` is omitted, the converter writes the output next to the input file with the same stem and an `.npz` suffix.
+
+4. Convert a motion with settings that are usually useful for training:
+
+```bash
+ref2act-convert \
+  --input_file data/motions/walk.pkl \
+  --output_file data/motions/walk_train.npz \
+  --target-fps 60 \
+  --smooth-motion \
+  --smoothing-profile medium \
+  --segment-bin-size 0.3
+```
+
+This does four things:
+
+- resamples the clip to `60 Hz`
+- smooths root and joint trajectories before export
+- writes `segment_start_times`, `segment_end_times`, and `segment_types`
+- produces a clip that can be used directly by `MotionLib` and the motion-tracking env
+
+5. Export anchor-aware metadata in addition to the standard segment metadata:
+
+```bash
+ref2act-convert \
+  --input_file data/motions/jump.pkl \
+  --output_file data/motions/jump_anchor.npz \
+  --segment-method anchor \
+  --segment-bin-size 0.3
+```
+
+Anchor mode still writes the normal `segment_*` arrays for compatibility, and also writes `anchor_*` arrays such as:
+
+- `anchor_frame_labels`
+- `anchor_segment_start_times`
+- `anchor_segment_end_times`
+- `anchor_frame_indices`
+- `anchor_times`
+
+Use this mode when you want the converted file to carry stable reset-anchor annotations alongside the current time-segment metadata.
+
+6. Adjust the vertical offset or airborne detection if the imported motion needs it:
+
+```bash
+ref2act-convert \
+  --input_file data/motions/custom.pkl \
+  --output_file data/motions/custom.npz \
+  --height_offset 0.02 \
+  --airborne-height-threshold 0.08
+```
+
+`--height_offset` shifts the root height before export. `--airborne-height-threshold` changes how aggressively the converter marks both feet as airborne when it builds segment metadata.
+
+For many files at once, use `ref2act-convert-batch`:
+
+```bash
+ref2act-convert-batch \
+  --input_dir data/motions/raw \
+  --output_dir data/motions/converted \
+  --target-fps 60 \
+  --smooth-motion \
+  --segment-method anchor
+```
+
+## Anchor Diagnostics
+
+If a motion was converted with `--segment-method anchor`, you can inspect the selected anchors with:
+
+```bash
+ref2act-plot-anchor-diagnostics --input_file data/motions/jump_anchor.npz
+```
+
+The tool writes two figures by default under `anchor_diagnostics/` next to the input file:
+
+- `<stem>_overview.png`: label timeline, foot-height traces, support mode, and soft metrics with anchors overlaid
+- `<stem>_reasons.png`: rejection-reason heatmap plus a per-anchor summary table
+
+Example with explicit output settings:
+
+```bash
+ref2act-plot-anchor-diagnostics \
+  --input_file data/motions/jump_anchor.npz \
+  --output_dir data/motions/anchor_diagnostics \
+  --output-prefix jump_anchor
+```
+
+Useful options:
+
+- `--output_dir`: choose where the figures are saved
+- `--output-prefix`: control the output filename prefix
+- `--airborne-height-threshold`: recompute diagnostics with a different airborne threshold
+
+The CLI prints a short summary to stdout, including:
+
+- how many anchors were found
+- green interval ranges
+- frame, time, support mode, and score for each anchor
+
+If the `.npz` file already contains `anchor_*` arrays, the tool uses them for the anchor overlay and also checks whether they still match the current diagnostics implementation.

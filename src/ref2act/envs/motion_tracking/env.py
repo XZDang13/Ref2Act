@@ -12,7 +12,7 @@ from isaaclab.sensors import ContactSensor
 
 from ref2act.common.math import quat_mul
 from ref2act.common.observation_spec import ObservationLayout
-from ref2act.motion import MotionLib, MotionSampler, SamplingStrategy
+from ref2act.motion import MotionLib, MotionSampler, SamplingStrategy, SegmentSource
 
 from .action import ActionProcessor
 from .curriculum import TerminationThresholdCurriculum
@@ -89,14 +89,19 @@ class MotionTrackingEnv(DirectRLEnv):
             dt=self.step_dt,
             bin_size=self.cfg.bin_size,
             failure_decay=self.cfg.failure_decay,
+            failure_weight_uniform_mix=self.cfg.failure_weight_uniform_mix,
+            segment_source=self.cfg.segment_source,
             device=self.device,
         )
-        if self._get_sampling_strategy() == SamplingStrategy.FailureWeighted and self.cfg.bin_size is None:
-            raise ValueError("Failure-weighted sampling requires cfg.bin_size to be set.")
         if (
             self._get_sampling_strategy() == SamplingStrategy.FailureWeighted
             and not self.sampler.supports_failure_weighted_sampling
         ):
+            if self.cfg.segment_source == SegmentSource.Anchor:
+                raise ValueError(
+                    "Failure-weighted anchor sampling requires motion clips with anchor metadata. "
+                    "Reconvert the motion .npz files with `ref2act-convert --segment-method anchor`."
+                )
             raise ValueError(
                 "Failure-weighted sampling requires motion clips with segment metadata. "
                 "Reconvert the motion .npz files with `ref2act-convert --segment-bin-size ...`."
@@ -383,7 +388,6 @@ class MotionTrackingEnv(DirectRLEnv):
         self.sampler.reset(
             env_ids,
             strategy=self._get_sampling_strategy(),
-            min_weight=self.cfg.failure_weight_min,
             temperature=self.cfg.failure_temperature,
         )
         reference_motion = self._build_reference_motion(env_ids)

@@ -52,6 +52,7 @@ def test_batch_parser_includes_shared_conversion_defaults_and_num_agents() -> No
     assert batch_args.height_offset == single_args.height_offset
     assert batch_args.segment_bin_size == single_args.segment_bin_size
     assert batch_args.airborne_height_threshold == single_args.airborne_height_threshold
+    assert batch_args.segment_method == single_args.segment_method
     assert batch_args.smooth_motion == single_args.smooth_motion
     assert batch_args.smoothing_profile == single_args.smoothing_profile
     assert batch_args.target_fps == single_args.target_fps
@@ -73,6 +74,8 @@ def test_batch_parser_accepts_segment_smoothing_and_num_agents_flags() -> None:
             "0.45",
             "--airborne-height-threshold",
             "0.08",
+            "--segment-method",
+            "anchor",
             "--smooth-motion",
             "--smoothing-profile",
             "strong",
@@ -85,6 +88,7 @@ def test_batch_parser_accepts_segment_smoothing_and_num_agents_flags() -> None:
     assert args.height_offset == 0.15
     assert args.segment_bin_size == 0.45
     assert args.airborne_height_threshold == 0.08
+    assert args.segment_method == "anchor"
     assert args.smooth_motion is True
     assert args.smoothing_profile == "strong"
     assert args.target_fps == 100
@@ -299,6 +303,8 @@ def test_main_uses_multi_agent_batch_converter_with_shared_options(monkeypatch) 
             "0.5",
             "--airborne-height-threshold",
             "0.09",
+            "--segment-method",
+            "anchor",
             "--smooth-motion",
             "--smoothing-profile",
             "medium",
@@ -314,6 +320,7 @@ def test_main_uses_multi_agent_batch_converter_with_shared_options(monkeypatch) 
     assert options.height_offset == 0.2
     assert options.segment_bin_size == 0.5
     assert options.airborne_height_threshold == 0.09
+    assert options.segment_method == "anchor"
     assert options.smooth_motion is True
     assert options.smoothing_profile == "medium"
     assert options.target_fps == 50

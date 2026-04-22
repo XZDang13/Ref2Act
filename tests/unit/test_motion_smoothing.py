@@ -123,11 +123,14 @@ def test_parser_includes_motion_smoothing_flags() -> None:
     assert args.smooth_motion is False
     assert args.smoothing_profile == DEFAULT_SMOOTHING_PROFILE
     assert args.target_fps is None
+    assert args.segment_method == "time"
 
     args = parser.parse_args(
         [
             "--input_file",
             "motion.pkl",
+            "--segment-method",
+            "anchor",
             "--smooth-motion",
             "--smoothing-profile",
             "strong",
@@ -135,6 +138,7 @@ def test_parser_includes_motion_smoothing_flags() -> None:
             "100",
         ]
     )
+    assert args.segment_method == "anchor"
     assert args.smooth_motion is True
     assert args.smoothing_profile == "strong"
     assert args.target_fps == 100

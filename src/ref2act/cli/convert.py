@@ -3,6 +3,7 @@ import pickle
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 
@@ -12,10 +13,14 @@ from isaaclab.app import AppLauncher
 from ref2act.common.utils import compute_frame_blend_from_fps, interpolate, slerp
 from ref2act.motion.segments import (
     DEFAULT_AIRBORNE_HEIGHT_MARGIN,
+    build_anchor_selection_diagnostics,
     build_contact_segments,
     infer_ground_contact_from_foot_heights,
 )
 from ref2act.motion.smoothing import DEFAULT_SMOOTHING_PROFILE, SMOOTHING_PROFILES, smooth_motion_trajectory
+
+SEGMENT_METHOD_TIME = "time"
+SEGMENT_METHOD_ANCHOR = "anchor"
 
 
 @dataclass(frozen=True)
@@ -24,6 +29,7 @@ class ConversionOptions:
     height_offset: float
     segment_bin_size: float
     airborne_height_threshold: float
+    segment_method: Literal["time", "anchor"]
     smooth_motion: bool
     smoothing_profile: str
     target_fps: int | None
@@ -35,6 +41,7 @@ class ConversionOptions:
             height_offset=args.height_offset,
             segment_bin_size=args.segment_bin_size,
             airborne_height_threshold=args.airborne_height_threshold,
+            segment_method=args.segment_method,
             smooth_motion=args.smooth_motion,
             smoothing_profile=args.smoothing_profile,
             target_fps=args.target_fps,
@@ -63,6 +70,8 @@ def _positive_int(value: str) -> int:
     if parsed < 1:
         raise argparse.ArgumentTypeError("value must be at least 1")
     return parsed
+
+
 def add_conversion_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--height_offset",
@@ -81,6 +90,13 @@ def add_conversion_arguments(parser: argparse.ArgumentParser) -> None:
         type=float,
         default=DEFAULT_AIRBORNE_HEIGHT_MARGIN,
         help="Height above each foot's baseline required for both feet to be treated as airborne.",
+    )
+    parser.add_argument(
+        "--segment-method",
+        type=str,
+        choices=(SEGMENT_METHOD_TIME, SEGMENT_METHOD_ANCHOR),
+        default=SEGMENT_METHOD_TIME,
+        help="Segment export method. 'time' preserves the current segment bins, 'anchor' adds anchor metadata.",
     )
     parser.add_argument(
         "--smooth-motion",
@@ -409,6 +425,7 @@ def resolve_output_file(input_file: str | Path, output_file: str | Path | None =
         return Path(output_file)
     return Path(input_file).with_suffix(".npz")
 
+
 def extract_feet_height(robot, foot_body_names: list[str], env_id: int = 0) -> dict[str, float]:
     foot_body_indices = [robot.data.body_names.index(body_name) for body_name in foot_body_names]
     foot_heights = robot.data.body_pos_w[env_id, foot_body_indices, 2].detach().cpu().tolist()
@@ -531,6 +548,7 @@ def _finalize_motion_slot(
     *,
     segment_bin_size: float,
     airborne_height_threshold: float,
+    segment_method: Literal["time", "anchor"],
     target_fps: int | None,
 ) -> None:
     for key in (
@@ -575,6 +593,21 @@ def _finalize_motion_slot(
     slot.log["segment_start_times"] = segment_start_times
     slot.log["segment_end_times"] = segment_end_times
     slot.log["segment_types"] = segment_types
+    if segment_method == SEGMENT_METHOD_ANCHOR:
+        anchor_diagnostics = build_anchor_selection_diagnostics(
+            slot.log,
+            airborne_height_margin=airborne_height_threshold,
+        )
+        slot.log.update(anchor_diagnostics.metadata.as_npz_dict())
+        print(
+            "[INFO]: Anchor export selected "
+            f"{anchor_diagnostics.metadata.frame_indices.shape[0]} anchor(s) "
+            f"(strict={anchor_diagnostics.strict_anchor_frame_indices.shape[0]}, "
+            f"fallback_promotion={'yes' if anchor_diagnostics.used_fallback_promotion else 'no'}, "
+            f"bootstrap_start={'yes' if anchor_diagnostics.bootstrap_start_anchor_inserted else 'no'}, "
+            f"tail_trimmed={anchor_diagnostics.num_tail_trimmed_anchors}) "
+            f"for {slot.input_file}"
+        )
 
     slot.output_file.parent.mkdir(parents=True, exist_ok=True)
     np.savez(slot.output_file, **slot.log)
@@ -589,6 +622,7 @@ def _run_motion_chunk(
     *,
     segment_bin_size: float,
     airborne_height_threshold: float,
+    segment_method: Literal["time", "anchor"],
     target_fps: int | None,
     camera_follow: bool,
 ) -> tuple[list[ConversionFailure], bool]:
@@ -652,6 +686,7 @@ def _run_motion_chunk(
                             slot,
                             segment_bin_size=segment_bin_size,
                             airborne_height_threshold=airborne_height_threshold,
+                            segment_method=segment_method,
                             target_fps=target_fps,
                         )
                     except Exception as exc:
@@ -747,6 +782,7 @@ def convert_motion_files(
         simulation_app,
         segment_bin_size=options.segment_bin_size,
         airborne_height_threshold=options.airborne_height_threshold,
+        segment_method=options.segment_method,
         target_fps=options.target_fps,
         camera_follow=camera_follow,
     )
