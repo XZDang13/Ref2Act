@@ -169,6 +169,8 @@ class MotionTrackingEnv(DirectRLEnv):
                 updates["anchor_body_index"] = self.anchor_body_index
             if hasattr(term_cfg, "key_body_indices"):
                 updates["key_body_indices"] = tuple(self.key_body_indices)
+            if hasattr(term_cfg, "end_effector_body_indices"):
+                updates["end_effector_body_indices"] = tuple(self.end_effector_body_indices)
             if hasattr(term_cfg, "body_indices"):
                 updates["body_indices"] = collision_track_body_indices
             if hasattr(term_cfg, "foot_body_indices"):

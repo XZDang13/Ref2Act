@@ -9,7 +9,7 @@ import torch
 from ref2act.common.utils import IndexLike
 
 from .library import MotionClip, MotionLib
-from .segments import ANCHOR_FRAME_LABEL_GREEN, build_legacy_time_segments
+from .segments import build_legacy_time_segments
 
 
 class SamplerMod(Enum):
@@ -75,6 +75,7 @@ class MotionSampler:
         self.current_times = torch.zeros(num_envs, device=self.device)
         self.episode_start_motion_ids = torch.zeros(num_envs, dtype=torch.long, device=self.device)
         self.episode_start_times = torch.zeros(num_envs, device=self.device)
+        self.episode_start_bin_indices = torch.zeros(num_envs, dtype=torch.long, device=self.device)
 
         self.bin_size: float | None = float(bin_size) if bin_size is not None else None
         self.num_bins = 0
@@ -301,17 +302,12 @@ class MotionSampler:
         for motion_id in torch.unique(motion_ids, sorted=True).tolist():
             mask = motion_ids == motion_id
             num_samples = int(mask.sum().item())
-            eligible_bin_indices = torch.nonzero(self.bin_reset_eligible[motion_id], as_tuple=False).squeeze(-1)
-            if eligible_bin_indices.numel() == 0:
+            num_anchor_bins = int(self.num_bins_per_motion[motion_id].item())
+            if num_anchor_bins == 0:
                 raise self._anchor_sampling_error(
-                    "Anchor segment sampling requires at least one eligible reset anchor for every motion clip."
+                    "Anchor segment sampling requires at least one reset anchor for every motion clip."
                 )
-            sampled_eligible_indices = torch.randint(
-                eligible_bin_indices.numel(),
-                (num_samples,),
-                device=self.device,
-            )
-            sampled_bin_indices = eligible_bin_indices[sampled_eligible_indices]
+            sampled_bin_indices = torch.randint(num_anchor_bins, (num_samples,), device=self.device)
             target_bin_indices[mask] = sampled_bin_indices
             times[mask] = self.bin_reset_times[motion_id][sampled_bin_indices]
 
@@ -414,6 +410,7 @@ class MotionSampler:
         self.current_times[resolved_env_ids] = times
         self.episode_start_motion_ids[resolved_env_ids] = motion_ids
         self.episode_start_times[resolved_env_ids] = times
+        self.episode_start_bin_indices[resolved_env_ids] = target_bin_indices
         self._record_sample_bins(motion_ids, times, target_bin_indices=target_bin_indices)
         return ResetSample(
             env_ids=resolved_env_ids,
@@ -475,37 +472,34 @@ class MotionSampler:
                 "Anchor segment sampling requires motion clips with anchor metadata."
             )
 
-        start_times = clip.anchor_segment_start_times.to(device=self.device)
-        end_times = clip.anchor_segment_end_times.to(device=self.device)
-        segment_labels = clip.anchor_segment_labels.to(device=self.device)
         anchor_times = clip.anchor_times.to(device=self.device)
-
-        reset_times = torch.zeros(start_times.shape, dtype=torch.float32, device=self.device)
-        eligible = torch.zeros(start_times.shape, dtype=torch.bool, device=self.device)
         if anchor_times.numel() == 0:
-            return start_times, end_times, segment_labels, reset_times, eligible
+            empty = torch.empty(0, dtype=torch.float32, device=self.device)
+            return (
+                empty,
+                empty,
+                torch.empty(0, dtype=torch.long, device=self.device),
+                empty,
+                torch.empty(0, dtype=torch.bool, device=self.device),
+            )
 
-        first_anchor_in_segment = torch.searchsorted(anchor_times, start_times, right=False)
-        first_anchor_after_segment = torch.searchsorted(anchor_times, end_times, right=False)
-        latest_anchor_before_segment = first_anchor_in_segment - 1
+        start_times = anchor_times.clone()
+        start_times[0] = 0.0
 
-        for segment_index in range(int(start_times.shape[0])):
-            selected_anchor_index: int | None = None
-            if (
-                int(segment_labels[segment_index].item()) == int(ANCHOR_FRAME_LABEL_GREEN)
-                and first_anchor_in_segment[segment_index] < first_anchor_after_segment[segment_index]
-            ):
-                selected_anchor_index = int(first_anchor_in_segment[segment_index].item())
-            elif latest_anchor_before_segment[segment_index] >= 0:
-                selected_anchor_index = int(latest_anchor_before_segment[segment_index].item())
+        end_times = torch.empty_like(anchor_times)
+        if anchor_times.numel() > 1:
+            end_times[:-1] = anchor_times[1:]
+        end_times[-1] = float(clip.duration)
 
-            if selected_anchor_index is None:
-                continue
+        segment_end_times = clip.anchor_segment_end_times.to(device=self.device)
+        segment_labels = clip.anchor_segment_labels.to(device=self.device)
+        segment_indices = torch.searchsorted(segment_end_times, anchor_times, right=True)
+        segment_indices = torch.clamp(segment_indices, max=max(int(segment_labels.numel()) - 1, 0))
+        anchor_labels = segment_labels[segment_indices]
 
-            reset_times[segment_index] = anchor_times[selected_anchor_index]
-            eligible[segment_index] = True
-
-        return start_times, end_times, segment_labels, reset_times, eligible
+        reset_times = anchor_times.clone()
+        eligible = torch.ones(anchor_times.shape, dtype=torch.bool, device=self.device)
+        return start_times, end_times, anchor_labels, reset_times, eligible
 
     def init_failure_bins(self, bin_size: float | None = None) -> None:
         if bin_size is not None and bin_size <= 0.0:
@@ -580,15 +574,28 @@ class MotionSampler:
             return
 
         env_ids = self._normalize_env_ids(env_ids)
-        if times is None:
-            times = self.current_times[env_ids]
+        if self.segment_source == SegmentSource.Anchor:
+            if times is None:
+                times = self.current_times[env_ids]
+            else:
+                times = torch.as_tensor(times, dtype=torch.float32, device=self.device)
+                if times.shape[0] != env_ids.shape[0]:
+                    raise ValueError("times must have the same batch size as env_ids.")
+            motion_ids = self.current_motion_ids[env_ids]
+            # Anchor bins cover the interval until the next anchor, so binning the
+            # failure time attributes the failure to the nearest previous anchor.
+            bin_indices = self._times_to_bins(motion_ids, times)
         else:
-            times = torch.as_tensor(times, dtype=torch.float32, device=self.device)
-            if times.shape[0] != env_ids.shape[0]:
-                raise ValueError("times must have the same batch size as env_ids.")
-        motion_ids = self.current_motion_ids[env_ids]
+            if times is None:
+                times = self.current_times[env_ids]
+            else:
+                times = torch.as_tensor(times, dtype=torch.float32, device=self.device)
+                if times.shape[0] != env_ids.shape[0]:
+                    raise ValueError("times must have the same batch size as env_ids.")
+            motion_ids = self.current_motion_ids[env_ids]
+            bin_indices = self._times_to_bins(motion_ids, times)
 
-        self._accumulate_bin_counts(self.bin_fail_counts, motion_ids, self._times_to_bins(motion_ids, times))
+        self._accumulate_bin_counts(self.bin_fail_counts, motion_ids, bin_indices)
 
     def _has_failure_bins(self) -> bool:
         return (

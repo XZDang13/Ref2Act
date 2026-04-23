@@ -55,7 +55,7 @@ env = MotionTrackingEnv(cfg)
 obs, info = env.reset()
 ```
 
-With `SamplingStrategy.FailureWeighted`, Ref2Act now biases both motion choice across clips and reset-bin choice within the chosen clip. `cfg.failure_weight_uniform_mix` blends each learned failure distribution with uniform mass, and `cfg.failure_weight_max_uniform_ratio` caps each eligible motion/bin at a multiple of its uniform share so the sampler cannot collapse onto only a few motions or bins.
+With `SamplingStrategy.FailureWeighted`, Ref2Act now biases both motion choice across clips and reset choice within the chosen clip. When `cfg.segment_source == SegmentSource.Time`, the within-clip distribution is learned over time bins. When `cfg.segment_source == SegmentSource.Anchor`, it is learned over reset anchors, and failures are attributed to the nearest previous anchor at the failure time. `cfg.failure_weight_uniform_mix` blends each learned failure distribution with uniform mass, and `cfg.failure_weight_max_uniform_ratio` caps each eligible motion/bin at a multiple of its uniform share so the sampler cannot collapse onto only a few motions or bins.
 
 The package registers these Gym environments when Isaac Lab is available:
 
@@ -150,7 +150,7 @@ Anchor mode still writes the normal `segment_*` arrays for compatibility, and al
 - `anchor_frame_indices`
 - `anchor_times`
 
-Use this mode when you want the converted file to carry stable reset-anchor annotations alongside the current time-segment metadata.
+Use this mode when you want the converted file to carry stable reset-anchor annotations alongside the current time-segment metadata. With `cfg.segment_source = SegmentSource.Anchor`, the sampler uses `anchor_times` as the adaptive reset units instead of label-run segments.
 
 6. Adjust the vertical offset or airborne detection if the imported motion needs it:
 

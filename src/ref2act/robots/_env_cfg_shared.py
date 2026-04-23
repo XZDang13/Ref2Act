@@ -1,3 +1,5 @@
+import dataclasses
+
 import isaaclab.envs.mdp as mdp
 import isaaclab.sim as sim_utils
 import isaaclab.terrains as terrain_gen
@@ -22,7 +24,14 @@ from ref2act.envs.motion_tracking.randomization import (
     randomize_rigid_body_collider_offsets_by_body,
     randomize_rigid_body_com_from_default,
 )
-from ref2act.envs.motion_tracking.rewards import default_reward_spec
+from ref2act.envs.motion_tracking.rewards import (
+    CoMPositionRewardTermCfg,
+    CoMSupportRewardTermCfg,
+    CoMVelocityRewardTermCfg,
+    EndEffectorPositionRewardTermCfg,
+    EndEffectorVelocityRewardTermCfg,
+    default_reward_spec,
+)
 from ref2act.envs.motion_tracking.termination import default_termination_spec
 from ref2act.motion.sampling import SamplerMod, SamplingStrategy, SegmentSource
 from ref2act.robots._articulation_shared import G1_CFG, PI_PLUS_CFG
@@ -90,6 +99,23 @@ def _rough_terrain_importer_cfg() -> TerrainImporterCfg:
         ),
         debug_vis=False,
     )
+
+
+def _g1_reward_spec():
+    base_spec = default_reward_spec(dt=0.0, anchor_height_only=True)
+    return dataclasses.replace(
+        base_spec,
+        terms=base_spec.terms
+        + (
+            CoMPositionRewardTermCfg(),
+            CoMVelocityRewardTermCfg(),
+            CoMSupportRewardTermCfg(),
+            EndEffectorPositionRewardTermCfg(),
+            EndEffectorVelocityRewardTermCfg(),
+        ),
+    )
+
+
 @configclass
 class G1DomainRandCfg:
     """Structured domain randomization for the G1 robot."""
@@ -433,7 +459,7 @@ class G1MotionTrackingEnvCfg(DirectRLEnvCfg):
         "right_ankle_roll_link",
     ]
 
-    rewards = default_reward_spec(dt=0.0, anchor_height_only=True)
+    rewards = _g1_reward_spec()
     termination = default_termination_spec(
         anchor_height_only=True,
         end_effector_height_only=False,

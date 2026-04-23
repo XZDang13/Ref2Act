@@ -126,6 +126,54 @@ class KeyAngularVelocityRewardTermCfg(RewardTermCfg):
 
 
 @dataclass(frozen=True)
+class CoMPositionRewardTermCfg(RewardTermCfg):
+    id: str = "com_position_reward"
+    type: str = "com_position_reward"
+    weight: float = 0.25
+    std: float = 0.3**2
+
+
+@dataclass(frozen=True)
+class CoMVelocityRewardTermCfg(RewardTermCfg):
+    id: str = "com_velocity_reward"
+    type: str = "com_velocity_reward"
+    weight: float = 0.10
+    anchor_body_index: int = -1
+    std: float = 1.0**2
+
+
+@dataclass(frozen=True)
+class CoMSupportRewardTermCfg(RewardTermCfg):
+    id: str = "com_support_reward"
+    type: str = "com_support_reward"
+    weight: float = 0.30
+    foot_body_indices: tuple[int, ...] = ()
+    foot_contact_body_indices: tuple[int, ...] = ()
+    force_threshold: float = 10.0
+    support_margin: float = 0.05
+    std: float = 0.1**2
+
+
+@dataclass(frozen=True)
+class EndEffectorPositionRewardTermCfg(RewardTermCfg):
+    id: str = "end_effector_position_reward"
+    type: str = "end_effector_position_reward"
+    weight: float = 0.35
+    end_effector_body_indices: tuple[int, ...] = ()
+    std: float = 0.3**2
+
+
+@dataclass(frozen=True)
+class EndEffectorVelocityRewardTermCfg(RewardTermCfg):
+    id: str = "end_effector_velocity_reward"
+    type: str = "end_effector_velocity_reward"
+    weight: float = 0.15
+    anchor_body_index: int = -1
+    end_effector_body_indices: tuple[int, ...] = ()
+    std: float = 1.0**2
+
+
+@dataclass(frozen=True)
 class RewardSpec:
     terms: tuple[RewardTermCfg, ...]
     dt: float
@@ -164,6 +212,85 @@ class RewardContext:
     action_model: ActionProcessor
     _cache: dict[tuple, tuple[torch.Tensor, ...] | torch.Tensor] = field(default_factory=dict, init=False, repr=False)
 
+    def _zeros(self) -> torch.Tensor:
+        return torch.zeros(self.robot.data.joint_pos.shape[0], device=self.robot.data.joint_pos.device)
+
+    def body_masses(self) -> torch.Tensor:
+        cache_key = ("body_masses",)
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            return cached  # type: ignore[return-value]
+
+        masses = self.robot.root_physx_view.get_masses().to(self.robot.data.body_pos_w.device)
+        self._cache[cache_key] = masses
+        return masses
+
+    def _body_pose_error(
+        self,
+        cache_prefix: str,
+        body_indices: tuple[int, ...],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        cache_key = (cache_prefix, body_indices)
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            return cached  # type: ignore[return-value]
+
+        if len(body_indices) == 0:
+            result = (self._zeros(), self._zeros())
+            self._cache[cache_key] = result
+            return result
+
+        robot_body_positions = self.robot.data.body_pos_w[:, body_indices]
+        robot_body_quaternions = self.robot.data.body_quat_w[:, body_indices]
+
+        reference_relative_body_positions = self.reference_motion.body_pos_relative[:, body_indices]
+        reference_relative_body_quaternions = self.reference_motion.body_quat_relative[:, body_indices]
+
+        position_error = (robot_body_positions - reference_relative_body_positions).square().sum(-1).mean(-1)
+        quaternion_error = (
+            quat_error_magnitude(robot_body_quaternions, reference_relative_body_quaternions).square().mean(-1)
+        )
+        result = (position_error, quaternion_error)
+        self._cache[cache_key] = result
+        return result
+
+    def _body_state_error(
+        self,
+        cache_prefix: str,
+        anchor_body_index: int,
+        body_indices: tuple[int, ...],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        cache_key = (cache_prefix, anchor_body_index, body_indices)
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            return cached  # type: ignore[return-value]
+
+        if len(body_indices) == 0:
+            result = (self._zeros(), self._zeros())
+            self._cache[cache_key] = result
+            return result
+
+        robot_body_lin_vel_w = self.robot.data.body_lin_vel_w[:, body_indices]
+        robot_body_ang_vel_w = self.robot.data.body_ang_vel_w[:, body_indices]
+
+        alignment_quaternion_w = self.reference_alignment_quaternion(anchor_body_index)
+        alignment_quaternion_w = alignment_quaternion_w[:, None, :].expand(-1, len(body_indices), -1)
+
+        reference_body_lin_vel_w = quat_apply(
+            alignment_quaternion_w,
+            self.reference_motion.body_linear_velocities[:, body_indices],
+        )
+        reference_body_ang_vel_w = quat_apply(
+            alignment_quaternion_w,
+            self.reference_motion.body_angular_velocities[:, body_indices],
+        )
+
+        lin_vel_error = (robot_body_lin_vel_w - reference_body_lin_vel_w).square().sum(-1).mean(-1)
+        ang_vel_error = (robot_body_ang_vel_w - reference_body_ang_vel_w).square().sum(-1).mean(-1)
+        result = (lin_vel_error, ang_vel_error)
+        self._cache[cache_key] = result
+        return result
+
     def anchor_body_pose_error(
         self,
         anchor_body_index: int,
@@ -189,24 +316,7 @@ class RewardContext:
         return result
 
     def key_body_pose_error(self, key_body_indices: tuple[int, ...]) -> tuple[torch.Tensor, torch.Tensor]:
-        cache_key = ("key_body_pose_error", key_body_indices)
-        cached = self._cache.get(cache_key)
-        if cached is not None:
-            return cached  # type: ignore[return-value]
-
-        robot_key_body_positions = self.robot.data.body_pos_w[:, key_body_indices]
-        robot_key_body_quaternions = self.robot.data.body_quat_w[:, key_body_indices]
-
-        reference_relative_key_body_positions = self.reference_motion.body_pos_relative[:, key_body_indices]
-        reference_relative_key_body_quaternions = self.reference_motion.body_quat_relative[:, key_body_indices]
-
-        position_error = (robot_key_body_positions - reference_relative_key_body_positions).square().sum(-1).mean(-1)
-        quaternion_error = (
-            quat_error_magnitude(robot_key_body_quaternions, reference_relative_key_body_quaternions).square().mean(-1)
-        )
-        result = (position_error, quaternion_error)
-        self._cache[cache_key] = result
-        return result
+        return self._body_pose_error("key_body_pose_error", key_body_indices)
 
     def reference_alignment_quaternion(self, anchor_body_index: int) -> torch.Tensor:
         cache_key = ("reference_alignment_quaternion", anchor_body_index)
@@ -225,29 +335,189 @@ class RewardContext:
         anchor_body_index: int,
         key_body_indices: tuple[int, ...],
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        cache_key = ("key_body_state_error", anchor_body_index, key_body_indices)
+        return self._body_state_error("key_body_state_error", anchor_body_index, key_body_indices)
+
+    def end_effector_pose_error(
+        self,
+        end_effector_body_indices: tuple[int, ...],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return self._body_pose_error("end_effector_pose_error", end_effector_body_indices)
+
+    def end_effector_state_error(
+        self,
+        anchor_body_index: int,
+        end_effector_body_indices: tuple[int, ...],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return self._body_state_error("end_effector_state_error", anchor_body_index, end_effector_body_indices)
+
+    def body_com_positions(self) -> torch.Tensor:
+        cache_key = ("body_com_positions",)
         cached = self._cache.get(cache_key)
         if cached is not None:
             return cached  # type: ignore[return-value]
 
-        robot_key_body_lin_vel_w = self.robot.data.body_lin_vel_w[:, key_body_indices]
-        robot_key_body_ang_vel_w = self.robot.data.body_ang_vel_w[:, key_body_indices]
+        result = self.robot.data.body_com_pos_w
+        self._cache[cache_key] = result
+        return result
 
+    def body_com_velocities(self) -> torch.Tensor:
+        cache_key = ("body_com_velocities",)
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            return cached  # type: ignore[return-value]
+
+        body_com_offset_w = quat_apply(self.robot.data.body_quat_w, self.robot.data.body_com_pos_b)
+        result = self.robot.data.body_link_lin_vel_w + torch.linalg.cross(
+            self.robot.data.body_ang_vel_w,
+            body_com_offset_w,
+            dim=-1,
+        )
+        self._cache[cache_key] = result
+        return result
+
+    def reference_body_com_positions(self) -> torch.Tensor:
+        cache_key = ("reference_body_com_positions",)
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            return cached  # type: ignore[return-value]
+
+        reference_body_com_offset_w = quat_apply(
+            self.reference_motion.body_quat_relative,
+            self.robot.data.body_com_pos_b,
+        )
+        result = self.reference_motion.body_pos_relative + reference_body_com_offset_w
+        self._cache[cache_key] = result
+        return result
+
+    def reference_body_com_velocities(self, anchor_body_index: int) -> torch.Tensor:
+        cache_key = ("reference_body_com_velocities", anchor_body_index)
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            return cached  # type: ignore[return-value]
+
+        reference_body_com_offset_w = quat_apply(
+            self.reference_motion.body_quaternions,
+            self.robot.data.body_com_pos_b,
+        )
+        reference_body_com_vel_w = self.reference_motion.body_linear_velocities + torch.linalg.cross(
+            self.reference_motion.body_angular_velocities,
+            reference_body_com_offset_w,
+            dim=-1,
+        )
         alignment_quaternion_w = self.reference_alignment_quaternion(anchor_body_index)
-        alignment_quaternion_w = alignment_quaternion_w[:, None, :].expand(-1, len(key_body_indices), -1)
+        alignment_quaternion_w = alignment_quaternion_w[:, None, :].expand_as(self.reference_motion.body_quaternions)
+        result = quat_apply(alignment_quaternion_w, reference_body_com_vel_w)
+        self._cache[cache_key] = result
+        return result
 
-        reference_key_body_lin_vel_w = quat_apply(
-            alignment_quaternion_w,
-            self.reference_motion.body_linear_velocities[:, key_body_indices],
-        )
-        reference_key_body_ang_vel_w = quat_apply(
-            alignment_quaternion_w,
-            self.reference_motion.body_angular_velocities[:, key_body_indices],
+    def com_position(self) -> torch.Tensor:
+        cache_key = ("com_position",)
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            return cached  # type: ignore[return-value]
+
+        body_masses = self.body_masses()
+        total_mass = body_masses.sum(dim=1, keepdim=True).clamp_min(1.0e-8)
+        result = torch.sum(self.body_com_positions() * body_masses[..., None], dim=1) / total_mass
+        self._cache[cache_key] = result
+        return result
+
+    def reference_com_position(self) -> torch.Tensor:
+        cache_key = ("reference_com_position",)
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            return cached  # type: ignore[return-value]
+
+        body_masses = self.body_masses()
+        total_mass = body_masses.sum(dim=1, keepdim=True).clamp_min(1.0e-8)
+        result = torch.sum(self.reference_body_com_positions() * body_masses[..., None], dim=1) / total_mass
+        self._cache[cache_key] = result
+        return result
+
+    def com_velocity(self) -> torch.Tensor:
+        cache_key = ("com_velocity",)
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            return cached  # type: ignore[return-value]
+
+        body_masses = self.body_masses()
+        total_mass = body_masses.sum(dim=1, keepdim=True).clamp_min(1.0e-8)
+        result = torch.sum(self.body_com_velocities() * body_masses[..., None], dim=1) / total_mass
+        self._cache[cache_key] = result
+        return result
+
+    def reference_com_velocity(self, anchor_body_index: int) -> torch.Tensor:
+        cache_key = ("reference_com_velocity", anchor_body_index)
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            return cached  # type: ignore[return-value]
+
+        body_masses = self.body_masses()
+        total_mass = body_masses.sum(dim=1, keepdim=True).clamp_min(1.0e-8)
+        result = torch.sum(self.reference_body_com_velocities(anchor_body_index) * body_masses[..., None], dim=1) / total_mass
+        self._cache[cache_key] = result
+        return result
+
+    def com_support_error(
+        self,
+        foot_body_indices: tuple[int, ...],
+        foot_contact_body_indices: tuple[int, ...],
+        force_threshold: float,
+        support_margin: float,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        cache_key = ("com_support_error", foot_body_indices, foot_contact_body_indices, force_threshold, support_margin)
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            return cached  # type: ignore[return-value]
+
+        zeros = self._zeros()
+        num_feet = min(len(foot_body_indices), len(foot_contact_body_indices))
+        if num_feet == 0:
+            result = (zeros, zeros, zeros)
+            self._cache[cache_key] = result
+            return result
+
+        contact_history = context_contact_history(self.contact_sensor)
+        if contact_history is None:
+            result = (zeros, zeros, zeros)
+            self._cache[cache_key] = result
+            return result
+
+        foot_body_indices = foot_body_indices[:num_feet]
+        foot_contact_body_indices = foot_contact_body_indices[:num_feet]
+        foot_positions_xy = self.robot.data.body_pos_w[:, foot_body_indices, :2]
+        is_contact = (
+            torch.norm(contact_history[:, :, foot_contact_body_indices], dim=-1).amax(dim=1) > force_threshold
         )
 
-        lin_vel_error = (robot_key_body_lin_vel_w - reference_key_body_lin_vel_w).square().sum(-1).mean(-1)
-        ang_vel_error = (robot_key_body_ang_vel_w - reference_key_body_ang_vel_w).square().sum(-1).mean(-1)
-        result = (lin_vel_error, ang_vel_error)
+        dtype = foot_positions_xy.dtype
+        contact_count = is_contact.sum(dim=1).to(dtype)
+        distance = torch.zeros_like(contact_count)
+        if torch.any(is_contact):
+            contact_rank = torch.cumsum(is_contact.to(torch.int64), dim=1)
+            first_mask = ((contact_rank == 1) & is_contact).to(dtype)
+            second_mask = ((contact_rank == 2) & is_contact).to(dtype)
+            first_support_xy = torch.sum(foot_positions_xy * first_mask.unsqueeze(-1), dim=1)
+            second_support_xy = torch.sum(foot_positions_xy * second_mask.unsqueeze(-1), dim=1)
+            com_xy = self.com_position()[:, :2]
+
+            single_contact = contact_count == 1
+            if torch.any(single_contact):
+                distance[single_contact] = torch.linalg.norm(
+                    com_xy[single_contact] - first_support_xy[single_contact],
+                    dim=-1,
+                )
+
+            multi_contact = contact_count >= 2
+            if torch.any(multi_contact):
+                distance[multi_contact] = _point_to_segment_distance_2d(
+                    com_xy[multi_contact],
+                    first_support_xy[multi_contact],
+                    second_support_xy[multi_contact],
+                )
+
+        error = torch.clamp(distance - support_margin, min=0.0).square()
+        result = (error, distance, contact_count)
         self._cache[cache_key] = result
         return result
 
@@ -262,6 +532,33 @@ class RewardContext:
         result = (pos_error, vel_error)
         self._cache[cache_key] = result
         return result
+
+
+def context_contact_history(contact_sensor: ContactSensor) -> torch.Tensor | None:
+    contact_history = contact_sensor.data.net_forces_w_history
+    if contact_history is not None:
+        return contact_history
+
+    net_contact_forces = contact_sensor.data.net_forces_w
+    if net_contact_forces is None:
+        return None
+    return net_contact_forces.unsqueeze(1)
+
+
+def _point_to_segment_distance_2d(
+    point_xy: torch.Tensor,
+    segment_start_xy: torch.Tensor,
+    segment_end_xy: torch.Tensor,
+) -> torch.Tensor:
+    segment = segment_end_xy - segment_start_xy
+    segment_length_sq = segment.square().sum(dim=-1, keepdim=True)
+    projection = torch.where(
+        segment_length_sq > 1.0e-8,
+        ((point_xy - segment_start_xy) * segment).sum(dim=-1, keepdim=True) / segment_length_sq,
+        torch.zeros_like(segment_length_sq),
+    ).clamp_(0.0, 1.0)
+    closest = segment_start_xy + projection * segment
+    return torch.linalg.norm(point_xy - closest, dim=-1)
 
 
 def _weighted_result(raw: torch.Tensor, weight: float, *, metrics: dict[str, torch.Tensor] | None = None) -> RewardTermResult:
@@ -417,6 +714,63 @@ class KeyAngularVelocityRewardTerm:
         return _weighted_result(raw, spec.weight, metrics={"error": ang_vel_error})
 
 
+class CoMPositionRewardTerm:
+    type_name = "com_position_reward"
+
+    def compute(self, context: RewardContext, spec: CoMPositionRewardTermCfg) -> RewardTermResult:
+        position_error = (context.com_position()[:, :2] - context.reference_com_position()[:, :2]).square().sum(-1)
+        raw = torch.exp(-position_error / spec.std)
+        return _weighted_result(raw, spec.weight, metrics={"error": position_error})
+
+
+class CoMVelocityRewardTerm:
+    type_name = "com_velocity_reward"
+
+    def compute(self, context: RewardContext, spec: CoMVelocityRewardTermCfg) -> RewardTermResult:
+        velocity_error = (
+            context.com_velocity()[:, :2] - context.reference_com_velocity(spec.anchor_body_index)[:, :2]
+        ).square().sum(-1)
+        raw = torch.exp(-velocity_error / spec.std)
+        return _weighted_result(raw, spec.weight, metrics={"error": velocity_error})
+
+
+class CoMSupportRewardTerm:
+    type_name = "com_support_reward"
+
+    def compute(self, context: RewardContext, spec: CoMSupportRewardTermCfg) -> RewardTermResult:
+        support_error, distance, contact_count = context.com_support_error(
+            spec.foot_body_indices,
+            spec.foot_contact_body_indices,
+            spec.force_threshold,
+            spec.support_margin,
+        )
+        raw = torch.exp(-support_error / spec.std)
+        raw = torch.where(contact_count > 0.0, raw, torch.zeros_like(raw))
+        return _weighted_result(
+            raw,
+            spec.weight,
+            metrics={"error": support_error, "distance": distance, "contact_count": contact_count},
+        )
+
+
+class EndEffectorPositionRewardTerm:
+    type_name = "end_effector_position_reward"
+
+    def compute(self, context: RewardContext, spec: EndEffectorPositionRewardTermCfg) -> RewardTermResult:
+        position_error, _ = context.end_effector_pose_error(spec.end_effector_body_indices)
+        raw = torch.exp(-position_error / spec.std)
+        return _weighted_result(raw, spec.weight, metrics={"error": position_error})
+
+
+class EndEffectorVelocityRewardTerm:
+    type_name = "end_effector_velocity_reward"
+
+    def compute(self, context: RewardContext, spec: EndEffectorVelocityRewardTermCfg) -> RewardTermResult:
+        lin_vel_error, _ = context.end_effector_state_error(spec.anchor_body_index, spec.end_effector_body_indices)
+        raw = torch.exp(-lin_vel_error / spec.std)
+        return _weighted_result(raw, spec.weight, metrics={"error": lin_vel_error})
+
+
 REWARD_TERM_REGISTRY: dict[str, RewardTerm] = {
     term.type_name: term
     for term in (
@@ -432,6 +786,11 @@ REWARD_TERM_REGISTRY: dict[str, RewardTerm] = {
         KeyQuaternionRewardTerm(),
         KeyLinearVelocityRewardTerm(),
         KeyAngularVelocityRewardTerm(),
+        CoMPositionRewardTerm(),
+        CoMVelocityRewardTerm(),
+        CoMSupportRewardTerm(),
+        EndEffectorPositionRewardTerm(),
+        EndEffectorVelocityRewardTerm(),
     )
 }
 
