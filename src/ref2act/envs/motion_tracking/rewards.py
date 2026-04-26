@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Any, Protocol
 
 import torch
 from isaaclab.assets import Articulation
@@ -174,6 +174,168 @@ class EndEffectorVelocityRewardTermCfg(RewardTermCfg):
 
 
 @dataclass(frozen=True)
+class MultiScaleJointPositionRewardTermCfg(RewardTermCfg):
+    id: str = "multi_scale_joint_position_reward"
+    type: str = "multi_scale_joint_position_reward"
+    weight: float = 1.0
+    fine_std: float = 0.25**2
+    medium_std: float = 0.75**2
+    coarse_std: float = 1.50**2
+    fine_weight: float = 0.50
+    medium_weight: float = 0.30
+    coarse_weight: float = 0.20
+    coarse_kernel: str = "rational"
+
+
+@dataclass(frozen=True)
+class MultiScaleJointVelocityRewardTermCfg(RewardTermCfg):
+    id: str = "multi_scale_joint_velocity_reward"
+    type: str = "multi_scale_joint_velocity_reward"
+    weight: float = 0.30
+    fine_std: float = 1.0**2
+    medium_std: float = 3.0**2
+    coarse_std: float = 6.0**2
+    fine_weight: float = 0.50
+    medium_weight: float = 0.30
+    coarse_weight: float = 0.20
+    coarse_kernel: str = "rational"
+
+
+@dataclass(frozen=True)
+class MultiScaleAnchorHeightRewardTermCfg(RewardTermCfg):
+    id: str = "multi_scale_anchor_height_reward"
+    type: str = "multi_scale_anchor_height_reward"
+    weight: float = 0.50
+    anchor_body_index: int = -1
+    fine_std: float = 0.10**2
+    medium_std: float = 0.30**2
+    coarse_std: float = 0.70**2
+    fine_weight: float = 0.45
+    medium_weight: float = 0.35
+    coarse_weight: float = 0.20
+    coarse_kernel: str = "rational"
+
+
+@dataclass(frozen=True)
+class MultiScaleProjectedGravityRewardTermCfg(RewardTermCfg):
+    id: str = "multi_scale_projected_gravity_reward"
+    type: str = "multi_scale_projected_gravity_reward"
+    weight: float = 0.80
+    anchor_body_index: int = -1
+    fine_std: float = 0.10**2
+    medium_std: float = 0.35**2
+    coarse_std: float = 0.80**2
+    fine_weight: float = 0.50
+    medium_weight: float = 0.30
+    coarse_weight: float = 0.20
+    coarse_kernel: str = "rational"
+
+
+@dataclass(frozen=True)
+class MultiScaleKeyPositionRewardTermCfg(RewardTermCfg):
+    id: str = "multi_scale_key_position_reward"
+    type: str = "multi_scale_key_position_reward"
+    weight: float = 1.0
+    key_body_indices: tuple[int, ...] = ()
+    fine_std: float = 0.30**2
+    medium_std: float = 0.75**2
+    coarse_std: float = 1.50**2
+    fine_weight: float = 0.50
+    medium_weight: float = 0.30
+    coarse_weight: float = 0.20
+    coarse_kernel: str = "rational"
+
+
+@dataclass(frozen=True)
+class MultiScaleKeyQuaternionRewardTermCfg(RewardTermCfg):
+    id: str = "multi_scale_key_quaternion_reward"
+    type: str = "multi_scale_key_quaternion_reward"
+    weight: float = 1.0
+    key_body_indices: tuple[int, ...] = ()
+    fine_std: float = 0.40**2
+    medium_std: float = 1.0**2
+    coarse_std: float = 2.0**2
+    fine_weight: float = 0.50
+    medium_weight: float = 0.30
+    coarse_weight: float = 0.20
+    coarse_kernel: str = "rational"
+
+
+@dataclass(frozen=True)
+class MultiScaleKeyLinearVelocityRewardTermCfg(RewardTermCfg):
+    id: str = "multi_scale_key_linear_velocity_reward"
+    type: str = "multi_scale_key_linear_velocity_reward"
+    weight: float = 1.0
+    anchor_body_index: int = -1
+    key_body_indices: tuple[int, ...] = ()
+    fine_std: float = 1.0**2
+    medium_std: float = 3.0**2
+    coarse_std: float = 6.0**2
+    fine_weight: float = 0.50
+    medium_weight: float = 0.30
+    coarse_weight: float = 0.20
+    coarse_kernel: str = "rational"
+
+
+@dataclass(frozen=True)
+class MultiScaleKeyAngularVelocityRewardTermCfg(RewardTermCfg):
+    id: str = "multi_scale_key_angular_velocity_reward"
+    type: str = "multi_scale_key_angular_velocity_reward"
+    weight: float = 1.0
+    anchor_body_index: int = -1
+    key_body_indices: tuple[int, ...] = ()
+    fine_std: float = 3.14**2
+    medium_std: float = 6.0**2
+    coarse_std: float = 12.0**2
+    fine_weight: float = 0.50
+    medium_weight: float = 0.30
+    coarse_weight: float = 0.20
+    coarse_kernel: str = "rational"
+
+
+@dataclass(frozen=True)
+class MultiScaleEndEffectorPositionRewardTermCfg(RewardTermCfg):
+    id: str = "multi_scale_end_effector_position_reward"
+    type: str = "multi_scale_end_effector_position_reward"
+    weight: float = 0.35
+    end_effector_body_indices: tuple[int, ...] = ()
+    fine_std: float = 0.30**2
+    medium_std: float = 0.75**2
+    coarse_std: float = 1.50**2
+    fine_weight: float = 0.50
+    medium_weight: float = 0.30
+    coarse_weight: float = 0.20
+    coarse_kernel: str = "rational"
+
+
+@dataclass(frozen=True)
+class MultiScaleEndEffectorVelocityRewardTermCfg(RewardTermCfg):
+    id: str = "multi_scale_end_effector_velocity_reward"
+    type: str = "multi_scale_end_effector_velocity_reward"
+    weight: float = 0.15
+    anchor_body_index: int = -1
+    end_effector_body_indices: tuple[int, ...] = ()
+    fine_std: float = 1.0**2
+    medium_std: float = 3.0**2
+    coarse_std: float = 6.0**2
+    fine_weight: float = 0.50
+    medium_weight: float = 0.30
+    coarse_weight: float = 0.20
+    coarse_kernel: str = "rational"
+
+
+@dataclass(frozen=True)
+class TrackingProgressRewardTermCfg(RewardTermCfg):
+    id: str = "tracking_progress_reward"
+    type: str = "tracking_progress_reward"
+    weight: float = 0.50
+    soft_threshold: float = 1.0
+    recovery_enter_threshold: float = 1.8
+    clip: float = 0.20
+    potential: str = "log1p"
+
+
+@dataclass(frozen=True)
 class RewardSpec:
     terms: tuple[RewardTermCfg, ...]
     dt: float
@@ -210,6 +372,7 @@ class RewardContext:
     reference_motion: ReferenceMotions
     contact_sensor: ContactSensor
     action_model: ActionProcessor
+    tracking_quality: Any | None = None
     _cache: dict[tuple, tuple[torch.Tensor, ...] | torch.Tensor] = field(default_factory=dict, init=False, repr=False)
 
     def _zeros(self) -> torch.Tensor:
@@ -312,6 +475,21 @@ class RewardContext:
         position_error = (robot_anchor_body_positions - reference_anchor_body_positions).square().sum(-1)
         quaternion_error = quat_error_magnitude(robot_anchor_body_quaternions, reference_anchor_body_quaternions).square()
         result = (position_error, quaternion_error)
+        self._cache[cache_key] = result
+        return result
+
+    def projected_gravity_error(self, anchor_body_index: int) -> torch.Tensor:
+        cache_key = ("projected_gravity_error", anchor_body_index)
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            return cached  # type: ignore[return-value]
+
+        robot_anchor_quaternion = self.robot.data.body_quat_w[:, anchor_body_index]
+        reference_anchor_quaternion = self.reference_motion.body_quaternions[:, anchor_body_index]
+        gravity_w = robot_anchor_quaternion.new_tensor((0.0, 0.0, -1.0)).expand(robot_anchor_quaternion.shape[0], -1)
+        robot_projected_gravity = quat_apply(quat_inv(robot_anchor_quaternion), gravity_w)
+        reference_projected_gravity = quat_apply(quat_inv(reference_anchor_quaternion), gravity_w)
+        result = (robot_projected_gravity - reference_projected_gravity).square().sum(-1)
         self._cache[cache_key] = result
         return result
 
@@ -561,6 +739,51 @@ def _point_to_segment_distance_2d(
     return torch.linalg.norm(point_xy - closest, dim=-1)
 
 
+def _multi_scale_tracking_kernel(
+    error: torch.Tensor,
+    *,
+    fine_std: float,
+    medium_std: float,
+    coarse_std: float,
+    fine_weight: float,
+    medium_weight: float,
+    coarse_weight: float,
+    coarse_kernel: str = "rational",
+) -> torch.Tensor:
+    fine = torch.exp(-error / fine_std)
+    medium = torch.exp(-error / medium_std)
+
+    if coarse_kernel == "rational":
+        coarse = 1.0 / (1.0 + error / coarse_std)
+    elif coarse_kernel == "exp":
+        coarse = torch.exp(-error / coarse_std)
+    else:
+        raise ValueError(f"Unknown coarse kernel: {coarse_kernel}")
+
+    return fine_weight * fine + medium_weight * medium + coarse_weight * coarse
+
+
+def _smoothstep(lo: float, hi: float, x: torch.Tensor) -> torch.Tensor:
+    if hi <= lo:
+        return torch.zeros_like(x)
+    t = ((x - lo) / (hi - lo)).clamp(0.0, 1.0)
+    return t * t * (3.0 - 2.0 * t)
+
+
+def _multi_scale_result(error: torch.Tensor, spec: Any) -> RewardTermResult:
+    raw = _multi_scale_tracking_kernel(
+        error,
+        fine_std=spec.fine_std,
+        medium_std=spec.medium_std,
+        coarse_std=spec.coarse_std,
+        fine_weight=spec.fine_weight,
+        medium_weight=spec.medium_weight,
+        coarse_weight=spec.coarse_weight,
+        coarse_kernel=spec.coarse_kernel,
+    )
+    return _weighted_result(raw, spec.weight, metrics={"error": error})
+
+
 def _weighted_result(raw: torch.Tensor, weight: float, *, metrics: dict[str, torch.Tensor] | None = None) -> RewardTermResult:
     value = raw * weight
     term_metrics = {"raw": raw, "weighted": value}
@@ -771,6 +994,117 @@ class EndEffectorVelocityRewardTerm:
         return _weighted_result(raw, spec.weight, metrics={"error": lin_vel_error})
 
 
+class MultiScaleJointPositionRewardTerm:
+    type_name = "multi_scale_joint_position_reward"
+
+    def compute(self, context: RewardContext, spec: MultiScaleJointPositionRewardTermCfg) -> RewardTermResult:
+        position_error, _ = context.joint_state_error()
+        return _multi_scale_result(position_error, spec)
+
+
+class MultiScaleJointVelocityRewardTerm:
+    type_name = "multi_scale_joint_velocity_reward"
+
+    def compute(self, context: RewardContext, spec: MultiScaleJointVelocityRewardTermCfg) -> RewardTermResult:
+        _, velocity_error = context.joint_state_error()
+        return _multi_scale_result(velocity_error, spec)
+
+
+class MultiScaleAnchorHeightRewardTerm:
+    type_name = "multi_scale_anchor_height_reward"
+
+    def compute(self, context: RewardContext, spec: MultiScaleAnchorHeightRewardTermCfg) -> RewardTermResult:
+        height_error, _ = context.anchor_body_pose_error(spec.anchor_body_index, height_only=True)
+        return _multi_scale_result(height_error, spec)
+
+
+class MultiScaleProjectedGravityRewardTerm:
+    type_name = "multi_scale_projected_gravity_reward"
+
+    def compute(self, context: RewardContext, spec: MultiScaleProjectedGravityRewardTermCfg) -> RewardTermResult:
+        gravity_error = context.projected_gravity_error(spec.anchor_body_index)
+        return _multi_scale_result(gravity_error, spec)
+
+
+class MultiScaleKeyPositionRewardTerm:
+    type_name = "multi_scale_key_position_reward"
+
+    def compute(self, context: RewardContext, spec: MultiScaleKeyPositionRewardTermCfg) -> RewardTermResult:
+        position_error, _ = context.key_body_pose_error(spec.key_body_indices)
+        return _multi_scale_result(position_error, spec)
+
+
+class MultiScaleKeyQuaternionRewardTerm:
+    type_name = "multi_scale_key_quaternion_reward"
+
+    def compute(self, context: RewardContext, spec: MultiScaleKeyQuaternionRewardTermCfg) -> RewardTermResult:
+        _, quaternion_error = context.key_body_pose_error(spec.key_body_indices)
+        return _multi_scale_result(quaternion_error, spec)
+
+
+class MultiScaleKeyLinearVelocityRewardTerm:
+    type_name = "multi_scale_key_linear_velocity_reward"
+
+    def compute(self, context: RewardContext, spec: MultiScaleKeyLinearVelocityRewardTermCfg) -> RewardTermResult:
+        lin_vel_error, _ = context.key_body_state_error(spec.anchor_body_index, spec.key_body_indices)
+        return _multi_scale_result(lin_vel_error, spec)
+
+
+class MultiScaleKeyAngularVelocityRewardTerm:
+    type_name = "multi_scale_key_angular_velocity_reward"
+
+    def compute(self, context: RewardContext, spec: MultiScaleKeyAngularVelocityRewardTermCfg) -> RewardTermResult:
+        _, ang_vel_error = context.key_body_state_error(spec.anchor_body_index, spec.key_body_indices)
+        return _multi_scale_result(ang_vel_error, spec)
+
+
+class MultiScaleEndEffectorPositionRewardTerm:
+    type_name = "multi_scale_end_effector_position_reward"
+
+    def compute(self, context: RewardContext, spec: MultiScaleEndEffectorPositionRewardTermCfg) -> RewardTermResult:
+        position_error, _ = context.end_effector_pose_error(spec.end_effector_body_indices)
+        return _multi_scale_result(position_error, spec)
+
+
+class MultiScaleEndEffectorVelocityRewardTerm:
+    type_name = "multi_scale_end_effector_velocity_reward"
+
+    def compute(self, context: RewardContext, spec: MultiScaleEndEffectorVelocityRewardTermCfg) -> RewardTermResult:
+        lin_vel_error, _ = context.end_effector_state_error(spec.anchor_body_index, spec.end_effector_body_indices)
+        return _multi_scale_result(lin_vel_error, spec)
+
+
+class TrackingProgressRewardTerm:
+    type_name = "tracking_progress_reward"
+
+    def compute(self, context: RewardContext, spec: TrackingProgressRewardTermCfg) -> RewardTermResult:
+        if context.tracking_quality is None:
+            raw = context._zeros()
+            return _weighted_result(
+                raw,
+                spec.weight,
+                metrics={"progress": raw, "gate": raw, "score": raw, "previous_score": raw},
+            )
+
+        score = context.tracking_quality.score
+        previous_score = context.tracking_quality.previous_score
+        if spec.potential == "log1p":
+            progress = torch.log1p(previous_score) - torch.log1p(score)
+        elif spec.potential == "sqrt":
+            progress = torch.sqrt(previous_score + 1.0e-6) - torch.sqrt(score + 1.0e-6)
+        else:
+            raise ValueError(f"Unsupported tracking progress potential: {spec.potential}")
+
+        progress = progress.clamp(-spec.clip, spec.clip)
+        gate = _smoothstep(spec.soft_threshold, spec.recovery_enter_threshold, score)
+        raw = gate * progress
+        return _weighted_result(
+            raw,
+            spec.weight,
+            metrics={"progress": progress, "gate": gate, "score": score, "previous_score": previous_score},
+        )
+
+
 REWARD_TERM_REGISTRY: dict[str, RewardTerm] = {
     term.type_name: term
     for term in (
@@ -791,6 +1125,17 @@ REWARD_TERM_REGISTRY: dict[str, RewardTerm] = {
         CoMSupportRewardTerm(),
         EndEffectorPositionRewardTerm(),
         EndEffectorVelocityRewardTerm(),
+        MultiScaleJointPositionRewardTerm(),
+        MultiScaleJointVelocityRewardTerm(),
+        MultiScaleAnchorHeightRewardTerm(),
+        MultiScaleProjectedGravityRewardTerm(),
+        MultiScaleKeyPositionRewardTerm(),
+        MultiScaleKeyQuaternionRewardTerm(),
+        MultiScaleKeyLinearVelocityRewardTerm(),
+        MultiScaleKeyAngularVelocityRewardTerm(),
+        MultiScaleEndEffectorPositionRewardTerm(),
+        MultiScaleEndEffectorVelocityRewardTerm(),
+        TrackingProgressRewardTerm(),
     )
 }
 
@@ -819,6 +1164,37 @@ def default_reward_spec(*, dt: float, anchor_height_only: bool = False) -> Rewar
     )
 
 
+def robust_tracking_reward_spec(*, dt: float, include_com_terms: bool = False) -> RewardSpec:
+    terms: tuple[RewardTermCfg, ...] = (
+        MultiScaleJointPositionRewardTermCfg(),
+        MultiScaleJointVelocityRewardTermCfg(),
+        MultiScaleAnchorHeightRewardTermCfg(),
+        MultiScaleProjectedGravityRewardTermCfg(),
+        MultiScaleKeyPositionRewardTermCfg(),
+        MultiScaleKeyQuaternionRewardTermCfg(),
+        MultiScaleKeyLinearVelocityRewardTermCfg(),
+        MultiScaleKeyAngularVelocityRewardTermCfg(),
+        MultiScaleEndEffectorPositionRewardTermCfg(),
+        MultiScaleEndEffectorVelocityRewardTermCfg(),
+        TrackingProgressRewardTermCfg(),
+    )
+    if include_com_terms:
+        terms += (
+            CoMPositionRewardTermCfg(),
+            CoMVelocityRewardTermCfg(),
+            CoMSupportRewardTermCfg(),
+        )
+    terms += (
+        JointAccPenaltyTermCfg(),
+        JointTorquePenaltyTermCfg(),
+        JointLimitPenaltyTermCfg(),
+        SelfCollisionPenaltyTermCfg(),
+        FootSlipPenaltyTermCfg(weight=-0.05),
+        ActionRatePenaltyTermCfg(),
+    )
+    return RewardSpec(dt=dt, terms=terms)
+
+
 class Rewards:
     def __init__(self, spec: RewardSpec):
         self.spec = spec
@@ -831,8 +1207,15 @@ class Rewards:
         reference_motion: ReferenceMotions,
         contact_sensor: ContactSensor,
         action_model: ActionProcessor,
+        tracking_quality: Any | None = None,
     ) -> torch.Tensor:
-        context = RewardContext(robot=robot, reference_motion=reference_motion, contact_sensor=contact_sensor, action_model=action_model)
+        context = RewardContext(
+            robot=robot,
+            reference_motion=reference_motion,
+            contact_sensor=contact_sensor,
+            action_model=action_model,
+            tracking_quality=tracking_quality,
+        )
         components: list[torch.Tensor] = []
         component_map: dict[str, torch.Tensor] = {}
         metrics_map: dict[str, dict[str, torch.Tensor]] = {}

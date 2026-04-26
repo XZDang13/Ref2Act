@@ -181,6 +181,9 @@ class FailureRule(Protocol):
     id: str
     threshold: float
 
+    def error(self, context: TerminationContext) -> torch.Tensor:
+        ...
+
     def evaluate(self, context: TerminationContext) -> torch.Tensor:
         ...
 
@@ -209,8 +212,11 @@ class AnchorPositionFailureRule:
         self.threshold = cfg.threshold
         self.policy = ThresholdPolicy(cfg.policy)
 
+    def error(self, context: TerminationContext) -> torch.Tensor:
+        return context.anchor_pos_error(self.anchor_body_index, height_only=self.height_only)
+
     def evaluate(self, context: TerminationContext) -> torch.Tensor:
-        error = context.anchor_pos_error(self.anchor_body_index, height_only=self.height_only)
+        error = self.error(context)
         return self.policy.evaluate(error, self.threshold)
 
 
@@ -221,8 +227,11 @@ class AnchorOrientationFailureRule:
         self.threshold = cfg.threshold
         self.policy = ThresholdPolicy(cfg.policy)
 
+    def error(self, context: TerminationContext) -> torch.Tensor:
+        return context.anchor_ori_error(self.anchor_body_index)
+
     def evaluate(self, context: TerminationContext) -> torch.Tensor:
-        error = context.anchor_ori_error(self.anchor_body_index)
+        error = self.error(context)
         return self.policy.evaluate(error, self.threshold)
 
 
@@ -235,8 +244,11 @@ class EndEffectorPositionFailureRule:
         self.threshold = cfg.threshold
         self.policy = ThresholdPolicy(cfg.policy)
 
+    def error(self, context: TerminationContext) -> torch.Tensor:
+        return context.end_effector_pos_error(self.end_effector_body_indices, height_only=self.height_only)
+
     def evaluate(self, context: TerminationContext) -> torch.Tensor:
-        error = context.end_effector_pos_error(self.end_effector_body_indices, height_only=self.height_only)
+        error = self.error(context)
         hits = self.policy.evaluate(error, self.threshold)
         if self.reduction == "any":
             return hits.any(dim=1)
@@ -304,6 +316,34 @@ class Termination:
                 return rule
         raise KeyError(f"Unknown termination failure rule: {rule_id}")
 
+    def build_context(
+        self,
+        episode_length_buf: torch.Tensor,
+        max_episode_length: torch.Tensor,
+        robot: Articulation,
+        reference_motion: ReferenceMotions,
+        sampler: MotionSampler,
+    ) -> TerminationContext:
+        return TerminationContext(
+            episode_length_buf=episode_length_buf,
+            max_episode_length=max_episode_length,
+            robot=robot,
+            reference_motion=reference_motion,
+            sampler=sampler,
+        )
+
+    def evaluate_timeouts(self, context: TerminationContext) -> torch.Tensor:
+        time_out = torch.zeros_like(context.episode_length_buf, dtype=torch.bool)
+        for rule in self.timeout_rules:
+            time_out |= rule.evaluate(context)
+        return time_out
+
+    def evaluate_failures(self, context: TerminationContext) -> torch.Tensor:
+        terminate = torch.zeros_like(context.episode_length_buf, dtype=torch.bool)
+        for rule in self.failure_rules:
+            terminate |= rule.evaluate(context)
+        return terminate
+
     def get_dones(
         self,
         episode_length_buf: torch.Tensor,
@@ -312,20 +352,15 @@ class Termination:
         reference_motion: ReferenceMotions,
         sampler: MotionSampler,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        context = TerminationContext(
+        context = self.build_context(
             episode_length_buf=episode_length_buf,
             max_episode_length=max_episode_length,
             robot=robot,
             reference_motion=reference_motion,
             sampler=sampler,
         )
-        time_out = torch.zeros_like(episode_length_buf, dtype=torch.bool)
-        terminate = torch.zeros_like(episode_length_buf, dtype=torch.bool)
-
-        for rule in self.timeout_rules:
-            time_out |= rule.evaluate(context)
-        for rule in self.failure_rules:
-            terminate |= rule.evaluate(context)
+        time_out = self.evaluate_timeouts(context)
+        terminate = self.evaluate_failures(context)
 
         self.track_terminated_env_ids(terminate)
         return terminate, time_out

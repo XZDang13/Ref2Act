@@ -6,9 +6,7 @@ def register_envs() -> None:
 
     specs = (
         ("G1MotionTracking-v0", "ref2act.robots.g1:G1MotionTrackingEnvCfg"),
-        ("PiPlusMotionTracking-v0", "ref2act.robots.pi_plus:PiPlusMotionTrackingEnvCfg"),
         ("G1MotionTrackingRough-v0", "ref2act.robots.g1:G1MotionTrackingRoughEnvCfg"),
-        ("PiPlusMotionTrackingRough-v0", "ref2act.robots.pi_plus:PiPlusMotionTrackingRoughEnvCfg"),
     )
 
     for env_id, cfg_factory in specs:

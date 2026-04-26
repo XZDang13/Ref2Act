@@ -114,9 +114,17 @@ def build_base_time_bins(duration: float, bin_size: float) -> tuple[np.ndarray, 
     if bin_size <= 0.0:
         raise ValueError("bin_size must be > 0")
 
-    num_bins = max(int(np.ceil(duration / bin_size)), 1)
-    start_times = np.arange(num_bins, dtype=np.float32) * float(bin_size)
-    end_times = np.minimum(start_times + float(bin_size), np.float32(duration)).astype(np.float32)
+    resolved_duration = float(duration)
+    resolved_bin_size = float(bin_size)
+    ratio = resolved_duration / resolved_bin_size
+    # Floating point division can turn an exact multiple such as 2.1 / 0.3 into
+    # 7.000000000000001, which would create a final zero-duration segment.
+    num_bins = max(int(np.ceil(ratio - 1.0e-9)), 1)
+    start_times_64 = np.arange(num_bins, dtype=np.float64) * resolved_bin_size
+    end_times_64 = np.minimum(start_times_64 + resolved_bin_size, resolved_duration)
+    positive_duration_mask = end_times_64 > start_times_64
+    start_times = start_times_64[positive_duration_mask].astype(np.float32)
+    end_times = end_times_64[positive_duration_mask].astype(np.float32)
     return start_times, end_times
 
 

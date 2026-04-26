@@ -162,6 +162,22 @@ def test_build_contact_segments_keeps_grounded_walk_bins() -> None:
     assert np.array_equal(segment_types, np.full(5, SEGMENT_TYPE_TIME_BIN, dtype=np.int64))
 
 
+def test_build_contact_segments_avoids_roundoff_extra_bin_at_exact_duration_multiple() -> None:
+    has_ground_contact = np.ones(63, dtype=bool)
+
+    segment_start_times, segment_end_times, segment_types = build_contact_segments(
+        has_ground_contact=has_ground_contact,
+        dt=1.0 / 30.0,
+        duration=63.0 / 30.0,
+        bin_size=0.3,
+    )
+
+    assert np.all(segment_end_times > segment_start_times)
+    assert np.isclose(segment_end_times[-1], np.float32(2.1))
+    assert segment_start_times.shape == (7,)
+    assert np.array_equal(segment_types, np.full(7, SEGMENT_TYPE_TIME_BIN, dtype=np.int64))
+
+
 def test_infer_ground_contact_from_foot_heights_detects_airborne_frames() -> None:
     foot_heights = np.asarray(
         [

@@ -247,6 +247,62 @@ def test_runtime_threshold_update_takes_effect_without_recreating_termination() 
     assert torch.equal(updated_terminated, torch.tensor([False]))
 
 
+def test_failure_rules_expose_continuous_errors() -> None:
+    termination_mod = _load_termination_module()
+    termination = termination_mod.Termination(
+        termination_mod.TerminationSpec(
+            timeout_rules=(),
+            failure_rules=(
+                termination_mod.AnchorPositionFailureRuleCfg(
+                    anchor_body_index=0,
+                    threshold=0.25,
+                    height_only=True,
+                ),
+                termination_mod.EndEffectorPositionFailureRuleCfg(
+                    end_effector_body_indices=(1, 2),
+                    threshold=0.25,
+                    height_only=True,
+                ),
+            ),
+        )
+    )
+    robot = types.SimpleNamespace(
+        data=types.SimpleNamespace(
+            body_pos_w=torch.tensor(
+                [[[0.0, 0.0, 0.3], [0.0, 0.0, 0.1], [0.0, 0.0, 0.4]]],
+                dtype=torch.float32,
+            ),
+            body_quat_w=torch.tensor(
+                [[[1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]]],
+                dtype=torch.float32,
+            ),
+            GRAVITY_VEC_W=torch.tensor([[0.0, 0.0, -1.0]], dtype=torch.float32),
+        )
+    )
+    reference_motion = types.SimpleNamespace(
+        body_positions=torch.zeros((1, 3, 3), dtype=torch.float32),
+        body_quaternions=torch.tensor(
+            [[[1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]]],
+            dtype=torch.float32,
+        ),
+        body_pos_relative=torch.zeros((1, 3, 3), dtype=torch.float32),
+    )
+    episode_length_buf, max_episode_length, sampler = _make_context_inputs()
+    context = termination.build_context(
+        episode_length_buf,
+        max_episode_length,
+        robot,
+        reference_motion,
+        sampler,
+    )
+
+    anchor_error = termination.get_failure_rule("anchor_position_failure").error(context)
+    ee_error = termination.get_failure_rule("end_effector_position_failure").error(context)
+
+    assert torch.allclose(anchor_error, torch.tensor([0.3]))
+    assert torch.allclose(ee_error, torch.tensor([[0.1, 0.4]]))
+
+
 def test_probabilistic_get_dones_samples_each_branch_independently(monkeypatch) -> None:
     termination_mod = _load_termination_module()
     policy = termination_mod.ThresholdPolicyCfg(probabilistic=True)

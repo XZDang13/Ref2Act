@@ -3,6 +3,8 @@ import sys
 import types
 from enum import Enum
 
+import torch
+
 
 def _quat_apply(quat, vec):
     return vec.clone()
@@ -64,6 +66,9 @@ def _load_motion_tracking_env_module():
         "ref2act.envs.motion_tracking.observation": sys.modules.get("ref2act.envs.motion_tracking.observation"),
         "ref2act.envs.motion_tracking.rewards": sys.modules.get("ref2act.envs.motion_tracking.rewards"),
         "ref2act.envs.motion_tracking.termination": sys.modules.get("ref2act.envs.motion_tracking.termination"),
+        "ref2act.envs.motion_tracking.tracking_quality": sys.modules.get(
+            "ref2act.envs.motion_tracking.tracking_quality"
+        ),
         "ref2act.envs.motion_tracking.visualization": sys.modules.get("ref2act.envs.motion_tracking.visualization"),
         "ref2act.motion": sys.modules.get("ref2act.motion"),
     }
@@ -107,7 +112,9 @@ def _load_motion_tracking_env_module():
     observation_mod.Observation = type("Observation", (), {})
 
     termination_mod = types.ModuleType("ref2act.envs.motion_tracking.termination")
+    termination_mod.FailureRule = type("FailureRule", (), {})
     termination_mod.Termination = type("Termination", (), {})
+    termination_mod.TerminationContext = type("TerminationContext", (), {})
     termination_mod.TerminationSpec = type("TerminationSpec", (), {})
 
     visualization_mod = types.ModuleType("ref2act.envs.motion_tracking.visualization")
@@ -139,6 +146,7 @@ def _load_motion_tracking_env_module():
 
     try:
         sys.modules.pop("ref2act.envs.motion_tracking.rewards", None)
+        sys.modules.pop("ref2act.envs.motion_tracking.tracking_quality", None)
         sys.modules.pop("ref2act.envs.motion_tracking.env", None)
         rewards_mod = importlib.import_module("ref2act.envs.motion_tracking.rewards")
         env_mod = importlib.import_module("ref2act.envs.motion_tracking.env")
@@ -170,6 +178,9 @@ def _load_env_cfg_shared_module():
         "ref2act.envs.motion_tracking.randomization": sys.modules.get("ref2act.envs.motion_tracking.randomization"),
         "ref2act.envs.motion_tracking.rewards": sys.modules.get("ref2act.envs.motion_tracking.rewards"),
         "ref2act.envs.motion_tracking.termination": sys.modules.get("ref2act.envs.motion_tracking.termination"),
+        "ref2act.envs.motion_tracking.tracking_quality": sys.modules.get(
+            "ref2act.envs.motion_tracking.tracking_quality"
+        ),
         "ref2act.motion.sampling": sys.modules.get("ref2act.motion.sampling"),
         "ref2act.robots._articulation_shared": sys.modules.get("ref2act.robots._articulation_shared"),
     }
@@ -256,6 +267,8 @@ def _load_env_cfg_shared_module():
 
     termination_mod = types.ModuleType("ref2act.envs.motion_tracking.termination")
     termination_mod.default_termination_spec = lambda **kwargs: _Cfg(**kwargs)
+    termination_mod.FailureRule = type("FailureRule", (), {})
+    termination_mod.TerminationContext = type("TerminationContext", (), {})
 
     sampling_mod = types.ModuleType("ref2act.motion.sampling")
     sampling_mod.SamplerMod = Enum("SamplerMod", {"Clamp": "clamp"})
@@ -264,7 +277,6 @@ def _load_env_cfg_shared_module():
 
     articulation_shared_mod = types.ModuleType("ref2act.robots._articulation_shared")
     articulation_shared_mod.G1_CFG = _Cfg(prim_path="/World/G1")
-    articulation_shared_mod.PI_PLUS_CFG = _Cfg(prim_path="/World/PiPlus")
 
     sys.modules["isaaclab.assets"] = assets_mod
     sys.modules["isaaclab.envs"] = envs_mod
@@ -297,6 +309,7 @@ def _load_env_cfg_shared_module():
 
     try:
         sys.modules.pop("ref2act.envs.motion_tracking.rewards", None)
+        sys.modules.pop("ref2act.envs.motion_tracking.tracking_quality", None)
         sys.modules.pop("ref2act.robots._env_cfg_shared", None)
         rewards_mod = importlib.import_module("ref2act.envs.motion_tracking.rewards")
         shared_mod = importlib.import_module("ref2act.robots._env_cfg_shared")
@@ -346,19 +359,174 @@ def test_build_reward_spec_autofills_end_effector_indices_alongside_existing_fie
     assert reward_spec.dt == 0.02
 
 
-def test_g1_reward_spec_appends_new_terms_without_changing_pi_plus_default() -> None:
+def test_get_dones_preserves_legacy_failure_recording_when_quality_gate_disabled() -> None:
+    env_mod, _ = _load_motion_tracking_env_module()
+    env = object.__new__(env_mod.MotionTrackingEnv)
+
+    class _Termination:
+        terminated_env_ids = torch.tensor([0], dtype=torch.long)
+
+        def get_dones(self, *args):
+            return torch.tensor([True, False]), torch.tensor([False, True])
+
+    recorded: list[torch.Tensor] = []
+    env.cfg = types.SimpleNamespace(robust_tracking=types.SimpleNamespace(enabled=False))
+    env.termination_curriculum = types.SimpleNamespace(apply=lambda step: {}, has_schedules=False)
+    env.common_step_counter = 7
+    env.episode_length_buf = torch.zeros(2, dtype=torch.long)
+    env.max_episode_length = torch.full((2,), 10, dtype=torch.long)
+    env.robot = object()
+    env.reference_motion = object()
+    env.termination_model = _Termination()
+    env.tracking_quality_gate = None
+    env.sampler = types.SimpleNamespace(record_failures=lambda env_ids: recorded.append(env_ids.clone()))
+    env.extras = {}
+
+    terminate, time_out = env_mod.MotionTrackingEnv._get_dones(env)
+
+    assert torch.equal(terminate, torch.tensor([True, False]))
+    assert torch.equal(time_out, torch.tensor([False, True]))
+    assert len(recorded) == 1
+    assert torch.equal(recorded[0], torch.tensor([0]))
+
+
+def test_get_dones_quality_gate_records_only_quality_failure_mask() -> None:
+    env_mod, _ = _load_motion_tracking_env_module()
+    env = object.__new__(env_mod.MotionTrackingEnv)
+
+    quality = env_mod.TrackingQualityResult(
+        state=torch.tensor([0, 2], dtype=torch.long),
+        score=torch.tensor([0.5, 2.0], dtype=torch.float32),
+        previous_score=torch.tensor([0.5, 1.5], dtype=torch.float32),
+        soft_violation_mask=torch.tensor([False, False]),
+        recovery_needed_mask=torch.tensor([False, True]),
+        hard_tracking_failure_mask=torch.tensor([False, False]),
+        record_failure_mask=torch.tensor([False, True]),
+        per_rule_errors={"anchor_position_failure": torch.tensor([0.1, 0.4], dtype=torch.float32)},
+        per_rule_normalized_errors={"anchor_position_failure": torch.tensor([0.5, 2.0], dtype=torch.float32)},
+    )
+    recorded: list[torch.Tensor] = []
+    tracked: list[torch.Tensor] = []
+
+    class _Termination:
+        def build_context(self, *args):
+            return object()
+
+        def evaluate_timeouts(self, context):
+            return torch.tensor([False, True])
+
+        def track_terminated_env_ids(self, failed):
+            tracked.append(failed.clone())
+
+    env.cfg = types.SimpleNamespace(
+        robust_tracking=types.SimpleNamespace(
+            enabled=True,
+            quality_gate=types.SimpleNamespace(enabled=True),
+        )
+    )
+    env.termination_curriculum = types.SimpleNamespace(apply=lambda step: {}, has_schedules=False)
+    env.common_step_counter = 7
+    env.episode_length_buf = torch.zeros(2, dtype=torch.long)
+    env.max_episode_length = torch.full((2,), 10, dtype=torch.long)
+    env.robot = object()
+    env.reference_motion = object()
+    env.termination_model = _Termination()
+    env.tracking_quality_gate = types.SimpleNamespace(
+        cfg=types.SimpleNamespace(log_quality_counts=True, log_per_rule_errors=True),
+        evaluate=lambda context: quality,
+    )
+    env.sampler = types.SimpleNamespace(record_failures=lambda env_ids: recorded.append(env_ids.clone()))
+    env.extras = {}
+
+    terminate, time_out = env_mod.MotionTrackingEnv._get_dones(env)
+
+    assert torch.equal(terminate, torch.tensor([False, False]))
+    assert torch.equal(time_out, torch.tensor([False, True]))
+    assert len(recorded) == 1
+    assert torch.equal(recorded[0], torch.tensor([1]))
+    assert len(tracked) == 1
+    assert torch.equal(tracked[0], torch.tensor([False, False]))
+    assert env.extras["sampler/recorded_recovery_failure_count"].item() == 1.0
+    assert env.extras["tracking_quality/recovery_needed_rate"].item() == 0.5
+
+
+def test_rewards_and_dones_reuse_one_tracking_quality_evaluation_per_step() -> None:
+    env_mod, _ = _load_motion_tracking_env_module()
+    env = object.__new__(env_mod.MotionTrackingEnv)
+    quality = env_mod.TrackingQualityResult(
+        state=torch.tensor([0, 2], dtype=torch.long),
+        score=torch.tensor([0.5, 2.0], dtype=torch.float32),
+        previous_score=torch.tensor([0.5, 1.5], dtype=torch.float32),
+        soft_violation_mask=torch.tensor([False, False]),
+        recovery_needed_mask=torch.tensor([False, True]),
+        hard_tracking_failure_mask=torch.tensor([False, False]),
+        record_failure_mask=torch.tensor([False, True]),
+        per_rule_errors={},
+        per_rule_normalized_errors={},
+    )
+    evaluate_calls: list[object] = []
+    recorded: list[torch.Tensor] = []
+    reward_quality: list[object] = []
+
+    class _Termination:
+        def build_context(self, *args):
+            return object()
+
+        def evaluate_timeouts(self, context):
+            return torch.tensor([False, False])
+
+        def track_terminated_env_ids(self, failed):
+            return torch.nonzero(failed, as_tuple=False).squeeze(-1)
+
+    env.cfg = types.SimpleNamespace(
+        robust_tracking=types.SimpleNamespace(
+            enabled=True,
+            quality_gate=types.SimpleNamespace(enabled=True),
+        )
+    )
+    env.termination_curriculum = types.SimpleNamespace(apply=lambda step: {}, has_schedules=False)
+    env.common_step_counter = 7
+    env.episode_length_buf = torch.zeros(2, dtype=torch.long)
+    env.max_episode_length = torch.full((2,), 10, dtype=torch.long)
+    env.robot = object()
+    env.reference_motion = object()
+    env.contact_sensor = object()
+    env.action_processer = object()
+    env.termination_model = _Termination()
+    env.tracking_quality_gate = types.SimpleNamespace(
+        cfg=types.SimpleNamespace(log_quality_counts=True, log_per_rule_errors=True),
+        evaluate=lambda context: evaluate_calls.append(context) or quality,
+    )
+    env.tracking_quality_output = None
+    env._tracking_quality_cache_step = None
+    env.reward_model = types.SimpleNamespace(
+        get_task_reward=lambda *args, tracking_quality=None: reward_quality.append(tracking_quality)
+        or torch.tensor([1.0, 1.0], dtype=torch.float32)
+    )
+    env.sampler = types.SimpleNamespace(record_failures=lambda env_ids: recorded.append(env_ids.clone()))
+    env.extras = {}
+
+    reward = env_mod.MotionTrackingEnv._get_rewards(env)
+    terminate, _ = env_mod.MotionTrackingEnv._get_dones(env)
+
+    assert torch.equal(reward, torch.tensor([1.0, 1.0], dtype=torch.float32))
+    assert torch.equal(terminate, torch.tensor([False, False]))
+    assert len(evaluate_calls) == 1
+    assert reward_quality == [quality]
+    assert len(recorded) == 1
+    assert torch.equal(recorded[0], torch.tensor([1]))
+
+
+def test_g1_reward_spec_uses_robust_defaults_with_com_terms() -> None:
     shared_mod, rewards_mod = _load_env_cfg_shared_module()
 
     g1_terms = shared_mod.G1MotionTrackingEnvCfg.rewards.terms
-    pi_plus_terms = shared_mod.PiPlusMotionTrackingEnvCfg.rewards.terms
 
-    assert len(g1_terms) == 17
-    assert len(pi_plus_terms) == 12
-    assert [term.type for term in g1_terms[-5:]] == [
-        rewards_mod.CoMPositionRewardTerm.type_name,
-        rewards_mod.CoMVelocityRewardTerm.type_name,
-        rewards_mod.CoMSupportRewardTerm.type_name,
-        rewards_mod.EndEffectorPositionRewardTerm.type_name,
-        rewards_mod.EndEffectorVelocityRewardTerm.type_name,
+    assert [term.type for term in g1_terms] == [
+        term.type for term in rewards_mod.robust_tracking_reward_spec(dt=0.0, include_com_terms=True).terms
     ]
-    assert [term.type for term in pi_plus_terms] == [term.type for term in rewards_mod.default_reward_spec(dt=0.0, anchor_height_only=True).terms]
+    assert rewards_mod.CoMPositionRewardTerm.type_name in [term.type for term in g1_terms]
+    assert rewards_mod.CoMVelocityRewardTerm.type_name in [term.type for term in g1_terms]
+    assert rewards_mod.CoMSupportRewardTerm.type_name in [term.type for term in g1_terms]
+    assert shared_mod.G1MotionTrackingEnvCfg.robust_tracking.enabled is True
+    assert shared_mod.G1MotionTrackingEnvCfg.robust_tracking.quality_gate.enabled is True

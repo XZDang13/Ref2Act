@@ -31,13 +31,14 @@ from ref2act.envs.motion_tracking.rewards import (
     EndEffectorPositionRewardTermCfg,
     EndEffectorVelocityRewardTermCfg,
     default_reward_spec,
+    robust_tracking_reward_spec,
 )
 from ref2act.envs.motion_tracking.termination import default_termination_spec
+from ref2act.envs.motion_tracking.tracking_quality import RobustTrackingCfg, TrackingQualityGateCfg
 from ref2act.motion.sampling import SamplerMod, SamplingStrategy, SegmentSource
-from ref2act.robots._articulation_shared import G1_CFG, PI_PLUS_CFG
+from ref2act.robots._articulation_shared import G1_CFG
 
 G1_ACTION_LATENCY_RANGE = (0, 2)
-PI_PLUS_ACTION_LATENCY_RANGE = (0, 2)
 
 G1_PUSH_VELOCITY_RANGE = {
     "x": (-0.3, 0.3),
@@ -45,21 +46,11 @@ G1_PUSH_VELOCITY_RANGE = {
     "yaw": (-0.4, 0.4),
 }
 
-PI_PLUS_PUSH_VELOCITY_RANGE = {
-    "x": (-0.2, 0.2),
-    "y": (-0.2, 0.2),
-    "yaw": (-0.3, 0.3),
-}
-
 G1_CONTACT_BODIES = "left_ankle_roll_link|right_ankle_roll_link|left_rubber_hand|right_rubber_hand"
-PI_PLUS_CONTACT_BODIES = "l_ankle_roll_link|r_ankle_roll_link|l_wrist_link|r_wrist_link"
 
 G1_LEG_JOINTS = ".*_hip_.*_joint|.*_knee_joint|.*_ankle_.*_joint"
 G1_TORSO_JOINTS = "waist_yaw_joint"
 G1_ARM_JOINTS = ".*_shoulder_.*_joint|.*_elbow_joint|.*_wrist_.*"
-
-PI_PLUS_LEG_JOINTS = ".*_thigh_joint|.*_hip_roll_joint|.*_hip_pitch_joint|.*_calf_joint|.*_ankle_.*_joint"
-PI_PLUS_ARM_JOINTS = ".*_shoulder_.*_joint|.*_upper_arm_joint|.*_elbow_joint|.*_wrist_joint"
 
 
 def _rough_terrain_importer_cfg() -> TerrainImporterCfg:
@@ -263,130 +254,6 @@ class G1TrainingEventCfg(G1DomainRandCfg):
     )
 
 @configclass
-class PiPlusDomainRandCfg:
-    """Structured domain randomization for the PiPlus robot."""
-
-    physics_material = EventTerm(
-        func=mdp.randomize_rigid_body_material,
-        mode="startup",
-        params={
-            "asset_cfg": SceneEntityCfg("robot", body_names=PI_PLUS_CONTACT_BODIES),
-            "static_friction_range": (0.6, 1.2),
-            "dynamic_friction_range": (0.5, 1.0),
-            "restitution_range": (0.0, 0.08),
-            "num_buckets": 64,
-            "make_consistent": True,
-        },
-    )
-
-    rand_robot_mass = EventTerm(
-        func=randomize_group_body_masses,
-        mode="startup",
-        params={
-            "base_cfg": SceneEntityCfg("robot", body_names="base_link"),
-            "base_scale_range": (0.95, 1.05),
-            "legs_cfg": SceneEntityCfg("robot", body_names=".*hip.*|.*thigh.*|.*calf.*|.*ankle.*"),
-            "legs_scale_range": (0.9, 1.1),
-            "arms_cfg": SceneEntityCfg("robot", body_names=".*shoulder.*|.*upper_arm.*|.*elbow.*|.*wrist.*"),
-            "arms_scale_range": (0.9, 1.1),
-        },
-    )
-
-    rand_base_com = EventTerm(
-        func=randomize_rigid_body_com_from_default,
-        mode="startup",
-        params={
-            "asset_cfg": SceneEntityCfg("robot", body_names="base_link"),
-            "com_range": {"x": (-0.01, 0.01), "y": (-0.015, 0.015), "z": (-0.01, 0.01)},
-        },
-    )
-
-    rand_contact_offsets = EventTerm(
-        func=randomize_rigid_body_collider_offsets_by_body,
-        mode="startup",
-        params={
-            "asset_cfg": SceneEntityCfg("robot", body_names=PI_PLUS_CONTACT_BODIES),
-            "rest_offset_range": (0.0, 0.0015),
-            "contact_offset_range": (0.003, 0.01),
-            "min_contact_gap": 5e-4,
-        },
-    )
-
-    rand_leg_joint_friction = EventTerm(
-        func=mdp.randomize_joint_parameters,
-        mode="startup",
-        params={
-            "asset_cfg": SceneEntityCfg("robot", joint_names=PI_PLUS_LEG_JOINTS),
-            "friction_distribution_params": (0.0, 0.03),
-            "operation": "abs",
-            "distribution": "uniform",
-        },
-    )
-
-    rand_arm_joint_friction = EventTerm(
-        func=mdp.randomize_joint_parameters,
-        mode="startup",
-        params={
-            "asset_cfg": SceneEntityCfg("robot", joint_names=PI_PLUS_ARM_JOINTS),
-            "friction_distribution_params": (0.0, 0.02),
-            "operation": "abs",
-            "distribution": "uniform",
-        },
-    )
-
-    rand_leg_joint_armature = EventTerm(
-        func=mdp.randomize_joint_parameters,
-        mode="startup",
-        params={
-            "asset_cfg": SceneEntityCfg("robot", joint_names=PI_PLUS_LEG_JOINTS),
-            "armature_distribution_params": (0.94, 1.06),
-            "operation": "scale",
-            "distribution": "uniform",
-        },
-    )
-
-    rand_arm_joint_armature = EventTerm(
-        func=mdp.randomize_joint_parameters,
-        mode="startup",
-        params={
-            "asset_cfg": SceneEntityCfg("robot", joint_names=PI_PLUS_ARM_JOINTS),
-            "armature_distribution_params": (0.92, 1.08),
-            "operation": "scale",
-            "distribution": "uniform",
-        },
-    )
-
-    rand_robot_joint_stiffness_and_damping = EventTerm(
-        func=randomize_group_actuator_gains,
-        mode="startup",
-        params={
-            "legs_cfg": SceneEntityCfg("robot", joint_names=PI_PLUS_LEG_JOINTS),
-            "legs_scale_range": (0.92, 1.08),
-            "arms_cfg": SceneEntityCfg("robot", joint_names=PI_PLUS_ARM_JOINTS),
-            "arms_scale_range": (0.92, 1.08),
-        },
-    )
-
-    rand_action_latency = EventTerm(
-        func=randomize_action_latency,
-        mode="reset",
-        params={"latency_range": PI_PLUS_ACTION_LATENCY_RANGE},
-    )
-
-
-@configclass
-class PiPlusTrainingEventCfg(PiPlusDomainRandCfg):
-    """Training events for the PiPlus robot."""
-
-    push_robot = EventTerm(
-        func=mdp.push_by_setting_velocity,
-        mode="interval",
-        interval_range_s=(2.5, 4.5),
-        params={"velocity_range": PI_PLUS_PUSH_VELOCITY_RANGE},
-    )
-
-
-@configclass
 class G1MotionTrackingEnvCfg(DirectRLEnvCfg):
     expert_motion_file = None
     episode_length_s = 10.0
@@ -459,7 +326,7 @@ class G1MotionTrackingEnvCfg(DirectRLEnvCfg):
         "right_ankle_roll_link",
     ]
 
-    rewards = _g1_reward_spec()
+    rewards = robust_tracking_reward_spec(dt=0.0, include_com_terms=True)
     termination = default_termination_spec(
         anchor_height_only=True,
         end_effector_height_only=False,
@@ -467,6 +334,7 @@ class G1MotionTrackingEnvCfg(DirectRLEnvCfg):
         error_termination_ramp_multiplier=2.0,
         error_termination_sigmoid_steepness=8.0,
     )
+    robust_tracking = RobustTrackingCfg(enabled=True, quality_gate=TrackingQualityGateCfg(enabled=True))
     termination_curriculum: TerminationCurriculumCfg | None = None
 
     training = True
@@ -511,138 +379,9 @@ class G1MotionTrackingEnvCfg(DirectRLEnvCfg):
     )
 
 @configclass
-class PiPlusMotionTrackingEnvCfg(DirectRLEnvCfg):
-    expert_motion_file = None
-    episode_length_s = 10.0
-
-    decimation = 4
-
-    observation_space = 0
-    policy_observation_space = 0
-    motion_observation_space = 0
-    robot_observation_space = 0
-    critic_observation_space = 0
-    action_space = 23
-    state_space = 0
-
-    observation = default_training_observation_spec(add_noise=True)
-    action = ActionSpec(
-        mode="median",
-        buffer_length=PI_PLUS_ACTION_LATENCY_RANGE[1] + 1,
-        latency_range=PI_PLUS_ACTION_LATENCY_RANGE,
-        noise_scale=0.01,
-    )
-
-    expert_motion_file = None
-
-    bin_size = 0.2
-    failure_decay = 1.0
-    failure_weight_uniform_mix = 0.1
-    failure_weight_max_uniform_ratio = 2.5
-    failure_temperature = 1.0
-    segment_source: SegmentSource = SegmentSource.Time
-    sampling_strategy: SamplingStrategy | None = None
-    sampler_mod:SamplerMod = SamplerMod.Clamp
-
-    root_link_name = "base_link"
-    anchor_body_name = "base_link"
-
-    key_body_names = [
-        "base_link",
-        "l_hip_roll_link",
-        "l_calf_link",
-        "l_ankle_roll_link",
-        "r_hip_roll_link",
-        "r_calf_link",
-        "r_ankle_roll_link",
-            
-        "l_shoulder_roll_link",
-        "l_elbow_link",
-        "l_wrist_link",
-        "r_shoulder_roll_link",
-        "r_elbow_link",
-        "r_wrist_link",
-    ]
-    
-    collision_track_body_names = [
-        "l_ankle_roll_link",
-        "r_ankle_roll_link", 
-        "l_wrist_link",
-        "r_wrist_link",
-    ]
-
-    end_effector_body_names = [
-        "l_ankle_roll_link",
-        "r_ankle_roll_link",
-        "l_wrist_link",
-        "r_wrist_link",
-    ]
-
-    foot_body_names = [
-        "l_ankle_roll_link",
-        "r_ankle_roll_link",
-    ]
-
-    rewards = default_reward_spec(dt=0.0, anchor_height_only=True)
-    termination = default_termination_spec(
-        anchor_height_only=True,
-        end_effector_height_only=False,
-        probabilistic_error_termination=True,
-        error_termination_ramp_multiplier=2.0,
-        error_termination_sigmoid_steepness=8.0,
-    )
-    termination_curriculum: TerminationCurriculumCfg = TerminationCurriculumCfg()
-
-    training = True
-    add_reset_noise = True
-    random_start = True
-
-    sim: SimulationCfg = SimulationCfg(
-        dt=1 / 200,
-        render_interval=decimation,
-        physics_material=sim_utils.RigidBodyMaterialCfg(
-            friction_combine_mode="multiply",
-            restitution_combine_mode="multiply",
-            static_friction=1.0,
-            dynamic_friction=1.0,
-            restitution=0.0,
-        ),
-    )
-
-    terrain = TerrainImporterCfg(
-        prim_path="/World/ground",
-        terrain_type="plane",
-        collision_group=-1,
-        physics_material=sim_utils.RigidBodyMaterialCfg(
-            friction_combine_mode="multiply",
-            restitution_combine_mode="multiply",
-            static_friction=1.0,
-            dynamic_friction=1.0
-        ),
-        debug_vis=False,
-    )
-
-    scene:InteractiveSceneCfg = InteractiveSceneCfg(
-        num_envs=4096, env_spacing=4.0, replicate_physics=True
-    )
-
-    events: PiPlusTrainingEventCfg = PiPlusTrainingEventCfg()
-
-    robot:ArticulationCfg = PI_PLUS_CFG.replace(prim_path="/World/envs/env_.*/Robot")
-
-    contact_sensor = ContactSensorCfg(
-        prim_path="/World/envs/env_.*/Robot/.*", history_length=3, track_air_time=True, force_threshold=10.0,
-    )
-
-
-@configclass
 class G1MotionTrackingRoughEnvCfg(G1MotionTrackingEnvCfg):
     terrain = _rough_terrain_importer_cfg()
 
-
-@configclass
-class PiPlusMotionTrackingRoughEnvCfg(PiPlusMotionTrackingEnvCfg):
-    terrain = _rough_terrain_importer_cfg()
 
 @configclass
 class MotionViewerCfg(InteractiveSceneCfg):

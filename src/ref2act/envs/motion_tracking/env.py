@@ -19,6 +19,7 @@ from .curriculum import TerminationThresholdCurriculum
 from .observation import Observation
 from .rewards import RewardSpec, Rewards
 from .termination import Termination, TerminationSpec
+from .tracking_quality import TrackingQualityGate, TrackingQualityResult
 from .types import (
     JOINT_POSITION_RANGE,
     POSE_RANGE,
@@ -31,7 +32,6 @@ from .visualization import ReferenceMotionViewer
 
 if TYPE_CHECKING:
     from ref2act.robots.g1 import G1MotionTrackingEnvCfg
-    from ref2act.robots.pi_plus import PiPlusMotionTrackingEnvCfg
 
 
 def _resolve_cfg_factory(cfg_factory: str):
@@ -44,7 +44,7 @@ def _resolve_cfg_factory(cfg_factory: str):
 
 
 class MotionTrackingEnv(DirectRLEnv):
-    cfg: G1MotionTrackingEnvCfg | PiPlusMotionTrackingEnvCfg
+    cfg: G1MotionTrackingEnvCfg
     _REFERENCE_MOTION_FIELDS = (
         "joint_pos",
         "joint_vel",
@@ -136,6 +136,16 @@ class MotionTrackingEnv(DirectRLEnv):
             self.termination_model,
             getattr(self.cfg, "termination_curriculum", None),
         )
+        self.tracking_quality_gate = None
+        self.tracking_quality_output: TrackingQualityResult | None = None
+        self._tracking_quality_cache_step: int | None = None
+        if self._tracking_quality_gate_enabled():
+            self.tracking_quality_gate = TrackingQualityGate(
+                self.cfg.robust_tracking.quality_gate,
+                self.termination_model,
+                num_envs=self.cfg.scene.num_envs,
+                device=self.device,
+            )
         self._apply_termination_curriculum(step=0)
 
     @staticmethod
@@ -311,6 +321,13 @@ class MotionTrackingEnv(DirectRLEnv):
             return SamplingStrategy.Random
         return SamplingStrategy.Start
 
+    def _tracking_quality_gate_enabled(self) -> bool:
+        robust_tracking = getattr(self.cfg, "robust_tracking", None)
+        if robust_tracking is None or not getattr(robust_tracking, "enabled", False):
+            return False
+        quality_gate_cfg = getattr(robust_tracking, "quality_gate", None)
+        return quality_gate_cfg is not None and getattr(quality_gate_cfg, "enabled", False)
+
     def get_joint_params(self):
         return {
             "joint_names": self.robot.data.joint_names,
@@ -360,27 +377,114 @@ class MotionTrackingEnv(DirectRLEnv):
         )
 
     def _get_rewards(self) -> torch.Tensor:
+        tracking_quality = self._get_tracking_quality()
         return self.reward_model.get_task_reward(
             self.robot,
             self.reference_motion,
             self.contact_sensor,
             self.action_processer,
+            tracking_quality=tracking_quality,
         )
 
-    def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
-        self._apply_termination_curriculum(step=self.common_step_counter)
-        terminate, time_out = self.termination_model.get_dones(
+    def _get_tracking_quality(self) -> TrackingQualityResult | None:
+        if not self._tracking_quality_gate_enabled():
+            return None
+        if self.tracking_quality_gate is None:
+            raise RuntimeError("Tracking quality gate is enabled but was not initialized.")
+
+        step = int(self.common_step_counter)
+        cached_output = getattr(self, "tracking_quality_output", None)
+        if getattr(self, "_tracking_quality_cache_step", None) == step and cached_output is not None:
+            return cached_output
+
+        self._apply_termination_curriculum(step=step)
+        context = self.termination_model.build_context(
             self.episode_length_buf,
             self.max_episode_length,
             self.robot,
             self.reference_motion,
             self.sampler,
         )
-        self.sampler.record_failures(self.termination_model.terminated_env_ids)
+        self.tracking_quality_output = self.tracking_quality_gate.evaluate(context)
+        self._tracking_quality_cache_step = step
+        return self.tracking_quality_output
+
+    def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
+        if not self._tracking_quality_gate_enabled():
+            self._apply_termination_curriculum(step=self.common_step_counter)
+            terminate, time_out = self.termination_model.get_dones(
+                self.episode_length_buf,
+                self.max_episode_length,
+                self.robot,
+                self.reference_motion,
+                self.sampler,
+            )
+            self.sampler.record_failures(self.termination_model.terminated_env_ids)
+            return terminate, time_out
+
+        quality = self._get_tracking_quality()
+        if quality is None:
+            raise RuntimeError("Tracking quality gate is enabled but returned no output.")
+        context = self.termination_model.build_context(
+            self.episode_length_buf,
+            self.max_episode_length,
+            self.robot,
+            self.reference_motion,
+            self.sampler,
+        )
+        time_out = self.termination_model.evaluate_timeouts(context)
+        terminate = quality.hard_tracking_failure_mask.clone()
+        self.termination_model.track_terminated_env_ids(terminate)
+
+        record_env_ids = torch.nonzero(quality.record_failure_mask, as_tuple=False).squeeze(-1)
+        self.sampler.record_failures(record_env_ids)
+        self._log_tracking_quality(quality, terminate, time_out, record_env_ids)
         return terminate, time_out
+
+    def _log_tracking_quality(
+        self,
+        quality: TrackingQualityResult,
+        terminate: torch.Tensor,
+        time_out: torch.Tensor,
+        recorded_env_ids: torch.Tensor,
+    ) -> None:
+        score = quality.score.detach()
+        self.extras["tracking_quality/score_mean"] = score.mean()
+        self.extras["tracking_quality/score_p95"] = torch.quantile(score, 0.95)
+
+        cfg = self.tracking_quality_gate.cfg if self.tracking_quality_gate is not None else None
+        if cfg is None or cfg.log_quality_counts:
+            self.extras["tracking_quality/ok_rate"] = (
+                ~(quality.soft_violation_mask | quality.recovery_needed_mask | quality.hard_tracking_failure_mask)
+            ).to(dtype=torch.float32).mean()
+            self.extras["tracking_quality/soft_violation_rate"] = quality.soft_violation_mask.to(
+                dtype=torch.float32
+            ).mean()
+            self.extras["tracking_quality/recovery_needed_rate"] = quality.recovery_needed_mask.to(
+                dtype=torch.float32
+            ).mean()
+            self.extras["tracking_quality/hard_tracking_failure_rate"] = quality.hard_tracking_failure_mask.to(
+                dtype=torch.float32
+            ).mean()
+
+        if cfg is None or cfg.log_per_rule_errors:
+            for rule_id, error in quality.per_rule_errors.items():
+                self.extras[f"tracking_quality/{rule_id}_error_mean"] = error.detach().mean()
+
+        self.extras["termination/hard_terminate_rate"] = terminate.to(dtype=torch.float32).mean()
+        self.extras["termination/time_out_rate"] = time_out.to(dtype=torch.float32).mean()
+        self.extras["sampler/recorded_recovery_failure_count"] = torch.as_tensor(
+            recorded_env_ids.numel(),
+            device=score.device,
+            dtype=torch.float32,
+        )
 
     def _reset_idx(self, env_ids: torch.Tensor | None):
         env_ids = self._normalize_env_ids(env_ids)
+        if self.tracking_quality_gate is not None:
+            self.tracking_quality_gate.reset(env_ids)
+        self.tracking_quality_output = None
+        self._tracking_quality_cache_step = None
         self.robot.reset(env_ids)
         super()._reset_idx(env_ids)
 

@@ -261,6 +261,124 @@ def test_default_reward_vector_keeps_existing_term_order() -> None:
     assert torch.allclose(reward_vector[0, 5:], torch.zeros(7, dtype=torch.float32))
 
 
+def test_multi_scale_tracking_kernel_is_monotonic_and_keeps_coarse_signal() -> None:
+    rewards_mod = _load_rewards_module()
+    errors = torch.tensor([0.0, 1.0, 10.0], dtype=torch.float32)
+
+    raw = rewards_mod._multi_scale_tracking_kernel(
+        errors,
+        fine_std=0.25,
+        medium_std=1.0,
+        coarse_std=4.0,
+        fine_weight=0.5,
+        medium_weight=0.3,
+        coarse_weight=0.2,
+        coarse_kernel="rational",
+    )
+
+    assert torch.allclose(raw[0], torch.tensor(1.0, dtype=torch.float32))
+    assert torch.all(raw[1:] < raw[:-1])
+    assert raw[-1] > 0.0
+
+
+def test_robust_tracking_reward_terms_are_finite_and_report_metrics() -> None:
+    rewards_mod = _load_rewards_module()
+    spec = dataclasses.replace(
+        rewards_mod.robust_tracking_reward_spec(dt=1.0, include_com_terms=False),
+        output_mode="vector",
+    )
+    rewards = rewards_mod.Rewards(spec)
+    robot = _make_robot(torch.zeros((2, 3, 3), dtype=torch.float32))
+    robot.data.joint_pos = torch.tensor([[0.2, -0.1], [0.5, 0.25]], dtype=torch.float32)
+    robot.data.joint_vel = torch.tensor([[0.5, -0.2], [1.0, 0.3]], dtype=torch.float32)
+    reference_motion = _make_reference_motion(num_envs=2, num_bodies=3, num_joints=2)
+    tracking_quality = types.SimpleNamespace(
+        score=torch.tensor([1.5, 2.0], dtype=torch.float32),
+        previous_score=torch.tensor([2.0, 1.5], dtype=torch.float32),
+    )
+
+    reward_vector = rewards.get_task_reward(
+        robot,
+        reference_motion,
+        _make_contact_sensor(torch.zeros((2, 1, 3, 3), dtype=torch.float32)),
+        _make_action_model(num_envs=2),
+        tracking_quality=tracking_quality,
+    )
+
+    assert reward_vector.shape == (2, len(spec.terms))
+    assert torch.all(torch.isfinite(reward_vector))
+    expected_error_terms = {
+        "multi_scale_joint_position_reward",
+        "multi_scale_joint_velocity_reward",
+        "multi_scale_anchor_height_reward",
+        "multi_scale_projected_gravity_reward",
+        "multi_scale_key_position_reward",
+        "multi_scale_key_quaternion_reward",
+        "multi_scale_key_linear_velocity_reward",
+        "multi_scale_key_angular_velocity_reward",
+        "multi_scale_end_effector_position_reward",
+        "multi_scale_end_effector_velocity_reward",
+    }
+    assert expected_error_terms.issubset(rewards.last_result.components)
+    for term_id in expected_error_terms:
+        assert {"raw", "weighted", "error"}.issubset(rewards.last_result.metrics[term_id])
+    assert {"raw", "weighted", "progress", "gate", "score", "previous_score"}.issubset(
+        rewards.last_result.metrics["tracking_progress_reward"]
+    )
+
+
+def test_tracking_progress_reward_uses_score_delta_and_is_optional() -> None:
+    rewards_mod = _load_rewards_module()
+    rewards = rewards_mod.Rewards(
+        rewards_mod.RewardSpec(
+            dt=1.0,
+            output_mode="sum",
+            terms=(rewards_mod.TrackingProgressRewardTermCfg(weight=1.0),),
+        )
+    )
+    robot = _make_robot(torch.zeros((1, 3, 3), dtype=torch.float32))
+    reference_motion = _make_reference_motion()
+    contact_sensor = _make_contact_sensor(torch.zeros((1, 1, 3, 3), dtype=torch.float32))
+    action_model = _make_action_model()
+
+    no_quality = rewards.get_task_reward(robot, reference_motion, contact_sensor, action_model)
+    improved = rewards.get_task_reward(
+        robot,
+        reference_motion,
+        contact_sensor,
+        action_model,
+        tracking_quality=types.SimpleNamespace(
+            previous_score=torch.tensor([2.0], dtype=torch.float32),
+            score=torch.tensor([1.5], dtype=torch.float32),
+        ),
+    )
+    regressed = rewards.get_task_reward(
+        robot,
+        reference_motion,
+        contact_sensor,
+        action_model,
+        tracking_quality=types.SimpleNamespace(
+            previous_score=torch.tensor([1.5], dtype=torch.float32),
+            score=torch.tensor([2.0], dtype=torch.float32),
+        ),
+    )
+    gated_out = rewards.get_task_reward(
+        robot,
+        reference_motion,
+        contact_sensor,
+        action_model,
+        tracking_quality=types.SimpleNamespace(
+            previous_score=torch.tensor([2.0], dtype=torch.float32),
+            score=torch.tensor([0.5], dtype=torch.float32),
+        ),
+    )
+
+    assert torch.allclose(no_quality, torch.tensor([0.0], dtype=torch.float32))
+    assert improved.item() > 0.0
+    assert regressed.item() < 0.0
+    assert torch.allclose(gated_out, torch.tensor([0.0], dtype=torch.float32))
+
+
 def test_com_position_reward_tracks_mass_weighted_xy_error() -> None:
     rewards_mod = _load_rewards_module()
     rewards = rewards_mod.Rewards(
