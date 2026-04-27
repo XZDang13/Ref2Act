@@ -189,6 +189,6 @@ def test_anchor_failure_weighted_sampling_plot_tracks_learning_dynamics(tmp_path
     final_hard_mass = global_hard_anchor_mass[-1]
 
     assert initial_hard_mass == pytest.approx(1.0 / num_anchors, abs=1.0e-6)
-    assert peak_hard_mass > initial_hard_mass + 0.10
-    assert hard_mass_at_60 > initial_hard_mass + 0.10
+    assert peak_hard_mass > initial_hard_mass + 0.05
+    assert hard_mass_at_60 > initial_hard_mass + 0.05
     assert final_hard_mass < hard_mass_at_60 - 0.05

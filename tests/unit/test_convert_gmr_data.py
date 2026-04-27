@@ -2,6 +2,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from ref2act.cli.convert import (
     ConversionOptions,
@@ -10,7 +11,9 @@ from ref2act.cli.convert import (
     _MotionConversionState,
     _finalize_motion_slot,
     build_parser,
+    split_motion_log_by_anchors,
 )
+from ref2act.motion import MotionLib
 
 _BODY_NAMES = ["pelvis", "torso_link", "left_ankle_roll_link", "right_ankle_roll_link"]
 
@@ -83,11 +86,82 @@ def _build_conversion_slot(tmp_path: Path, *, segment_method: str, torso_x: np.n
     return output_file
 
 
+def _build_split_motion_log(
+    *,
+    fps: float = 10.0,
+    num_frames: int,
+    anchor_frames: tuple[int, ...],
+) -> dict[str, object]:
+    motion_arrays = _build_motion_arrays(fps=fps, num_frames=num_frames)
+    duration = float(num_frames) / float(fps)
+    anchor_frame_indices = np.asarray(anchor_frames, dtype=np.int64)
+    num_anchors = int(anchor_frame_indices.shape[0])
+    return {
+        "fps": float(fps),
+        "joint_names": ["joint_0", "joint_1"],
+        "body_names": list(_BODY_NAMES),
+        **motion_arrays,
+        "segment_start_times": np.asarray([0.0], dtype=np.float32),
+        "segment_end_times": np.asarray([duration], dtype=np.float32),
+        "segment_types": np.asarray([0], dtype=np.int64),
+        "anchor_selection_version": np.asarray(1, dtype=np.int64),
+        "anchor_frame_labels": np.full(num_frames, 2, dtype=np.int8),
+        "anchor_segment_start_times": np.asarray([0.0], dtype=np.float32),
+        "anchor_segment_end_times": np.asarray([duration], dtype=np.float32),
+        "anchor_segment_labels": np.asarray([2], dtype=np.int8),
+        "anchor_frame_indices": anchor_frame_indices,
+        "anchor_times": (anchor_frame_indices.astype(np.float32) / np.float32(fps)).astype(np.float32),
+        "anchor_scores": np.ones(num_anchors, dtype=np.float32),
+        "anchor_support_modes": np.full(num_anchors, 3, dtype=np.int8),
+        "anchor_energy_norm": np.zeros(num_anchors, dtype=np.float32),
+        "anchor_pose_extreme": np.zeros(num_anchors, dtype=np.float32),
+        "anchor_torso_tilt_deg": np.zeros(num_anchors, dtype=np.float32),
+    }
+
+
 def test_conversion_options_from_args_carries_segment_method() -> None:
     args = build_parser().parse_args(["--input_file", "motion.pkl", "--segment-method", "anchor"])
     options = ConversionOptions.from_args(args)
 
     assert options.segment_method == "anchor"
+    assert options.split_by_anchors is False
+    assert options.split_max_duration == 10.0
+    assert options.split_min_duration == 2.0
+
+
+def test_conversion_options_from_args_accepts_anchor_split_flags() -> None:
+    args = build_parser().parse_args(
+        [
+            "--input_file",
+            "motion.pkl",
+            "--split-by-anchors",
+            "--split-max-duration",
+            "12.5",
+            "--split-min-duration",
+            "2.5",
+        ]
+    )
+    options = ConversionOptions.from_args(args)
+
+    assert options.split_by_anchors is True
+    assert options.split_max_duration == 12.5
+    assert options.split_min_duration == 2.5
+
+
+def test_conversion_options_rejects_invalid_anchor_split_duration_order() -> None:
+    args = build_parser().parse_args(
+        [
+            "--input_file",
+            "motion.pkl",
+            "--split-max-duration",
+            "2.0",
+            "--split-min-duration",
+            "2.0",
+        ]
+    )
+
+    with pytest.raises(ValueError, match="split-min-duration"):
+        ConversionOptions.from_args(args)
 
 
 def test_finalize_motion_slot_anchor_mode_exports_anchor_metadata(tmp_path: Path) -> None:
@@ -165,3 +239,96 @@ def test_finalize_motion_slot_time_mode_omits_anchor_metadata(tmp_path: Path) ->
     with np.load(output_file) as motion_data:
         assert {"segment_start_times", "segment_end_times", "segment_types"} <= set(motion_data.files)
         assert not any(key.startswith("anchor_") for key in motion_data.files)
+
+
+def test_split_motion_log_by_anchors_keeps_short_clip_unsplit(tmp_path: Path) -> None:
+    log = _build_split_motion_log(num_frames=80, anchor_frames=(0, 30, 60))
+    output_file = tmp_path / "motion.npz"
+
+    written_files = split_motion_log_by_anchors(log, output_file, max_duration=10.0, min_duration=2.0)
+
+    assert written_files == [output_file]
+    assert output_file.exists()
+    assert not (tmp_path / "motion_000.npz").exists()
+    with np.load(output_file) as motion_data:
+        assert motion_data["joint_pos"].shape[0] == 80
+
+
+def test_split_motion_log_by_anchors_writes_numbered_parts_and_rebases_metadata(tmp_path: Path) -> None:
+    log = _build_split_motion_log(num_frames=260, anchor_frames=(0, 90, 100, 190, 200))
+    output_file = tmp_path / "motion.npz"
+
+    written_files = split_motion_log_by_anchors(log, output_file, max_duration=10.0, min_duration=2.0)
+
+    assert written_files == [
+        tmp_path / "motion_000.npz",
+        tmp_path / "motion_001.npz",
+        tmp_path / "motion_002.npz",
+    ]
+    assert not output_file.exists()
+    durations = []
+    for path in written_files:
+        with np.load(path) as motion_data:
+            duration = motion_data["joint_pos"].shape[0] / float(np.asarray(motion_data["fps"]).item())
+            durations.append(duration)
+            assert duration >= 2.0
+            assert motion_data["segment_start_times"][0] == np.float32(0.0)
+            assert motion_data["segment_end_times"][-1] == np.float32(duration)
+            assert motion_data["anchor_segment_start_times"][0] == np.float32(0.0)
+            assert motion_data["anchor_segment_end_times"][-1] == np.float32(duration)
+
+    assert durations == [10.0, 10.0, 6.0]
+    with np.load(written_files[1]) as second_part:
+        np.testing.assert_array_equal(second_part["anchor_frame_indices"], np.asarray([0, 90], dtype=np.int64))
+        np.testing.assert_allclose(second_part["anchor_times"], np.asarray([0.0, 9.0], dtype=np.float32))
+
+    motion_lib = MotionLib(written_files)
+    assert motion_lib.num_motions == 3
+    assert motion_lib.all_clips_have_anchor_segments
+
+
+def test_split_motion_log_by_anchors_uses_next_anchor_when_no_anchor_is_below_max(tmp_path: Path) -> None:
+    log = _build_split_motion_log(num_frames=250, anchor_frames=(0, 110, 220))
+
+    written_files = split_motion_log_by_anchors(
+        log,
+        tmp_path / "motion.npz",
+        max_duration=10.0,
+        min_duration=2.0,
+    )
+
+    durations = []
+    for path in written_files:
+        with np.load(path) as motion_data:
+            durations.append(motion_data["joint_pos"].shape[0] / float(np.asarray(motion_data["fps"]).item()))
+    assert durations == [11.0, 11.0, 3.0]
+
+
+def test_split_motion_log_by_anchors_merges_short_final_remainder(tmp_path: Path) -> None:
+    log = _build_split_motion_log(num_frames=215, anchor_frames=(0, 100, 200))
+
+    written_files = split_motion_log_by_anchors(
+        log,
+        tmp_path / "motion.npz",
+        max_duration=10.0,
+        min_duration=2.0,
+    )
+
+    assert written_files == [tmp_path / "motion_000.npz", tmp_path / "motion_001.npz"]
+    durations = []
+    for path in written_files:
+        with np.load(path) as motion_data:
+            durations.append(motion_data["joint_pos"].shape[0] / float(np.asarray(motion_data["fps"]).item()))
+    assert durations == [10.0, 11.5]
+
+
+def test_split_motion_log_by_anchors_fails_without_future_min_duration_anchor(tmp_path: Path) -> None:
+    log = _build_split_motion_log(num_frames=130, anchor_frames=(0, 10))
+
+    with pytest.raises(ValueError, match="could not find an anchor"):
+        split_motion_log_by_anchors(
+            log,
+            tmp_path / "motion.npz",
+            max_duration=10.0,
+            min_duration=2.0,
+        )

@@ -9,6 +9,7 @@ import torch
 from isaaclab.assets import Articulation
 from isaaclab.envs import DirectRLEnv
 from isaaclab.sensors import ContactSensor
+from isaaclab.utils.math import quat_apply_inverse
 
 from ref2act.common.math import quat_mul
 from ref2act.common.observation_spec import ObservationLayout
@@ -19,7 +20,7 @@ from .curriculum import TerminationThresholdCurriculum
 from .observation import Observation
 from .rewards import RewardSpec, Rewards
 from .termination import Termination, TerminationSpec
-from .tracking_quality import TrackingQualityGate, TrackingQualityResult
+from .tracking_quality import FallGuardResult, TrackingQualityGate, TrackingQualityResult
 from .types import (
     JOINT_POSITION_RANGE,
     POSE_RANGE,
@@ -91,6 +92,7 @@ class MotionTrackingEnv(DirectRLEnv):
             failure_decay=self.cfg.failure_decay,
             failure_weight_uniform_mix=self.cfg.failure_weight_uniform_mix,
             failure_weight_max_uniform_ratio=self.cfg.failure_weight_max_uniform_ratio,
+            failure_weight_exploration_bonus=self.cfg.failure_weight_exploration_bonus,
             segment_source=self.cfg.segment_source,
             device=self.device,
         )
@@ -433,13 +435,54 @@ class MotionTrackingEnv(DirectRLEnv):
             self.sampler,
         )
         time_out = self.termination_model.evaluate_timeouts(context)
-        terminate = quality.hard_tracking_failure_mask.clone()
+        fall_guard = self._evaluate_fall_guard(context)
+        terminate = (
+            quality.hard_tracking_failure_mask
+            | quality.recovery_timeout_mask
+            | fall_guard.fall_mask
+        ).clone()
         self.termination_model.track_terminated_env_ids(terminate)
 
-        record_env_ids = torch.nonzero(quality.record_failure_mask, as_tuple=False).squeeze(-1)
+        record_failure_mask = quality.record_failure_mask | fall_guard.fall_mask
+        record_env_ids = torch.nonzero(record_failure_mask, as_tuple=False).squeeze(-1)
         self.sampler.record_failures(record_env_ids)
-        self._log_tracking_quality(quality, terminate, time_out, record_env_ids)
+        self._log_tracking_quality(quality, terminate, time_out, record_env_ids, fall_guard)
         return terminate, time_out
+
+    def _evaluate_fall_guard(self, context) -> FallGuardResult:
+        robust_tracking = getattr(self.cfg, "robust_tracking", None)
+        fall_guard_cfg = getattr(robust_tracking, "fall_guard", None)
+        fall_guard_enabled = fall_guard_cfg is not None and getattr(fall_guard_cfg, "enabled", False)
+        if not fall_guard_enabled:
+            episode_length_buf = getattr(context, "episode_length_buf", None)
+            if episode_length_buf is None:
+                episode_length_buf = self.episode_length_buf
+            zeros = torch.zeros_like(episode_length_buf, dtype=torch.float32)
+            return FallGuardResult(
+                fall_mask=torch.zeros_like(episode_length_buf, dtype=torch.bool),
+                anchor_height_drop=zeros,
+                projected_gravity_error=zeros,
+            )
+
+        anchor_body_index = self.anchor_body_index
+        robot_anchor_pos = context.robot.data.body_pos_w[:, anchor_body_index]
+        reference_anchor_pos = context.reference_motion.body_positions[:, anchor_body_index]
+        anchor_height_drop = reference_anchor_pos[:, 2] - robot_anchor_pos[:, 2]
+
+        robot_anchor_quat = context.robot.data.body_quat_w[:, anchor_body_index]
+        reference_anchor_quat = context.reference_motion.body_quaternions[:, anchor_body_index]
+        robot_projected_gravity = quat_apply_inverse(robot_anchor_quat, context.robot.data.GRAVITY_VEC_W)
+        reference_projected_gravity = quat_apply_inverse(reference_anchor_quat, context.robot.data.GRAVITY_VEC_W)
+        projected_gravity_error = torch.abs(robot_projected_gravity[:, 2] - reference_projected_gravity[:, 2])
+
+        fall_mask = (anchor_height_drop > float(fall_guard_cfg.max_anchor_height_drop)) & (
+            projected_gravity_error > float(fall_guard_cfg.max_projected_gravity_error)
+        )
+        return FallGuardResult(
+            fall_mask=fall_mask,
+            anchor_height_drop=anchor_height_drop,
+            projected_gravity_error=projected_gravity_error,
+        )
 
     def _log_tracking_quality(
         self,
@@ -447,6 +490,7 @@ class MotionTrackingEnv(DirectRLEnv):
         terminate: torch.Tensor,
         time_out: torch.Tensor,
         recorded_env_ids: torch.Tensor,
+        fall_guard: FallGuardResult | None = None,
     ) -> None:
         score = quality.score.detach()
         self.extras["tracking_quality/score_mean"] = score.mean()
@@ -455,7 +499,12 @@ class MotionTrackingEnv(DirectRLEnv):
         cfg = self.tracking_quality_gate.cfg if self.tracking_quality_gate is not None else None
         if cfg is None or cfg.log_quality_counts:
             self.extras["tracking_quality/ok_rate"] = (
-                ~(quality.soft_violation_mask | quality.recovery_needed_mask | quality.hard_tracking_failure_mask)
+                ~(
+                    quality.soft_violation_mask
+                    | quality.recovery_needed_mask
+                    | quality.hard_tracking_failure_mask
+                    | quality.recovery_timeout_mask
+                )
             ).to(dtype=torch.float32).mean()
             self.extras["tracking_quality/soft_violation_rate"] = quality.soft_violation_mask.to(
                 dtype=torch.float32
@@ -466,6 +515,9 @@ class MotionTrackingEnv(DirectRLEnv):
             self.extras["tracking_quality/hard_tracking_failure_rate"] = quality.hard_tracking_failure_mask.to(
                 dtype=torch.float32
             ).mean()
+            self.extras["tracking_quality/recovery_timeout_rate"] = quality.recovery_timeout_mask.to(
+                dtype=torch.float32
+            ).mean()
 
         if cfg is None or cfg.log_per_rule_errors:
             for rule_id, error in quality.per_rule_errors.items():
@@ -473,6 +525,10 @@ class MotionTrackingEnv(DirectRLEnv):
 
         self.extras["termination/hard_terminate_rate"] = terminate.to(dtype=torch.float32).mean()
         self.extras["termination/time_out_rate"] = time_out.to(dtype=torch.float32).mean()
+        if fall_guard is not None:
+            self.extras["termination/fall_guard_rate"] = fall_guard.fall_mask.to(dtype=torch.float32).mean()
+            self.extras["fall_guard/anchor_height_drop_mean"] = fall_guard.anchor_height_drop.detach().mean()
+            self.extras["fall_guard/projected_gravity_error_mean"] = fall_guard.projected_gravity_error.detach().mean()
         self.extras["sampler/recorded_recovery_failure_count"] = torch.as_tensor(
             recorded_env_ids.numel(),
             device=score.device,

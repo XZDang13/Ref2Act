@@ -48,6 +48,7 @@ class MotionSampler:
         failure_decay: float = 1.0,
         failure_weight_uniform_mix: float = 0.1,
         failure_weight_max_uniform_ratio: float | None = 2.5,
+        failure_weight_exploration_bonus: float = 0.5,
         segment_source: SegmentSource = SegmentSource.Time,
         device: torch.device = torch.device("cpu"),
     ) -> None:
@@ -70,6 +71,10 @@ class MotionSampler:
             if not math.isfinite(resolved_max_uniform_ratio) or resolved_max_uniform_ratio < 1.0:
                 raise ValueError("failure_weight_max_uniform_ratio must be None or a finite float >= 1.")
             self.failure_weight_max_uniform_ratio = resolved_max_uniform_ratio
+        resolved_exploration_bonus = float(failure_weight_exploration_bonus)
+        if not math.isfinite(resolved_exploration_bonus) or resolved_exploration_bonus < 0.0:
+            raise ValueError("failure_weight_exploration_bonus must be a finite float >= 0.")
+        self.failure_weight_exploration_bonus = resolved_exploration_bonus
 
         self.current_motion_ids = torch.zeros(num_envs, dtype=torch.long, device=self.device)
         self.current_times = torch.zeros(num_envs, device=self.device)
@@ -144,8 +149,19 @@ class MotionSampler:
             raise ValueError("eligible_mask must include at least one entry.")
         uniform_probs = uniform_probs / uniform_sum
 
+        eligible_sample_counts = torch.where(
+            eligible,
+            torch.clamp(sample_counts, min=0.0),
+            torch.zeros_like(sample_counts),
+        )
+        eligible_count = torch.sum(eligible.to(dtype=torch.float32))
+        total_eligible_samples = torch.sum(eligible_sample_counts)
+        exploration_scale = torch.log(total_eligible_samples + eligible_count + 1.0)
+        exploration = torch.sqrt(exploration_scale / (eligible_sample_counts + 1.0))
+
         fail_rate = fail_counts / torch.clamp(sample_counts, min=1.0)
-        learned_weights = fail_rate.pow(1.0 / temperature)
+        score = fail_rate + self.failure_weight_exploration_bonus * exploration
+        learned_weights = score.pow(1.0 / temperature)
         learned_weights = torch.where(eligible, learned_weights, torch.zeros_like(learned_weights))
 
         learned_sum = torch.sum(learned_weights)

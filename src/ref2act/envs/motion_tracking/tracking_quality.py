@@ -24,6 +24,7 @@ class TrackingQualityGateCfg:
     recovery_exit_threshold: float = 1.2
     hard_tracking_threshold: float | None = None
     min_recovery_steps: int = 10
+    max_recovery_steps: int | None = 150
     min_soft_violation_steps: int = 1
     record_soft_violations: bool = False
     record_recovery_needed: bool = True
@@ -46,6 +47,8 @@ class TrackingQualityGateCfg:
             raise ValueError("hard_tracking_threshold must be non-negative when configured.")
         if self.min_recovery_steps < 0:
             raise ValueError("min_recovery_steps must be non-negative.")
+        if self.max_recovery_steps is not None and self.max_recovery_steps < 1:
+            raise ValueError("max_recovery_steps must be >= 1 when configured.")
         if self.min_soft_violation_steps < 1:
             raise ValueError("min_soft_violation_steps must be >= 1.")
         if self.aggregation not in {"max", "weighted_sum"}:
@@ -60,9 +63,30 @@ class TrackingQualityGateCfg:
 
 
 @dataclass(frozen=True)
+class FallGuardCfg:
+    enabled: bool = True
+    max_anchor_height_drop: float = 0.35
+    max_projected_gravity_error: float = 0.6
+
+    def __post_init__(self) -> None:
+        if self.max_anchor_height_drop < 0.0:
+            raise ValueError("max_anchor_height_drop must be non-negative.")
+        if self.max_projected_gravity_error < 0.0:
+            raise ValueError("max_projected_gravity_error must be non-negative.")
+
+
+@dataclass(frozen=True)
 class RobustTrackingCfg:
     enabled: bool = False
     quality_gate: TrackingQualityGateCfg = field(default_factory=TrackingQualityGateCfg)
+    fall_guard: FallGuardCfg = field(default_factory=FallGuardCfg)
+
+
+@dataclass(frozen=True)
+class FallGuardResult:
+    fall_mask: torch.Tensor
+    anchor_height_drop: torch.Tensor
+    projected_gravity_error: torch.Tensor
 
 
 @dataclass(frozen=True)
@@ -73,6 +97,7 @@ class TrackingQualityResult:
     soft_violation_mask: torch.Tensor
     recovery_needed_mask: torch.Tensor
     hard_tracking_failure_mask: torch.Tensor
+    recovery_timeout_mask: torch.Tensor
     record_failure_mask: torch.Tensor
     per_rule_errors: dict[str, torch.Tensor]
     per_rule_normalized_errors: dict[str, torch.Tensor]
@@ -158,9 +183,17 @@ class TrackingQualityGate:
         state[recovery_needed] = int(TrackingQuality.RECOVERY_NEEDED)
         state[hard_tracking] = int(TrackingQuality.HARD_TRACKING_FAILURE)
 
+        next_recovery_needed_steps = torch.where(
+            recovery_needed,
+            self.recovery_needed_steps + 1,
+            torch.zeros_like(self.recovery_needed_steps),
+        )
+        recovery_timeout = torch.zeros_like(recovery_needed)
+        if self.cfg.max_recovery_steps is not None:
+            recovery_timeout = recovery_needed & (next_recovery_needed_steps >= self.cfg.max_recovery_steps)
+
         self.state[:] = state
-        self.recovery_needed_steps[recovery_needed] += 1
-        self.recovery_needed_steps[~recovery_needed] = 0
+        self.recovery_needed_steps[:] = next_recovery_needed_steps
         self.score[:] = score
         self.has_score[:] = True
 
@@ -168,6 +201,7 @@ class TrackingQualityGate:
             (soft_violation & self.cfg.record_soft_violations)
             | (recovery_needed & self.cfg.record_recovery_needed)
             | (hard_tracking & self.cfg.record_hard_tracking_failures)
+            | recovery_timeout
         )
 
         return TrackingQualityResult(
@@ -177,6 +211,7 @@ class TrackingQualityGate:
             soft_violation_mask=soft_violation,
             recovery_needed_mask=recovery_needed,
             hard_tracking_failure_mask=hard_tracking,
+            recovery_timeout_mask=recovery_timeout,
             record_failure_mask=record_failure,
             per_rule_errors=per_rule_errors,
             per_rule_normalized_errors=per_rule_normalized_errors,

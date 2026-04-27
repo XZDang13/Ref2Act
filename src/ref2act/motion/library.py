@@ -158,6 +158,8 @@ class MotionLib:
         self.motion_anchor_times = [clip.anchor_times for clip in self.clips]
         self.all_clips_have_segments = bool(torch.all(self.motion_has_segments).item())
         self.all_clips_have_anchor_segments = bool(torch.all(self.motion_has_anchor_segments).item())
+        self._packed_sampling_tensors: dict[str, torch.Tensor] = {}
+        self._packed_sampling_enabled = self._build_packed_sampling_tensors()
         print(
             f"motion data loaded: {self.num_motions} clip(s), "
             f"durations={[round(float(duration), 3) for duration in self.motion_durations.tolist()]} s"
@@ -371,6 +373,36 @@ class MotionLib:
         if torch.any(motion_ids < 0) or torch.any(motion_ids >= self.num_motions):
             raise IndexError("motion_ids contain values outside the loaded motion clip range.")
 
+    def _build_packed_sampling_tensors(self) -> bool:
+        sample_fields = {
+            "joint_pos": "joint_pos",
+            "joint_vel": "joint_vel",
+            "body_positions": "body_positions",
+            "body_quaternions": "body_quaternions",
+            "body_linear_velocities": "body_linear_velocities",
+            "body_angular_velocities": "body_angular_velocities",
+        }
+
+        reference_device = self.clips[0].joint_pos.device
+        packed_tensors: dict[str, torch.Tensor] = {}
+        max_num_frames = int(self.motion_num_frames.max().item())
+
+        for output_name, clip_attribute in sample_fields.items():
+            clip_tensors = [getattr(clip, clip_attribute) for clip in self.clips]
+            reference_shape = clip_tensors[0].shape[1:]
+            if any(tensor.device != reference_device or tensor.shape[1:] != reference_shape for tensor in clip_tensors):
+                self._packed_sampling_tensors = {}
+                return False
+
+            packed_shape = (self.num_motions, max_num_frames, *reference_shape)
+            packed = torch.empty(packed_shape, dtype=torch.float32, device=self.device)
+            for motion_id, tensor in enumerate(clip_tensors):
+                packed[motion_id, : tensor.shape[0]] = tensor
+            packed_tensors[output_name] = packed
+
+        self._packed_sampling_tensors = packed_tensors
+        return True
+
     def _sample_clip(
         self,
         clip: MotionClip,
@@ -420,22 +452,12 @@ class MotionLib:
             "body_angular_velocities": body_angular_velocities,
         }
 
-    def sample_motion(
+    def _sample_motion_grouped(
         self,
         motion_ids: torch.Tensor,
         times: torch.Tensor,
         position_offsets: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
-        motion_ids = torch.as_tensor(motion_ids, dtype=torch.long, device=self.device).reshape(-1)
-        times = torch.as_tensor(times, dtype=torch.float32, device=self.device).reshape(-1)
-        if motion_ids.shape != times.shape:
-            raise ValueError("motion_ids and times must have the same batch shape.")
-        if position_offsets is not None:
-            position_offsets = torch.as_tensor(position_offsets, dtype=torch.float32, device=self.device)
-            if position_offsets.shape[0] != times.shape[0]:
-                raise ValueError("position_offsets must have the same batch size as motion_ids and times.")
-        self._validate_motion_ids(motion_ids)
-
         batch_size = motion_ids.shape[0]
         template_clip = self.clips[0]
         motions = {
@@ -475,6 +497,102 @@ class MotionLib:
                 motions[key][group_mask] = value
 
         return motions
+
+    @staticmethod
+    def _interpolate_packed_frames(
+        values: torch.Tensor,
+        motion_ids: torch.Tensor,
+        index_0: torch.Tensor,
+        index_1: torch.Tensor,
+        blend: torch.Tensor,
+    ) -> torch.Tensor:
+        return interpolate(values[motion_ids, index_0], b=values[motion_ids, index_1], blend=blend)
+
+    def _sample_motion_packed(
+        self,
+        motion_ids: torch.Tensor,
+        times: torch.Tensor,
+        position_offsets: torch.Tensor | None = None,
+    ) -> dict[str, torch.Tensor]:
+        frame = times * self.motion_fps[motion_ids]
+        max_frame = self.motion_num_frames[motion_ids].to(dtype=torch.float32) - 1.0
+        frame = torch.minimum(torch.clamp(frame, min=0.0), max_frame)
+        index_0 = torch.floor(frame).long()
+        index_1 = torch.minimum(index_0 + 1, self.motion_num_frames[motion_ids] - 1)
+        blend = frame - index_0.to(dtype=frame.dtype)
+
+        packed = self._packed_sampling_tensors
+        joint_pos = self._interpolate_packed_frames(packed["joint_pos"], motion_ids, index_0, index_1, blend)
+        joint_vel = self._interpolate_packed_frames(packed["joint_vel"], motion_ids, index_0, index_1, blend)
+        body_positions = self._interpolate_packed_frames(
+            packed["body_positions"],
+            motion_ids,
+            index_0,
+            index_1,
+            blend,
+        )
+
+        if position_offsets is not None:
+            if position_offsets.ndim == 2:
+                position_offsets = position_offsets.unsqueeze(1)
+            body_positions = body_positions + position_offsets
+
+        body_quaternions = slerp(
+            packed["body_quaternions"][motion_ids, index_0],
+            q1=packed["body_quaternions"][motion_ids, index_1],
+            blend=blend,
+        )
+        body_linear_velocities = self._interpolate_packed_frames(
+            packed["body_linear_velocities"],
+            motion_ids,
+            index_0,
+            index_1,
+            blend,
+        )
+        body_angular_velocities = self._interpolate_packed_frames(
+            packed["body_angular_velocities"],
+            motion_ids,
+            index_0,
+            index_1,
+            blend,
+        )
+
+        return {
+            "joint_pos": joint_pos,
+            "joint_vel": joint_vel,
+            "body_positions": body_positions,
+            "body_quaternions": body_quaternions,
+            "body_linear_velocities": body_linear_velocities,
+            "body_angular_velocities": body_angular_velocities,
+        }
+
+    def sample_motion(
+        self,
+        motion_ids: torch.Tensor,
+        times: torch.Tensor,
+        position_offsets: torch.Tensor | None = None,
+    ) -> dict[str, torch.Tensor]:
+        motion_ids = torch.as_tensor(motion_ids, dtype=torch.long, device=self.device).reshape(-1)
+        times = torch.as_tensor(times, dtype=torch.float32, device=self.device).reshape(-1)
+        if motion_ids.shape != times.shape:
+            raise ValueError("motion_ids and times must have the same batch shape.")
+        if position_offsets is not None:
+            position_offsets = torch.as_tensor(position_offsets, dtype=torch.float32, device=self.device)
+            if position_offsets.shape[0] != times.shape[0]:
+                raise ValueError("position_offsets must have the same batch size as motion_ids and times.")
+        self._validate_motion_ids(motion_ids)
+
+        if self._packed_sampling_enabled:
+            return self._sample_motion_packed(
+                motion_ids=motion_ids,
+                times=times,
+                position_offsets=position_offsets,
+            )
+        return self._sample_motion_grouped(
+            motion_ids=motion_ids,
+            times=times,
+            position_offsets=position_offsets,
+        )
     
 class MotionViewer:
     """

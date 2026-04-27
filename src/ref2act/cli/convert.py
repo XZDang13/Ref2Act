@@ -21,6 +21,30 @@ from ref2act.motion.smoothing import DEFAULT_SMOOTHING_PROFILE, SMOOTHING_PROFIL
 
 SEGMENT_METHOD_TIME = "time"
 SEGMENT_METHOD_ANCHOR = "anchor"
+DEFAULT_SPLIT_MAX_DURATION = 10.0
+DEFAULT_SPLIT_MIN_DURATION = 2.0
+_FRAME_ALIGNED_KEYS = {
+    "joint_pos",
+    "joint_vel",
+    "body_pos_w",
+    "body_quat_w",
+    "body_lin_vel_w",
+    "body_ang_vel_w",
+    "anchor_frame_labels",
+}
+_SEGMENT_TIME_GROUPS = (
+    ("segment_start_times", "segment_end_times", "segment_types"),
+    ("anchor_segment_start_times", "anchor_segment_end_times", "anchor_segment_labels"),
+)
+_ANCHOR_ALIGNED_KEYS = {
+    "anchor_frame_indices",
+    "anchor_times",
+    "anchor_scores",
+    "anchor_support_modes",
+    "anchor_energy_norm",
+    "anchor_pose_extreme",
+    "anchor_torso_tilt_deg",
+}
 
 
 @dataclass(frozen=True)
@@ -33,9 +57,14 @@ class ConversionOptions:
     smooth_motion: bool
     smoothing_profile: str
     target_fps: int | None
+    split_by_anchors: bool
+    split_max_duration: float
+    split_min_duration: float
 
     @classmethod
     def from_args(cls, args: argparse.Namespace) -> "ConversionOptions":
+        if args.split_min_duration >= args.split_max_duration:
+            raise ValueError("--split-min-duration must be less than --split-max-duration")
         return cls(
             device=args.device,
             height_offset=args.height_offset,
@@ -45,6 +74,9 @@ class ConversionOptions:
             smooth_motion=args.smooth_motion,
             smoothing_profile=args.smoothing_profile,
             target_fps=args.target_fps,
+            split_by_anchors=args.split_by_anchors,
+            split_max_duration=args.split_max_duration,
+            split_min_duration=args.split_min_duration,
         )
 
 
@@ -69,6 +101,13 @@ def _positive_int(value: str) -> int:
     parsed = int(value)
     if parsed < 1:
         raise argparse.ArgumentTypeError("value must be at least 1")
+    return parsed
+
+
+def _positive_float(value: str) -> float:
+    parsed = float(value)
+    if parsed <= 0.0:
+        raise argparse.ArgumentTypeError("value must be > 0")
     return parsed
 
 
@@ -115,6 +154,23 @@ def add_conversion_arguments(parser: argparse.ArgumentParser) -> None:
         type=_positive_int,
         default=None,
         help="Resample the exported motion clip to this output frequency in Hz. Defaults to the source fps.",
+    )
+    parser.add_argument(
+        "--split-by-anchors",
+        action="store_true",
+        help="Split long exported clips at anchor frames instead of writing one full-length clip.",
+    )
+    parser.add_argument(
+        "--split-max-duration",
+        type=_positive_float,
+        default=DEFAULT_SPLIT_MAX_DURATION,
+        help="Maximum target duration in seconds for anchor-split clips.",
+    )
+    parser.add_argument(
+        "--split-min-duration",
+        type=_positive_float,
+        default=DEFAULT_SPLIT_MIN_DURATION,
+        help="Minimum allowed duration in seconds for anchor-split clips.",
     )
 
 
@@ -543,6 +599,221 @@ def _capture_motion_frame(robot, slot: _MotionConversionState, foot_body_indices
     slot.log["body_ang_vel_w"].append(robot.data.body_ang_vel_w[env_id, :].cpu().numpy().copy())
 
 
+def _validate_split_durations(max_duration: float, min_duration: float) -> None:
+    if max_duration <= 0.0:
+        raise ValueError("split max duration must be > 0.")
+    if min_duration <= 0.0:
+        raise ValueError("split min duration must be > 0.")
+    if min_duration >= max_duration:
+        raise ValueError("split min duration must be less than split max duration.")
+
+
+def _motion_frame_count_and_fps(log: dict[str, object]) -> tuple[int, float]:
+    joint_pos = np.asarray(log["joint_pos"])
+    if joint_pos.ndim < 1 or joint_pos.shape[0] < 1:
+        raise ValueError("Converted motion log must contain at least one frame.")
+    fps = float(np.asarray(log["fps"]).item())
+    if fps <= 0.0:
+        raise ValueError("Converted motion log must contain a positive fps.")
+    return int(joint_pos.shape[0]), fps
+
+
+def _anchor_split_chunks(
+    log: dict[str, object],
+    *,
+    max_duration: float,
+    min_duration: float,
+) -> list[tuple[int, int]]:
+    _validate_split_durations(max_duration, min_duration)
+    num_frames, fps = _motion_frame_count_and_fps(log)
+    duration = float(num_frames) / fps
+    tolerance = 1.0e-6
+    if duration <= max_duration + tolerance:
+        return [(0, num_frames)]
+    if "anchor_frame_indices" not in log:
+        raise ValueError("Anchor-based splitting requires anchor_frame_indices metadata.")
+
+    anchor_indices = np.asarray(log["anchor_frame_indices"], dtype=np.int64).reshape(-1)
+    if np.any(anchor_indices < 0) or np.any(anchor_indices >= num_frames):
+        raise ValueError("anchor_frame_indices contain values outside the clip frame range.")
+    candidate_anchors = np.unique(anchor_indices[(anchor_indices > 0) & (anchor_indices < num_frames)])
+    if candidate_anchors.size == 0:
+        raise ValueError("Anchor-based splitting requires at least one future anchor frame.")
+
+    boundaries = [0]
+    start_frame = 0
+    while (num_frames - start_frame) / fps > max_duration + tolerance:
+        anchor_durations = (candidate_anchors - start_frame).astype(np.float64) / fps
+        future_mask = candidate_anchors > start_frame
+        in_window_mask = (
+            future_mask
+            & (anchor_durations + tolerance >= min_duration)
+            & (anchor_durations <= max_duration + tolerance)
+        )
+        if np.any(in_window_mask):
+            end_frame = int(candidate_anchors[in_window_mask][-1])
+        else:
+            after_min_mask = future_mask & (anchor_durations + tolerance >= min_duration)
+            if not np.any(after_min_mask):
+                start_time = start_frame / fps
+                raise ValueError(
+                    "Anchor-based splitting could not find an anchor at least "
+                    f"{min_duration:.3f}s after chunk start {start_time:.3f}s."
+                )
+            end_frame = int(candidate_anchors[after_min_mask][0])
+
+        if end_frame <= start_frame:
+            raise ValueError("Anchor-based splitting selected a non-advancing boundary.")
+        boundaries.append(end_frame)
+        start_frame = end_frame
+
+    boundaries.append(num_frames)
+    if len(boundaries) > 2:
+        final_duration = (boundaries[-1] - boundaries[-2]) / fps
+        if final_duration + tolerance < min_duration:
+            del boundaries[-2]
+
+    return list(zip(boundaries[:-1], boundaries[1:], strict=True))
+
+
+def _copy_log_value(value: object) -> object:
+    if isinstance(value, np.ndarray):
+        return value.copy()
+    if isinstance(value, list):
+        return list(value)
+    if isinstance(value, tuple):
+        return tuple(value)
+    return value
+
+
+def _clip_time_segments(
+    log: dict[str, object],
+    *,
+    start_key: str,
+    end_key: str,
+    value_key: str,
+    start_time: float,
+    end_time: float,
+) -> dict[str, np.ndarray]:
+    present = [key in log for key in (start_key, end_key, value_key)]
+    if not any(present):
+        return {}
+    if not all(present):
+        raise ValueError(
+            f"Motion log is missing part of the segment metadata: {start_key}, {end_key}, {value_key}."
+        )
+
+    starts = np.asarray(log[start_key], dtype=np.float64).reshape(-1)
+    ends = np.asarray(log[end_key], dtype=np.float64).reshape(-1)
+    values = np.asarray(log[value_key]).reshape(-1)
+    if starts.shape != ends.shape or starts.shape != values.shape:
+        raise ValueError(f"{start_key}, {end_key}, and {value_key} must have matching shapes.")
+
+    overlap_starts = np.maximum(starts, start_time)
+    overlap_ends = np.minimum(ends, end_time)
+    mask = overlap_ends > overlap_starts + 1.0e-7
+    if not np.any(mask):
+        raise ValueError(f"No {start_key}/{end_key} metadata overlaps the split chunk.")
+
+    shifted_starts = (overlap_starts[mask] - start_time).astype(np.float32)
+    shifted_ends = (overlap_ends[mask] - start_time).astype(np.float32)
+    shifted_starts[0] = np.float32(0.0)
+    shifted_ends[-1] = np.float32(end_time - start_time)
+    return {
+        start_key: shifted_starts,
+        end_key: shifted_ends,
+        value_key: values[mask].copy(),
+    }
+
+
+def _slice_motion_log_by_frames(log: dict[str, object], start_frame: int, end_frame: int) -> dict[str, object]:
+    num_frames, fps = _motion_frame_count_and_fps(log)
+    if start_frame < 0 or end_frame > num_frames or start_frame >= end_frame:
+        raise ValueError("Invalid split frame range.")
+
+    start_time = float(start_frame) / fps
+    end_time = float(end_frame) / fps
+    segment_keys = {key for group in _SEGMENT_TIME_GROUPS for key in group}
+    special_keys = _FRAME_ALIGNED_KEYS | _ANCHOR_ALIGNED_KEYS | segment_keys
+    chunk: dict[str, object] = {}
+
+    for key, value in log.items():
+        if key in special_keys:
+            continue
+        chunk[key] = _copy_log_value(value)
+
+    for key in _FRAME_ALIGNED_KEYS:
+        if key not in log:
+            continue
+        values = np.asarray(log[key])
+        if values.shape[0] != num_frames:
+            raise ValueError(f"{key} must have one entry per motion frame.")
+        chunk[key] = values[start_frame:end_frame].copy()
+
+    for start_key, end_key, value_key in _SEGMENT_TIME_GROUPS:
+        chunk.update(
+            _clip_time_segments(
+                log,
+                start_key=start_key,
+                end_key=end_key,
+                value_key=value_key,
+                start_time=start_time,
+                end_time=end_time,
+            )
+        )
+
+    if "anchor_frame_indices" in log:
+        anchor_indices = np.asarray(log["anchor_frame_indices"], dtype=np.int64).reshape(-1)
+        anchor_mask = (anchor_indices >= start_frame) & (anchor_indices < end_frame)
+        chunk["anchor_frame_indices"] = (anchor_indices[anchor_mask] - start_frame).astype(np.int64, copy=False)
+
+        if "anchor_times" not in log:
+            raise ValueError("Motion log with anchor_frame_indices must also contain anchor_times.")
+        anchor_times = np.asarray(log["anchor_times"], dtype=np.float32).reshape(-1)
+        if anchor_times.shape != anchor_indices.shape:
+            raise ValueError("anchor_frame_indices and anchor_times must have matching shapes.")
+        chunk["anchor_times"] = (anchor_times[anchor_mask] - np.float32(start_time)).astype(np.float32, copy=False)
+
+        for key in sorted(_ANCHOR_ALIGNED_KEYS - {"anchor_frame_indices", "anchor_times"}):
+            if key not in log:
+                continue
+            values = np.asarray(log[key])
+            if values.shape[0] != anchor_indices.shape[0]:
+                raise ValueError(f"{key} must have one entry per selected anchor.")
+            chunk[key] = values[anchor_mask].copy()
+
+    return chunk
+
+
+def _split_part_output_file(output_file: Path, part_index: int) -> Path:
+    suffix = output_file.suffix or ".npz"
+    return output_file.with_name(f"{output_file.stem}_{part_index:03d}{suffix}")
+
+
+def split_motion_log_by_anchors(
+    log: dict[str, object],
+    output_file: str | Path,
+    *,
+    max_duration: float = DEFAULT_SPLIT_MAX_DURATION,
+    min_duration: float = DEFAULT_SPLIT_MIN_DURATION,
+) -> list[Path]:
+    output_path = Path(output_file)
+    chunks = _anchor_split_chunks(log, max_duration=max_duration, min_duration=min_duration)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if len(chunks) == 1:
+        np.savez(output_path, **log)
+        return [output_path]
+
+    written_files: list[Path] = []
+    for part_index, (start_frame, end_frame) in enumerate(chunks):
+        part_log = _slice_motion_log_by_frames(log, start_frame, end_frame)
+        part_file = _split_part_output_file(output_path, part_index)
+        np.savez(part_file, **part_log)
+        written_files.append(part_file)
+    return written_files
+
+
 def _finalize_motion_slot(
     slot: _MotionConversionState,
     *,
@@ -550,6 +821,9 @@ def _finalize_motion_slot(
     airborne_height_threshold: float,
     segment_method: Literal["time", "anchor"],
     target_fps: int | None,
+    split_by_anchors: bool = False,
+    split_max_duration: float = DEFAULT_SPLIT_MAX_DURATION,
+    split_min_duration: float = DEFAULT_SPLIT_MIN_DURATION,
 ) -> None:
     for key in (
         "joint_pos",
@@ -593,7 +867,7 @@ def _finalize_motion_slot(
     slot.log["segment_start_times"] = segment_start_times
     slot.log["segment_end_times"] = segment_end_times
     slot.log["segment_types"] = segment_types
-    if segment_method == SEGMENT_METHOD_ANCHOR:
+    if segment_method == SEGMENT_METHOD_ANCHOR or split_by_anchors:
         anchor_diagnostics = build_anchor_selection_diagnostics(
             slot.log,
             airborne_height_margin=airborne_height_threshold,
@@ -609,9 +883,24 @@ def _finalize_motion_slot(
             f"for {slot.input_file}"
         )
 
-    slot.output_file.parent.mkdir(parents=True, exist_ok=True)
-    np.savez(slot.output_file, **slot.log)
-    print("[INFO]: Motion npz file saved to", slot.output_file)
+    if split_by_anchors:
+        written_files = split_motion_log_by_anchors(
+            slot.log,
+            slot.output_file,
+            max_duration=split_max_duration,
+            min_duration=split_min_duration,
+        )
+        if len(written_files) > 1:
+            print(
+                f"[INFO]: Anchor split wrote {len(written_files)} motion npz files "
+                f"from {slot.input_file}: {', '.join(str(path) for path in written_files)}"
+            )
+        else:
+            print("[INFO]: Motion npz file saved to", written_files[0])
+    else:
+        slot.output_file.parent.mkdir(parents=True, exist_ok=True)
+        np.savez(slot.output_file, **slot.log)
+        print("[INFO]: Motion npz file saved to", slot.output_file)
 
 
 def _run_motion_chunk(
@@ -624,6 +913,9 @@ def _run_motion_chunk(
     airborne_height_threshold: float,
     segment_method: Literal["time", "anchor"],
     target_fps: int | None,
+    split_by_anchors: bool,
+    split_max_duration: float,
+    split_min_duration: float,
     camera_follow: bool,
 ) -> tuple[list[ConversionFailure], bool]:
     robot = scene["robot"]
@@ -688,6 +980,9 @@ def _run_motion_chunk(
                             airborne_height_threshold=airborne_height_threshold,
                             segment_method=segment_method,
                             target_fps=target_fps,
+                            split_by_anchors=split_by_anchors,
+                            split_max_duration=split_max_duration,
+                            split_min_duration=split_min_duration,
                         )
                     except Exception as exc:
                         failures.append(
@@ -784,6 +1079,9 @@ def convert_motion_files(
         airborne_height_threshold=options.airborne_height_threshold,
         segment_method=options.segment_method,
         target_fps=options.target_fps,
+        split_by_anchors=options.split_by_anchors,
+        split_max_duration=options.split_max_duration,
+        split_min_duration=options.split_min_duration,
         camera_follow=camera_follow,
     )
     failures.extend(chunk_failures)

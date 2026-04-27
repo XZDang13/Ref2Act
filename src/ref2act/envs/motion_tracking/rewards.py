@@ -336,6 +336,15 @@ class TrackingProgressRewardTermCfg(RewardTermCfg):
 
 
 @dataclass(frozen=True)
+class TrackingRecoveryPenaltyTermCfg(RewardTermCfg):
+    id: str = "tracking_recovery_penalty"
+    type: str = "tracking_recovery_penalty"
+    weight: float = -0.25
+    soft_threshold: float = 1.0
+    recovery_enter_threshold: float = 1.8
+
+
+@dataclass(frozen=True)
 class RewardSpec:
     terms: tuple[RewardTermCfg, ...]
     dt: float
@@ -1105,6 +1114,19 @@ class TrackingProgressRewardTerm:
         )
 
 
+class TrackingRecoveryPenaltyTerm:
+    type_name = "tracking_recovery_penalty"
+
+    def compute(self, context: RewardContext, spec: TrackingRecoveryPenaltyTermCfg) -> RewardTermResult:
+        if context.tracking_quality is None:
+            raw = context._zeros()
+            return _weighted_result(raw, spec.weight, metrics={"gate": raw, "score": raw})
+
+        score = context.tracking_quality.score
+        raw = _smoothstep(spec.soft_threshold, spec.recovery_enter_threshold, score)
+        return _weighted_result(raw, spec.weight, metrics={"gate": raw, "score": score})
+
+
 REWARD_TERM_REGISTRY: dict[str, RewardTerm] = {
     term.type_name: term
     for term in (
@@ -1136,6 +1158,7 @@ REWARD_TERM_REGISTRY: dict[str, RewardTerm] = {
         MultiScaleEndEffectorPositionRewardTerm(),
         MultiScaleEndEffectorVelocityRewardTerm(),
         TrackingProgressRewardTerm(),
+        TrackingRecoveryPenaltyTerm(),
     )
 }
 
@@ -1177,6 +1200,7 @@ def robust_tracking_reward_spec(*, dt: float, include_com_terms: bool = False) -
         MultiScaleEndEffectorPositionRewardTermCfg(),
         MultiScaleEndEffectorVelocityRewardTermCfg(),
         TrackingProgressRewardTermCfg(),
+        TrackingRecoveryPenaltyTermCfg(),
     )
     if include_com_terms:
         terms += (

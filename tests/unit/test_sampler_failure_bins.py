@@ -188,6 +188,7 @@ def test_sampler_failure_weighted_sampling_stays_inside_segment_bounds(tmp_path:
         bin_size=0.2,
         failure_weight_uniform_mix=0.0,
         failure_weight_max_uniform_ratio=None,
+        failure_weight_exploration_bonus=0.0,
         device=torch.device("cpu"),
     )
 
@@ -272,6 +273,39 @@ def test_failure_weighted_motion_selection_guard_keeps_all_motions_live(tmp_path
     assert counts[1] > 200
 
 
+def test_failure_weighted_motion_selection_explores_unvisited_motion(tmp_path: Path) -> None:
+    motion_a = tmp_path / "motion_a.npz"
+    motion_b = tmp_path / "motion_b.npz"
+    for motion_file in (motion_a, motion_b):
+        _write_motion_file(
+            motion_file,
+            segment_start_times=np.asarray([0.0], dtype=np.float32),
+            segment_end_times=np.asarray([1.0], dtype=np.float32),
+            segment_types=np.asarray([SEGMENT_TYPE_TIME_BIN], dtype=np.int64),
+        )
+
+    motion_lib = MotionLib([motion_a, motion_b])
+    sampler_mod = _load_sampler_module()
+    sampler = sampler_mod.Sampler(
+        num_envs=4096,
+        motion_lib=motion_lib,
+        dt=0.05,
+        anchor_body_index=0,
+        failure_weight_uniform_mix=0.0,
+        failure_weight_max_uniform_ratio=None,
+        device=torch.device("cpu"),
+    )
+
+    sampler.bin_sample_counts[0][:] = torch.tensor([100.0])
+    sampler.bin_sample_counts[1][:] = torch.tensor([0.0])
+
+    torch.manual_seed(0)
+    motion_ids = sampler._sample_failure_weighted_motion_ids(torch.arange(4096))
+    counts = torch.bincount(motion_ids, minlength=2)
+
+    assert counts[1] > counts[0]
+
+
 def test_failure_weighted_motion_selection_probability_cap_limits_max_share(tmp_path: Path) -> None:
     motion_files = [tmp_path / f"motion_{motion_idx}.npz" for motion_idx in range(4)]
     for motion_file in motion_files:
@@ -306,6 +340,68 @@ def test_failure_weighted_motion_selection_probability_cap_limits_max_share(tmp_
     assert bool(torch.isclose(motion_probs.sum(), torch.tensor(1.0, dtype=torch.float32)).item())
     assert motion_probs[0] > motion_probs[1]
     assert float(motion_probs.max().item()) <= max_allowed_prob + 1.0e-6
+
+
+def test_failure_weighted_exploration_prefers_unvisited_bins_over_sampled_non_failures(tmp_path: Path) -> None:
+    motion_file = tmp_path / "segmented_motion.npz"
+    _write_motion_file(
+        motion_file,
+        segment_start_times=np.asarray([0.0, 0.5], dtype=np.float32),
+        segment_end_times=np.asarray([0.5, 1.0], dtype=np.float32),
+        segment_types=np.asarray([SEGMENT_TYPE_TIME_BIN, SEGMENT_TYPE_TIME_BIN], dtype=np.int64),
+    )
+    motion_lib = MotionLib([motion_file])
+    sampler_mod = _load_sampler_module()
+    sampler = sampler_mod.Sampler(
+        num_envs=1,
+        motion_lib=motion_lib,
+        dt=0.05,
+        anchor_body_index=0,
+        failure_weight_uniform_mix=0.0,
+        failure_weight_max_uniform_ratio=None,
+        device=torch.device("cpu"),
+    )
+
+    probs = sampler._build_guarded_sampling_probabilities(
+        torch.tensor([0.0, 0.0], dtype=torch.float32),
+        torch.tensor([0.0, 100.0], dtype=torch.float32),
+        temperature=1.0,
+    )
+
+    assert probs[0] > probs[1]
+    assert probs[0] > 0.75
+
+
+def test_failure_weighted_score_balances_failed_and_unvisited_bins(tmp_path: Path) -> None:
+    motion_file = tmp_path / "segmented_motion.npz"
+    _write_motion_file(
+        motion_file,
+        segment_start_times=np.asarray([0.0, 0.33, 0.66], dtype=np.float32),
+        segment_end_times=np.asarray([0.33, 0.66, 1.0], dtype=np.float32),
+        segment_types=np.asarray([SEGMENT_TYPE_TIME_BIN] * 3, dtype=np.int64),
+    )
+    motion_lib = MotionLib([motion_file])
+    sampler_mod = _load_sampler_module()
+    sampler = sampler_mod.Sampler(
+        num_envs=1,
+        motion_lib=motion_lib,
+        dt=0.05,
+        anchor_body_index=0,
+        failure_weight_uniform_mix=0.0,
+        failure_weight_max_uniform_ratio=None,
+        device=torch.device("cpu"),
+    )
+
+    probs = sampler._build_guarded_sampling_probabilities(
+        torch.tensor([3.0, 0.0, 0.0], dtype=torch.float32),
+        torch.tensor([3.0, 100.0, 0.0], dtype=torch.float32),
+        temperature=1.0,
+    )
+
+    assert probs[0] > 0.25
+    assert probs[2] > 0.25
+    assert probs[0] > probs[1]
+    assert probs[2] > probs[1]
 
 
 def test_failure_weighted_bin_guard_keeps_all_bins_live(tmp_path: Path) -> None:
@@ -533,6 +629,7 @@ def test_anchor_failure_weighted_sampling_uses_anchor_weights_and_reset_time(tmp
         anchor_body_index=0,
         failure_weight_uniform_mix=0.0,
         failure_weight_max_uniform_ratio=None,
+        failure_weight_exploration_bonus=0.0,
         segment_source=sampler_mod.SegmentSource.Anchor,
         device=torch.device("cpu"),
     )
@@ -728,5 +825,31 @@ def test_sampler_rejects_invalid_failure_weight_uniform_mix(tmp_path: Path, unif
             dt=0.05,
             anchor_body_index=0,
             failure_weight_uniform_mix=uniform_mix,
+            device=torch.device("cpu"),
+        )
+
+
+@pytest.mark.parametrize("exploration_bonus", [-0.1, float("inf")])
+def test_sampler_rejects_invalid_failure_weight_exploration_bonus(
+    tmp_path: Path,
+    exploration_bonus: float,
+) -> None:
+    motion_file = tmp_path / "segmented_motion.npz"
+    _write_motion_file(
+        motion_file,
+        segment_start_times=np.asarray([0.0, 0.5], dtype=np.float32),
+        segment_end_times=np.asarray([0.5, 1.0], dtype=np.float32),
+        segment_types=np.asarray([SEGMENT_TYPE_TIME_BIN, SEGMENT_TYPE_TIME_BIN], dtype=np.int64),
+    )
+    motion_lib = MotionLib([motion_file])
+    sampler_mod = _load_sampler_module()
+
+    with pytest.raises(ValueError, match="failure_weight_exploration_bonus"):
+        sampler_mod.Sampler(
+            num_envs=1,
+            motion_lib=motion_lib,
+            dt=0.05,
+            anchor_body_index=0,
+            failure_weight_exploration_bonus=exploration_bonus,
             device=torch.device("cpu"),
         )

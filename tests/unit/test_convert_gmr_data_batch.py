@@ -56,6 +56,9 @@ def test_batch_parser_includes_shared_conversion_defaults_and_num_agents() -> No
     assert batch_args.smooth_motion == single_args.smooth_motion
     assert batch_args.smoothing_profile == single_args.smoothing_profile
     assert batch_args.target_fps == single_args.target_fps
+    assert batch_args.split_by_anchors == single_args.split_by_anchors
+    assert batch_args.split_max_duration == single_args.split_max_duration
+    assert batch_args.split_min_duration == single_args.split_min_duration
     assert not hasattr(single_args, "num_agents")
 
 
@@ -81,6 +84,11 @@ def test_batch_parser_accepts_segment_smoothing_and_num_agents_flags() -> None:
             "strong",
             "--target-fps",
             "100",
+            "--split-by-anchors",
+            "--split-max-duration",
+            "12.0",
+            "--split-min-duration",
+            "3.0",
         ]
     )
 
@@ -92,6 +100,9 @@ def test_batch_parser_accepts_segment_smoothing_and_num_agents_flags() -> None:
     assert args.smooth_motion is True
     assert args.smoothing_profile == "strong"
     assert args.target_fps == 100
+    assert args.split_by_anchors is True
+    assert args.split_max_duration == 12.0
+    assert args.split_min_duration == 3.0
 
 
 def test_prepare_batch_jobs_skips_existing_outputs_before_scheduling(tmp_path: Path, capsys) -> None:
@@ -310,6 +321,11 @@ def test_main_uses_multi_agent_batch_converter_with_shared_options(monkeypatch) 
             "medium",
             "--target-fps",
             "50",
+            "--split-by-anchors",
+            "--split-max-duration",
+            "11.0",
+            "--split-min-duration",
+            "2.25",
         ]
     )
 
@@ -324,6 +340,9 @@ def test_main_uses_multi_agent_batch_converter_with_shared_options(monkeypatch) 
     assert options.smooth_motion is True
     assert options.smoothing_profile == "medium"
     assert options.target_fps == 50
+    assert options.split_by_anchors is True
+    assert options.split_max_duration == 11.0
+    assert options.split_min_duration == 2.25
     assert captured["resolver_device"] == options.device
     assert captured["resolver_num_agents"] == 4
     assert captured["runtime_fps"] == 30

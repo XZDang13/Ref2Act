@@ -140,6 +140,7 @@ def test_quality_gate_classifies_ok_soft_and_recovery_without_hard_termination()
         ),
     )
     assert torch.equal(result.hard_tracking_failure_mask, torch.tensor([False, False, False]))
+    assert torch.equal(result.recovery_timeout_mask, torch.tensor([False, False, False]))
     assert torch.equal(result.record_failure_mask, torch.tensor([False, False, True]))
 
 
@@ -212,6 +213,42 @@ def test_quality_gate_hard_threshold_is_optional() -> None:
     assert torch.equal(no_hard.hard_tracking_failure_mask, torch.tensor([False]))
     assert torch.equal(hard.hard_tracking_failure_mask, torch.tensor([True]))
     assert torch.equal(hard.record_failure_mask, torch.tensor([True]))
+
+
+def test_quality_gate_recovery_timeout_counts_current_recovery_step_and_resets() -> None:
+    termination_mod, quality_mod = _load_modules()
+    termination = termination_mod.Termination(
+        termination_mod.TerminationSpec(
+            timeout_rules=(),
+            failure_rules=(
+                termination_mod.AnchorPositionFailureRuleCfg(
+                    anchor_body_index=0,
+                    threshold=1.0,
+                    height_only=True,
+                ),
+            ),
+        )
+    )
+    gate = quality_mod.TrackingQualityGate(
+        quality_mod.TrackingQualityGateCfg(
+            enabled=True,
+            recovery_enter_threshold=1.8,
+            max_recovery_steps=2,
+        ),
+        termination,
+        num_envs=1,
+        device=torch.device("cpu"),
+    )
+
+    first = gate.evaluate(_make_context(termination_mod, [2.0]))
+    second = gate.evaluate(_make_context(termination_mod, [2.0]))
+    gate.reset(torch.tensor([0], dtype=torch.long))
+    after_reset = gate.evaluate(_make_context(termination_mod, [2.0]))
+
+    assert torch.equal(first.recovery_timeout_mask, torch.tensor([False]))
+    assert torch.equal(second.recovery_timeout_mask, torch.tensor([True]))
+    assert torch.equal(second.record_failure_mask, torch.tensor([True]))
+    assert torch.equal(after_reset.recovery_timeout_mask, torch.tensor([False]))
 
 
 def test_quality_gate_uses_current_rule_thresholds_for_scores() -> None:

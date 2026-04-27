@@ -3,11 +3,25 @@ import sys
 import types
 from enum import Enum
 
+import pytest
 import torch
 
 
 def _quat_apply(quat, vec):
     return vec.clone()
+
+
+def _quat_apply_inverse_real(quat: torch.Tensor, vec: torch.Tensor) -> torch.Tensor:
+    if vec.ndim == 1:
+        vec = vec.expand(quat.shape[:-1] + (3,))
+    elif vec.shape[:-1] != quat.shape[:-1]:
+        vec = torch.broadcast_to(vec, quat.shape[:-1] + (3,))
+
+    quat_conj = quat.clone()
+    quat_conj[..., 1:] = -quat_conj[..., 1:]
+    xyz = quat_conj[..., 1:]
+    t = 2.0 * torch.cross(xyz, vec, dim=-1)
+    return vec + quat_conj[..., :1] * t + torch.cross(xyz, t, dim=-1)
 
 
 def _quat_error_magnitude(q1, q2):
@@ -401,6 +415,7 @@ def test_get_dones_quality_gate_records_only_quality_failure_mask() -> None:
         soft_violation_mask=torch.tensor([False, False]),
         recovery_needed_mask=torch.tensor([False, True]),
         hard_tracking_failure_mask=torch.tensor([False, False]),
+        recovery_timeout_mask=torch.tensor([False, False]),
         record_failure_mask=torch.tensor([False, True]),
         per_rule_errors={"anchor_position_failure": torch.tensor([0.1, 0.4], dtype=torch.float32)},
         per_rule_normalized_errors={"anchor_position_failure": torch.tensor([0.5, 2.0], dtype=torch.float32)},
@@ -448,6 +463,144 @@ def test_get_dones_quality_gate_records_only_quality_failure_mask() -> None:
     assert torch.equal(tracked[0], torch.tensor([False, False]))
     assert env.extras["sampler/recorded_recovery_failure_count"].item() == 1.0
     assert env.extras["tracking_quality/recovery_needed_rate"].item() == 0.5
+    assert env.extras["tracking_quality/recovery_timeout_rate"].item() == 0.0
+
+
+def test_get_dones_quality_gate_terminates_on_recovery_timeout_and_fall_guard() -> None:
+    env_mod, _ = _load_motion_tracking_env_module()
+    env_mod.quat_apply_inverse = _quat_apply_inverse_real
+    env = object.__new__(env_mod.MotionTrackingEnv)
+
+    quality = env_mod.TrackingQualityResult(
+        state=torch.tensor([0, 2, 0], dtype=torch.long),
+        score=torch.tensor([0.5, 2.0, 0.5], dtype=torch.float32),
+        previous_score=torch.tensor([0.5, 2.0, 0.5], dtype=torch.float32),
+        soft_violation_mask=torch.tensor([False, False, False]),
+        recovery_needed_mask=torch.tensor([False, True, False]),
+        hard_tracking_failure_mask=torch.tensor([False, False, False]),
+        recovery_timeout_mask=torch.tensor([False, True, False]),
+        record_failure_mask=torch.tensor([False, True, False]),
+        per_rule_errors={},
+        per_rule_normalized_errors={},
+    )
+    robot = types.SimpleNamespace(
+        data=types.SimpleNamespace(
+            body_pos_w=torch.tensor([[[0.0, 0.0, 0.0]], [[0.0, 0.0, 1.0]], [[0.0, 0.0, 0.0]]]),
+            body_quat_w=torch.tensor(
+                [[[0.0, 1.0, 0.0, 0.0]], [[1.0, 0.0, 0.0, 0.0]], [[1.0, 0.0, 0.0, 0.0]]],
+                dtype=torch.float32,
+            ),
+            GRAVITY_VEC_W=torch.tensor([[0.0, 0.0, -1.0]], dtype=torch.float32),
+        )
+    )
+    reference_motion = types.SimpleNamespace(
+        body_positions=torch.tensor([[[0.0, 0.0, 1.0]], [[0.0, 0.0, 1.0]], [[0.0, 0.0, 1.0]]]),
+        body_quaternions=torch.tensor(
+            [[[1.0, 0.0, 0.0, 0.0]], [[1.0, 0.0, 0.0, 0.0]], [[1.0, 0.0, 0.0, 0.0]]],
+            dtype=torch.float32,
+        ),
+    )
+    context = types.SimpleNamespace(
+        episode_length_buf=torch.zeros(3, dtype=torch.long),
+        robot=robot,
+        reference_motion=reference_motion,
+    )
+    recorded: list[torch.Tensor] = []
+    tracked: list[torch.Tensor] = []
+
+    class _Termination:
+        def build_context(self, *args):
+            return context
+
+        def evaluate_timeouts(self, context):
+            return torch.tensor([False, False, False])
+
+        def track_terminated_env_ids(self, failed):
+            tracked.append(failed.clone())
+
+    env.cfg = types.SimpleNamespace(
+        robust_tracking=types.SimpleNamespace(
+            enabled=True,
+            quality_gate=types.SimpleNamespace(enabled=True),
+            fall_guard=types.SimpleNamespace(
+                enabled=True,
+                max_anchor_height_drop=0.35,
+                max_projected_gravity_error=0.6,
+            ),
+        )
+    )
+    env.anchor_body_index = 0
+    env.termination_curriculum = types.SimpleNamespace(apply=lambda step: {}, has_schedules=False)
+    env.common_step_counter = 7
+    env.episode_length_buf = torch.zeros(3, dtype=torch.long)
+    env.max_episode_length = torch.full((3,), 10, dtype=torch.long)
+    env.robot = robot
+    env.reference_motion = reference_motion
+    env.termination_model = _Termination()
+    env.tracking_quality_gate = types.SimpleNamespace(
+        cfg=types.SimpleNamespace(log_quality_counts=True, log_per_rule_errors=True),
+        evaluate=lambda context: quality,
+    )
+    env.sampler = types.SimpleNamespace(record_failures=lambda env_ids: recorded.append(env_ids.clone()))
+    env.extras = {}
+
+    terminate, time_out = env_mod.MotionTrackingEnv._get_dones(env)
+
+    assert torch.equal(terminate, torch.tensor([True, True, False]))
+    assert torch.equal(time_out, torch.tensor([False, False, False]))
+    assert torch.equal(tracked[0], torch.tensor([True, True, False]))
+    assert torch.equal(recorded[0], torch.tensor([0, 1]))
+    assert env.extras["tracking_quality/recovery_timeout_rate"].item() == pytest.approx(1.0 / 3.0)
+    assert env.extras["termination/fall_guard_rate"].item() == pytest.approx(1.0 / 3.0)
+
+
+def test_fall_guard_is_reference_relative_and_has_no_contact_default() -> None:
+    env_mod, _ = _load_motion_tracking_env_module()
+    env_mod.quat_apply_inverse = _quat_apply_inverse_real
+    env = object.__new__(env_mod.MotionTrackingEnv)
+    env.anchor_body_index = 0
+    env.cfg = types.SimpleNamespace(
+        robust_tracking=types.SimpleNamespace(
+            fall_guard=types.SimpleNamespace(
+                enabled=True,
+                max_anchor_height_drop=0.35,
+                max_projected_gravity_error=0.6,
+            )
+        )
+    )
+    context = types.SimpleNamespace(
+        episode_length_buf=torch.zeros(3, dtype=torch.long),
+        robot=types.SimpleNamespace(
+            data=types.SimpleNamespace(
+                body_pos_w=torch.tensor([[[0.0, 0.0, 0.0]], [[0.0, 0.0, 0.0]], [[0.0, 0.0, 0.0]]]),
+                body_quat_w=torch.tensor(
+                    [
+                        [[0.0, 1.0, 0.0, 0.0]],
+                        [[0.0, 1.0, 0.0, 0.0]],
+                        [[1.0, 0.0, 0.0, 0.0]],
+                    ],
+                    dtype=torch.float32,
+                ),
+                GRAVITY_VEC_W=torch.tensor([[0.0, 0.0, -1.0]], dtype=torch.float32),
+            )
+        ),
+        reference_motion=types.SimpleNamespace(
+            body_positions=torch.tensor([[[0.0, 0.0, 0.0]], [[0.0, 0.0, 1.0]], [[0.0, 0.0, 1.0]]]),
+            body_quaternions=torch.tensor(
+                [
+                    [[0.0, 1.0, 0.0, 0.0]],
+                    [[1.0, 0.0, 0.0, 0.0]],
+                    [[1.0, 0.0, 0.0, 0.0]],
+                ],
+                dtype=torch.float32,
+            ),
+        ),
+    )
+
+    result = env_mod.MotionTrackingEnv._evaluate_fall_guard(env, context)
+
+    assert torch.equal(result.fall_mask, torch.tensor([False, True, False]))
+    assert not hasattr(env.cfg.robust_tracking.fall_guard, "contact_force_threshold")
 
 
 def test_rewards_and_dones_reuse_one_tracking_quality_evaluation_per_step() -> None:
@@ -460,6 +613,7 @@ def test_rewards_and_dones_reuse_one_tracking_quality_evaluation_per_step() -> N
         soft_violation_mask=torch.tensor([False, False]),
         recovery_needed_mask=torch.tensor([False, True]),
         hard_tracking_failure_mask=torch.tensor([False, False]),
+        recovery_timeout_mask=torch.tensor([False, False]),
         record_failure_mask=torch.tensor([False, True]),
         per_rule_errors={},
         per_rule_normalized_errors={},
@@ -530,3 +684,5 @@ def test_g1_reward_spec_uses_robust_defaults_with_com_terms() -> None:
     assert rewards_mod.CoMSupportRewardTerm.type_name in [term.type for term in g1_terms]
     assert shared_mod.G1MotionTrackingEnvCfg.robust_tracking.enabled is True
     assert shared_mod.G1MotionTrackingEnvCfg.robust_tracking.quality_gate.enabled is True
+    assert shared_mod.G1MotionTrackingEnvCfg.robust_tracking.fall_guard.enabled is True
+    assert not hasattr(shared_mod.G1MotionTrackingEnvCfg.robust_tracking.fall_guard, "contact_force_threshold")

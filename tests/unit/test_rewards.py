@@ -325,6 +325,9 @@ def test_robust_tracking_reward_terms_are_finite_and_report_metrics() -> None:
     assert {"raw", "weighted", "progress", "gate", "score", "previous_score"}.issubset(
         rewards.last_result.metrics["tracking_progress_reward"]
     )
+    assert {"raw", "weighted", "gate", "score"}.issubset(
+        rewards.last_result.metrics["tracking_recovery_penalty"]
+    )
 
 
 def test_tracking_progress_reward_uses_score_delta_and_is_optional() -> None:
@@ -377,6 +380,49 @@ def test_tracking_progress_reward_uses_score_delta_and_is_optional() -> None:
     assert improved.item() > 0.0
     assert regressed.item() < 0.0
     assert torch.allclose(gated_out, torch.tensor([0.0], dtype=torch.float32))
+
+
+def test_tracking_recovery_penalty_uses_score_gate_and_is_optional() -> None:
+    rewards_mod = _load_rewards_module()
+    rewards = rewards_mod.Rewards(
+        rewards_mod.RewardSpec(
+            dt=1.0,
+            output_mode="sum",
+            terms=(rewards_mod.TrackingRecoveryPenaltyTermCfg(weight=-1.0),),
+        )
+    )
+    robot = _make_robot(torch.zeros((1, 3, 3), dtype=torch.float32))
+    reference_motion = _make_reference_motion()
+    contact_sensor = _make_contact_sensor(torch.zeros((1, 1, 3, 3), dtype=torch.float32))
+    action_model = _make_action_model()
+
+    no_quality = rewards.get_task_reward(robot, reference_motion, contact_sensor, action_model)
+    below_gate = rewards.get_task_reward(
+        robot,
+        reference_motion,
+        contact_sensor,
+        action_model,
+        tracking_quality=types.SimpleNamespace(score=torch.tensor([0.5], dtype=torch.float32)),
+    )
+    in_gate = rewards.get_task_reward(
+        robot,
+        reference_motion,
+        contact_sensor,
+        action_model,
+        tracking_quality=types.SimpleNamespace(score=torch.tensor([1.5], dtype=torch.float32)),
+    )
+    full_gate = rewards.get_task_reward(
+        robot,
+        reference_motion,
+        contact_sensor,
+        action_model,
+        tracking_quality=types.SimpleNamespace(score=torch.tensor([1.8], dtype=torch.float32)),
+    )
+
+    assert torch.allclose(no_quality, torch.tensor([0.0], dtype=torch.float32))
+    assert torch.allclose(below_gate, torch.tensor([0.0], dtype=torch.float32))
+    assert in_gate.item() < 0.0
+    assert torch.allclose(full_gate, torch.tensor([-1.0], dtype=torch.float32))
 
 
 def test_com_position_reward_tracks_mass_weighted_xy_error() -> None:
