@@ -99,6 +99,7 @@ class MotionSampler:
         failure_weight_exploration_bonus: float = 0.5,
         segment_source: SegmentSource = SegmentSource.Time,
         adaptive_sampler: AdaptiveSamplerCfg | None = None,
+        enable_failure_bins: bool = True,
         device: torch.device = torch.device("cpu"),
     ) -> None:
         self.num_envs = num_envs
@@ -154,9 +155,12 @@ class MotionSampler:
         self.adaptive_probe_sample_count = 0
 
         should_init_failure_bins = (
-            self.segment_source == SegmentSource.Anchor
-            or self.bin_size is not None
-            or (self.segment_source == SegmentSource.Time and self.motion_lib.all_clips_have_segments)
+            bool(enable_failure_bins)
+            and (
+                self.segment_source == SegmentSource.Anchor
+                or self.bin_size is not None
+                or (self.segment_source == SegmentSource.Time and self.motion_lib.all_clips_have_segments)
+            )
         )
         if should_init_failure_bins:
             self.init_failure_bins(self.bin_size)

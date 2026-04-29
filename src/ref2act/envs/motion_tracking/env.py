@@ -84,6 +84,17 @@ class MotionTrackingEnv(DirectRLEnv):
         foot_contact_body_indices, _ = self.contact_sensor.find_bodies(self.cfg.foot_body_names, preserve_order=True)
         self.collision_track_body_indices = collision_track_body_indices
 
+        sampling_strategy = self._get_sampling_strategy()
+        cfg_init_failure_bins = getattr(self.cfg, "init_failure_bins", None)
+        if cfg_init_failure_bins is None:
+            enable_failure_bins = (
+                self.cfg.segment_source == SegmentSource.Anchor
+                or sampling_strategy == SamplingStrategy.FailureWeighted
+                or bool(getattr(self.cfg.adaptive_sampler, "enabled", False))
+            )
+        else:
+            enable_failure_bins = bool(cfg_init_failure_bins)
+
         self.sampler = MotionSampler(
             num_envs=self.cfg.scene.num_envs,
             motion_lib=self.motion_lib,
@@ -95,10 +106,11 @@ class MotionTrackingEnv(DirectRLEnv):
             failure_weight_exploration_bonus=self.cfg.failure_weight_exploration_bonus,
             segment_source=self.cfg.segment_source,
             adaptive_sampler=self.cfg.adaptive_sampler,
+            enable_failure_bins=enable_failure_bins,
             device=self.device,
         )
         if (
-            self._get_sampling_strategy() == SamplingStrategy.FailureWeighted
+            sampling_strategy == SamplingStrategy.FailureWeighted
             and not self.sampler.supports_failure_weighted_sampling
         ):
             if self.cfg.segment_source == SegmentSource.Anchor:

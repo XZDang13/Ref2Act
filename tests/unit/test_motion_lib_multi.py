@@ -171,3 +171,26 @@ def test_motion_lib_packed_sampling_uses_per_motion_fps_and_frame_count(tmp_path
         samples["joint_pos"].reshape(-1),
         torch.tensor([5.0, 110.0, 20.0, 160.0], dtype=torch.float32),
     )
+
+
+def test_motion_lib_packed_sampling_uses_flat_frame_storage(tmp_path: Path) -> None:
+    motion_a = tmp_path / "short.npz"
+    motion_b = tmp_path / "long.npz"
+    _write_motion_file(
+        motion_a,
+        fps=10.0,
+        joint_pos=np.asarray([[0.0], [1.0]], dtype=np.float32),
+        name="short",
+    )
+    _write_motion_file(
+        motion_b,
+        fps=10.0,
+        joint_pos=np.asarray([[10.0], [11.0], [12.0], [13.0], [14.0]], dtype=np.float32),
+        name="long",
+    )
+
+    motion_lib = MotionLib([motion_a, motion_b])
+
+    assert motion_lib._packed_sampling_enabled
+    assert motion_lib._packed_sampling_tensors["joint_pos"].shape[0] == 7
+    assert torch.equal(motion_lib._packed_frame_offsets, torch.tensor([0, 2], dtype=torch.long))

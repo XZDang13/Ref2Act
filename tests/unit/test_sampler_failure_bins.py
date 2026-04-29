@@ -582,6 +582,36 @@ def test_sampler_failure_weighted_sampling_requires_segment_metadata(tmp_path: P
         )
 
 
+def test_sampler_can_skip_failure_bin_initialization(tmp_path: Path) -> None:
+    motion_file = tmp_path / "segmented_motion.npz"
+    _write_motion_file(
+        motion_file,
+        segment_start_times=np.asarray([0.0, 0.5], dtype=np.float32),
+        segment_end_times=np.asarray([0.5, 1.0], dtype=np.float32),
+        segment_types=np.asarray([SEGMENT_TYPE_TIME_BIN, SEGMENT_TYPE_TIME_BIN], dtype=np.int64),
+    )
+    motion_lib = MotionLib([motion_file])
+    sampler_mod = _load_sampler_module()
+    sampler = sampler_mod.Sampler(
+        num_envs=1,
+        motion_lib=motion_lib,
+        dt=0.05,
+        anchor_body_index=0,
+        enable_failure_bins=False,
+        device=torch.device("cpu"),
+    )
+
+    assert not sampler._has_failure_bins()
+    assert not sampler.supports_failure_weighted_sampling
+    assert torch.equal(
+        sampler.sample_times_for_motion_ids(
+            torch.zeros(2, dtype=torch.long),
+            strategy=sampler_mod.SamplingStrategy.Start,
+        ),
+        torch.zeros(2, dtype=torch.float32),
+    )
+
+
 def test_sampler_exports_segment_source_default(tmp_path: Path) -> None:
     motion_file = tmp_path / "segmented_motion.npz"
     _write_motion_file(
