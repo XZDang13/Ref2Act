@@ -36,6 +36,54 @@ class ResetSample:
     target_bin_indices: torch.Tensor
 
 
+@dataclass(frozen=True)
+class AdaptiveSamplerCfg:
+    enabled: bool = False
+    warmup_samples: int = 96
+    anchor_drop_fail_rate: float = 0.97
+    anchor_reenable_fail_rate: float = 0.75
+    anchor_cooldown_resets: int = 500
+    motion_min_samples: int = 256
+    motion_drop_fail_rate: float = 0.98
+    motion_drop_anchor_fraction: float = 0.8
+    motion_cooldown_resets: int = 1000
+    probe_probability: float = 0.01
+    mastered_fail_rate: float = 0.05
+    mastered_probability_scale: float = 0.25
+    min_live_motion_fraction: float = 0.6
+    min_live_anchor_fraction: float = 0.5
+
+    def __post_init__(self) -> None:
+        if self.warmup_samples < 1:
+            raise ValueError("warmup_samples must be at least 1.")
+        if self.motion_min_samples < 1:
+            raise ValueError("motion_min_samples must be at least 1.")
+        if self.anchor_cooldown_resets < 0:
+            raise ValueError("anchor_cooldown_resets must be non-negative.")
+        if self.motion_cooldown_resets < 0:
+            raise ValueError("motion_cooldown_resets must be non-negative.")
+        for name in (
+            "anchor_drop_fail_rate",
+            "anchor_reenable_fail_rate",
+            "motion_drop_fail_rate",
+            "motion_drop_anchor_fraction",
+            "probe_probability",
+            "mastered_fail_rate",
+            "min_live_motion_fraction",
+            "min_live_anchor_fraction",
+        ):
+            value = float(getattr(self, name))
+            if not math.isfinite(value) or value < 0.0 or value > 1.0:
+                raise ValueError(f"{name} must be a finite value in [0, 1].")
+        if self.anchor_reenable_fail_rate > self.anchor_drop_fail_rate:
+            raise ValueError("anchor_reenable_fail_rate must be <= anchor_drop_fail_rate.")
+        if self.mastered_fail_rate > self.anchor_drop_fail_rate:
+            raise ValueError("mastered_fail_rate must be <= anchor_drop_fail_rate.")
+        probability_scale = float(self.mastered_probability_scale)
+        if not math.isfinite(probability_scale) or probability_scale <= 0.0 or probability_scale > 1.0:
+            raise ValueError("mastered_probability_scale must be a finite value in (0, 1].")
+
+
 class MotionSampler:
     def __init__(
         self,
@@ -50,6 +98,7 @@ class MotionSampler:
         failure_weight_max_uniform_ratio: float | None = 2.5,
         failure_weight_exploration_bonus: float = 0.5,
         segment_source: SegmentSource = SegmentSource.Time,
+        adaptive_sampler: AdaptiveSamplerCfg | None = None,
         device: torch.device = torch.device("cpu"),
     ) -> None:
         self.num_envs = num_envs
@@ -58,6 +107,7 @@ class MotionSampler:
         self.motion_lib = motion_lib
         self.anchor_body_index = anchor_body_index
         self.segment_source = segment_source
+        self.adaptive_sampler = adaptive_sampler if adaptive_sampler is not None else AdaptiveSamplerCfg()
         if not (0.0 < failure_decay <= 1.0):
             raise ValueError("failure_decay must be in (0, 1].")
         self.failure_decay = failure_decay
@@ -95,6 +145,14 @@ class MotionSampler:
         self.bin_sample_counts: list[torch.Tensor] | None = None
         self.supports_failure_weighted_sampling = False
 
+        self.adaptive_bin_quarantined: list[torch.Tensor] | None = None
+        self.adaptive_bin_cooldowns: list[torch.Tensor] | None = None
+        self.adaptive_bin_mastered: list[torch.Tensor] | None = None
+        self.adaptive_motion_quarantined: torch.Tensor | None = None
+        self.adaptive_motion_cooldowns: torch.Tensor | None = None
+        self.adaptive_motion_mastered: torch.Tensor | None = None
+        self.adaptive_probe_sample_count = 0
+
         should_init_failure_bins = (
             self.segment_source == SegmentSource.Anchor
             or self.bin_size is not None
@@ -127,9 +185,19 @@ class MotionSampler:
         *,
         temperature: float,
         eligible_mask: torch.Tensor | None = None,
+        probability_scale: torch.Tensor | None = None,
+        probe_mask: torch.Tensor | None = None,
+        probe_probability: float = 0.0,
     ) -> torch.Tensor:
         if temperature <= 0.0:
             raise ValueError("temperature must be > 0")
+        resolved_probe_probability = float(probe_probability)
+        if (
+            not math.isfinite(resolved_probe_probability)
+            or resolved_probe_probability < 0.0
+            or resolved_probe_probability > 1.0
+        ):
+            raise ValueError("probe_probability must be a finite value in [0, 1].")
 
         fail_counts = torch.as_tensor(fail_counts, dtype=torch.float32, device=self.device).reshape(-1)
         sample_counts = torch.as_tensor(sample_counts, dtype=torch.float32, device=self.device).reshape(-1)
@@ -143,11 +211,40 @@ class MotionSampler:
             if eligible.shape != fail_counts.shape:
                 raise ValueError("eligible_mask must have the same shape as fail_counts.")
 
+        if probability_scale is None:
+            scale = torch.ones_like(fail_counts, dtype=torch.float32, device=self.device)
+        else:
+            scale = torch.as_tensor(probability_scale, dtype=torch.float32, device=self.device).reshape(-1)
+            if scale.shape != fail_counts.shape:
+                raise ValueError("probability_scale must have the same shape as fail_counts.")
+            if not bool(torch.all(torch.isfinite(scale)).item()) or bool(torch.any(scale < 0.0).item()):
+                raise ValueError("probability_scale must contain finite non-negative values.")
+
+        if probe_mask is None:
+            probe = torch.zeros_like(eligible, dtype=torch.bool, device=self.device)
+        else:
+            probe = torch.as_tensor(probe_mask, dtype=torch.bool, device=self.device).reshape(-1)
+            if probe.shape != fail_counts.shape:
+                raise ValueError("probe_mask must have the same shape as fail_counts.")
+
+        probe_probs = probe.to(dtype=torch.float32)
+        probe_sum = torch.sum(probe_probs)
+        if float(probe_sum.item()) > 0.0:
+            probe_probs = probe_probs / probe_sum
+
         uniform_probs = eligible.to(dtype=torch.float32)
         uniform_sum = torch.sum(uniform_probs)
         if uniform_sum <= 0:
+            if float(probe_sum.item()) > 0.0:
+                return probe_probs
             raise ValueError("eligible_mask must include at least one entry.")
         uniform_probs = uniform_probs / uniform_sum
+        scaled_uniform_probs = torch.where(eligible, uniform_probs * scale, torch.zeros_like(uniform_probs))
+        scaled_uniform_sum = torch.sum(scaled_uniform_probs)
+        if float(scaled_uniform_sum.item()) > 0.0:
+            scaled_uniform_probs = scaled_uniform_probs / scaled_uniform_sum
+        else:
+            scaled_uniform_probs = uniform_probs
 
         eligible_sample_counts = torch.where(
             eligible,
@@ -170,13 +267,26 @@ class MotionSampler:
         else:
             learned_probs = uniform_probs
 
-        probs = (1.0 - self.failure_weight_uniform_mix) * learned_probs + self.failure_weight_uniform_mix * uniform_probs
-        probs = probs / torch.clamp(torch.sum(probs), min=torch.finfo(probs.dtype).eps)
-        return self._apply_max_uniform_probability_cap(
+        probs = (
+            (1.0 - self.failure_weight_uniform_mix) * learned_probs
+            + self.failure_weight_uniform_mix * uniform_probs
+        )
+        probs = torch.where(eligible, probs * scale, torch.zeros_like(probs))
+        probs_sum = torch.sum(probs)
+        if float(probs_sum.item()) > 0.0:
+            probs = probs / probs_sum
+        else:
+            probs = scaled_uniform_probs
+
+        probs = self._apply_max_uniform_probability_cap(
             probs,
             eligible_mask=eligible,
-            uniform_probs=uniform_probs,
+            uniform_probs=scaled_uniform_probs,
         )
+        if resolved_probe_probability > 0.0 and float(probe_sum.item()) > 0.0:
+            probs = (1.0 - resolved_probe_probability) * probs + resolved_probe_probability * probe_probs
+            probs = probs / torch.clamp(torch.sum(probs), min=torch.finfo(probs.dtype).eps)
+        return probs
 
     def _apply_max_uniform_probability_cap(
         self,
@@ -234,6 +344,265 @@ class MotionSampler:
         capped_probs[eligible] = eligible_projected_probs
         return capped_probs / projected_sum
 
+    def _has_adaptive_state(self) -> bool:
+        return (
+            bool(self.adaptive_sampler.enabled)
+            and self._has_failure_bins()
+            and self.adaptive_bin_quarantined is not None
+            and self.adaptive_bin_cooldowns is not None
+            and self.adaptive_bin_mastered is not None
+            and self.adaptive_motion_quarantined is not None
+            and self.adaptive_motion_cooldowns is not None
+            and self.adaptive_motion_mastered is not None
+        )
+
+    def _init_adaptive_state(self) -> None:
+        if not self.adaptive_sampler.enabled or not self._has_failure_bins():
+            self.adaptive_bin_quarantined = None
+            self.adaptive_bin_cooldowns = None
+            self.adaptive_bin_mastered = None
+            self.adaptive_motion_quarantined = None
+            self.adaptive_motion_cooldowns = None
+            self.adaptive_motion_mastered = None
+            self.adaptive_probe_sample_count = 0
+            return
+
+        self.adaptive_bin_quarantined = [
+            torch.zeros_like(sample_counts, dtype=torch.bool, device=self.device)
+            for sample_counts in self.bin_sample_counts
+        ]
+        self.adaptive_bin_cooldowns = [
+            torch.zeros_like(sample_counts, dtype=torch.long, device=self.device)
+            for sample_counts in self.bin_sample_counts
+        ]
+        self.adaptive_bin_mastered = [
+            torch.zeros_like(sample_counts, dtype=torch.bool, device=self.device)
+            for sample_counts in self.bin_sample_counts
+        ]
+        self.adaptive_motion_quarantined = torch.zeros(
+            self.motion_lib.num_motions,
+            dtype=torch.bool,
+            device=self.device,
+        )
+        self.adaptive_motion_cooldowns = torch.zeros(
+            self.motion_lib.num_motions,
+            dtype=torch.long,
+            device=self.device,
+        )
+        self.adaptive_motion_mastered = torch.zeros(
+            self.motion_lib.num_motions,
+            dtype=torch.bool,
+            device=self.device,
+        )
+        self.adaptive_probe_sample_count = 0
+
+    def _adaptive_base_bin_eligible(self, motion_id: int) -> torch.Tensor:
+        if self.segment_source == SegmentSource.Anchor:
+            return self.bin_reset_eligible[motion_id]
+        return torch.ones_like(self.bin_sample_counts[motion_id], dtype=torch.bool, device=self.device)
+
+    def _adaptive_limited_drop_mask(
+        self,
+        candidate_mask: torch.Tensor,
+        base_eligible: torch.Tensor,
+        current_quarantined: torch.Tensor,
+        scores: torch.Tensor,
+        *,
+        min_live_fraction: float,
+    ) -> torch.Tensor:
+        candidate_mask = torch.as_tensor(candidate_mask, dtype=torch.bool, device=self.device).reshape(-1)
+        base_eligible = torch.as_tensor(base_eligible, dtype=torch.bool, device=self.device).reshape(-1)
+        current_quarantined = torch.as_tensor(current_quarantined, dtype=torch.bool, device=self.device).reshape(-1)
+        scores = torch.as_tensor(scores, dtype=torch.float32, device=self.device).reshape(-1)
+        selected = torch.zeros_like(candidate_mask)
+
+        total_eligible = int(torch.sum(base_eligible).item())
+        if total_eligible == 0:
+            return selected
+
+        min_live = int(math.ceil(float(total_eligible) * float(min_live_fraction)))
+        max_quarantined = max(total_eligible - min_live, 0)
+        current_count = int(torch.sum(current_quarantined & base_eligible).item())
+        allowed_count = max(max_quarantined - current_count, 0)
+        if allowed_count == 0:
+            return selected
+
+        candidate_indices = torch.nonzero(
+            candidate_mask & base_eligible & ~current_quarantined,
+            as_tuple=False,
+        ).squeeze(-1)
+        if candidate_indices.numel() == 0:
+            return selected
+        if int(candidate_indices.numel()) > allowed_count:
+            order = torch.argsort(scores[candidate_indices], descending=True)
+            candidate_indices = candidate_indices[order[:allowed_count]]
+        selected[candidate_indices] = True
+        return selected
+
+    def _adaptive_fail_rate(self, fail_counts: torch.Tensor, sample_counts: torch.Tensor) -> torch.Tensor:
+        return fail_counts / torch.clamp(sample_counts, min=1.0)
+
+    def _advance_adaptive_cooldowns(self) -> None:
+        if not self._has_adaptive_state():
+            return
+        for cooldowns in self.adaptive_bin_cooldowns:
+            cooldowns[cooldowns > 0] -= 1
+        self.adaptive_motion_cooldowns[self.adaptive_motion_cooldowns > 0] -= 1
+
+    def _update_adaptive_state(self) -> None:
+        if not self._has_adaptive_state():
+            return
+        self._update_adaptive_bin_state()
+        self._update_adaptive_motion_state()
+
+    def _update_adaptive_bin_state(self) -> None:
+        cfg = self.adaptive_sampler
+        for motion_id in range(self.motion_lib.num_motions):
+            base_eligible = self._adaptive_base_bin_eligible(motion_id)
+            quarantined = self.adaptive_bin_quarantined[motion_id]
+            cooldowns = self.adaptive_bin_cooldowns[motion_id]
+            fail_counts = self.bin_fail_counts[motion_id]
+            sample_counts = self.bin_sample_counts[motion_id]
+            fail_rate = self._adaptive_fail_rate(fail_counts, sample_counts)
+            warmed = sample_counts >= float(cfg.warmup_samples)
+
+            reenable_mask = (
+                base_eligible
+                & quarantined
+                & (cooldowns <= 0)
+                & (~warmed | (fail_rate <= float(cfg.anchor_reenable_fail_rate)))
+            )
+            quarantined[reenable_mask] = False
+            cooldowns[reenable_mask] = 0
+
+            drop_candidates = (
+                base_eligible
+                & ~quarantined
+                & warmed
+                & (fail_rate >= float(cfg.anchor_drop_fail_rate))
+            )
+            drop_mask = self._adaptive_limited_drop_mask(
+                drop_candidates,
+                base_eligible,
+                quarantined,
+                fail_rate,
+                min_live_fraction=float(cfg.min_live_anchor_fraction),
+            )
+            quarantined[drop_mask] = True
+            cooldowns[drop_mask] = int(cfg.anchor_cooldown_resets)
+
+            self.adaptive_bin_mastered[motion_id][:] = (
+                base_eligible
+                & ~quarantined
+                & warmed
+                & (fail_rate <= float(cfg.mastered_fail_rate))
+            )
+
+    def _adaptive_motion_anchor_quarantine_fraction(self) -> torch.Tensor:
+        fractions = torch.zeros(self.motion_lib.num_motions, dtype=torch.float32, device=self.device)
+        for motion_id in range(self.motion_lib.num_motions):
+            base_eligible = self._adaptive_base_bin_eligible(motion_id)
+            total_eligible = torch.sum(base_eligible.to(dtype=torch.float32))
+            if float(total_eligible.item()) <= 0.0:
+                continue
+            quarantined = self.adaptive_bin_quarantined[motion_id] & base_eligible
+            fractions[motion_id] = torch.sum(quarantined.to(dtype=torch.float32)) / total_eligible
+        return fractions
+
+    def _update_adaptive_motion_state(self) -> None:
+        cfg = self.adaptive_sampler
+        motion_fail_counts = torch.stack([fail_counts.sum() for fail_counts in self.bin_fail_counts], dim=0)
+        motion_sample_counts = torch.stack([sample_counts.sum() for sample_counts in self.bin_sample_counts], dim=0)
+        motion_fail_rate = self._adaptive_fail_rate(motion_fail_counts, motion_sample_counts)
+        anchor_quarantine_fraction = self._adaptive_motion_anchor_quarantine_fraction()
+        warmed = motion_sample_counts >= float(cfg.motion_min_samples)
+
+        reenable_mask = (
+            self.adaptive_motion_quarantined
+            & (self.adaptive_motion_cooldowns <= 0)
+            & (
+                ~warmed
+                | (motion_fail_rate <= float(cfg.anchor_reenable_fail_rate))
+                | (anchor_quarantine_fraction < float(cfg.motion_drop_anchor_fraction))
+            )
+        )
+        self.adaptive_motion_quarantined[reenable_mask] = False
+        self.adaptive_motion_cooldowns[reenable_mask] = 0
+
+        drop_candidates = (
+            ~self.adaptive_motion_quarantined
+            & warmed
+            & (motion_fail_rate >= float(cfg.motion_drop_fail_rate))
+            & (anchor_quarantine_fraction >= float(cfg.motion_drop_anchor_fraction))
+        )
+        base_eligible = torch.ones_like(self.adaptive_motion_quarantined, dtype=torch.bool, device=self.device)
+        drop_mask = self._adaptive_limited_drop_mask(
+            drop_candidates,
+            base_eligible,
+            self.adaptive_motion_quarantined,
+            motion_fail_rate,
+            min_live_fraction=float(cfg.min_live_motion_fraction),
+        )
+        self.adaptive_motion_quarantined[drop_mask] = True
+        self.adaptive_motion_cooldowns[drop_mask] = int(cfg.motion_cooldown_resets)
+
+        self.adaptive_motion_mastered[:] = (
+            ~self.adaptive_motion_quarantined
+            & warmed
+            & (motion_fail_rate <= float(cfg.mastered_fail_rate))
+        )
+
+    def _record_adaptive_probe_samples(self, sampled_indices: torch.Tensor, probe_mask: torch.Tensor | None) -> None:
+        if not self._has_adaptive_state() or probe_mask is None:
+            return
+        probe_mask = torch.as_tensor(probe_mask, dtype=torch.bool, device=self.device).reshape(-1)
+        sampled_indices = torch.as_tensor(sampled_indices, dtype=torch.long, device=self.device).reshape(-1)
+        if sampled_indices.numel() == 0 or not bool(torch.any(probe_mask).item()):
+            return
+        self.adaptive_probe_sample_count += int(torch.sum(probe_mask[sampled_indices]).item())
+
+    def _adaptive_motion_probability_inputs(
+        self,
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None, float]:
+        if not self._has_adaptive_state():
+            return None, None, None, 0.0
+        eligible = ~self.adaptive_motion_quarantined
+        scale = torch.where(
+            self.adaptive_motion_mastered,
+            torch.full_like(
+                self.adaptive_motion_mastered,
+                float(self.adaptive_sampler.mastered_probability_scale),
+                dtype=torch.float32,
+            ),
+            torch.ones_like(self.adaptive_motion_mastered, dtype=torch.float32),
+        )
+        return eligible, scale, self.adaptive_motion_quarantined, float(self.adaptive_sampler.probe_probability)
+
+    def _adaptive_bin_probability_inputs(
+        self,
+        motion_id: int,
+        base_eligible: torch.Tensor | None,
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None, float]:
+        if not self._has_adaptive_state():
+            return base_eligible, None, None, 0.0
+        resolved_base_eligible = (
+            torch.ones_like(self.bin_sample_counts[motion_id], dtype=torch.bool, device=self.device)
+            if base_eligible is None
+            else torch.as_tensor(base_eligible, dtype=torch.bool, device=self.device).reshape(-1)
+        )
+        quarantined = self.adaptive_bin_quarantined[motion_id] & resolved_base_eligible
+        eligible = resolved_base_eligible & ~quarantined
+        scale = torch.where(
+            self.adaptive_bin_mastered[motion_id],
+            torch.full_like(
+                self.adaptive_bin_mastered[motion_id],
+                float(self.adaptive_sampler.mastered_probability_scale),
+                dtype=torch.float32,
+            ),
+            torch.ones_like(self.adaptive_bin_mastered[motion_id], dtype=torch.float32),
+        )
+        return eligible, scale, quarantined, float(self.adaptive_sampler.probe_probability)
+
     def _sample_failure_weighted_motion_ids(
         self,
         env_ids: IndexLike | None = None,
@@ -250,12 +619,19 @@ class MotionSampler:
 
         motion_fail_counts = torch.stack([fail_counts.sum() for fail_counts in self.bin_fail_counts], dim=0)
         motion_sample_counts = torch.stack([sample_counts.sum() for sample_counts in self.bin_sample_counts], dim=0)
+        eligible_mask, probability_scale, probe_mask, probe_probability = self._adaptive_motion_probability_inputs()
         motion_probs = self._build_guarded_sampling_probabilities(
             motion_fail_counts,
             motion_sample_counts,
             temperature=temperature,
+            eligible_mask=eligible_mask,
+            probability_scale=probability_scale,
+            probe_mask=probe_mask,
+            probe_probability=probe_probability,
         )
-        return torch.multinomial(motion_probs, num_samples, replacement=True)
+        motion_ids = torch.multinomial(motion_probs, num_samples, replacement=True)
+        self._record_adaptive_probe_samples(motion_ids, probe_mask)
+        return motion_ids
 
     def _sample_start_times_for_motion_ids(
         self,
@@ -355,14 +731,22 @@ class MotionSampler:
             fail_counts = self.bin_fail_counts[motion_id]
             sample_counts = self.bin_sample_counts[motion_id]
             eligible_mask = self.bin_reset_eligible[motion_id] if self.segment_source == SegmentSource.Anchor else None
+            eligible_mask, probability_scale, probe_mask, probe_probability = self._adaptive_bin_probability_inputs(
+                motion_id,
+                eligible_mask,
+            )
             probs = self._build_guarded_sampling_probabilities(
                 fail_counts,
                 sample_counts,
                 temperature=temperature,
                 eligible_mask=eligible_mask,
+                probability_scale=probability_scale,
+                probe_mask=probe_mask,
+                probe_probability=probe_probability,
             )
 
             bin_indices = torch.multinomial(probs, num_samples, replacement=True)
+            self._record_adaptive_probe_samples(bin_indices, probe_mask)
             target_bin_indices[mask] = bin_indices
 
             if self.segment_source == SegmentSource.Anchor:
@@ -562,6 +946,7 @@ class MotionSampler:
             for num_bins in self.num_bins_per_motion.tolist()
         ]
         self.supports_failure_weighted_sampling = all(self.bin_uses_segment_metadata)
+        self._init_adaptive_state()
 
         if self.segment_source == SegmentSource.Anchor:
             clips_without_eligible_bins = [
@@ -580,6 +965,7 @@ class MotionSampler:
         for fail_counts, sample_counts in zip(self.bin_fail_counts, self.bin_sample_counts, strict=False):
             fail_counts.zero_()
             sample_counts.zero_()
+        self._init_adaptive_state()
 
     def record_failures(
         self,
@@ -612,6 +998,7 @@ class MotionSampler:
             bin_indices = self._times_to_bins(motion_ids, times)
 
         self._accumulate_bin_counts(self.bin_fail_counts, motion_ids, bin_indices)
+        self._update_adaptive_state()
 
     def _has_failure_bins(self) -> bool:
         return (
@@ -698,6 +1085,59 @@ class MotionSampler:
                 fail_counts.mul_(self.failure_decay)
                 sample_counts.mul_(self.failure_decay)
         self._accumulate_bin_counts(self.bin_sample_counts, motion_ids, target_bin_indices)
+        self._advance_adaptive_cooldowns()
+        self._update_adaptive_state()
+
+    def get_adaptive_stats(self) -> dict[str, torch.Tensor]:
+        if not self._has_adaptive_state():
+            return {
+                "adaptive_enabled": torch.tensor(float(self.adaptive_sampler.enabled), device=self.device),
+                "adaptive_live_motion_count": torch.tensor(float(self.motion_lib.num_motions), device=self.device),
+                "adaptive_quarantined_motion_count": torch.tensor(0.0, device=self.device),
+                "adaptive_mastered_motion_count": torch.tensor(0.0, device=self.device),
+                "adaptive_live_anchor_count": torch.tensor(float(self.num_bins), device=self.device),
+                "adaptive_quarantined_anchor_count": torch.tensor(0.0, device=self.device),
+                "adaptive_mastered_anchor_count": torch.tensor(0.0, device=self.device),
+                "adaptive_probe_sample_count": torch.tensor(
+                    float(self.adaptive_probe_sample_count),
+                    device=self.device,
+                ),
+            }
+
+        motion_quarantined_count = torch.sum(self.adaptive_motion_quarantined.to(dtype=torch.float32))
+        motion_mastered_count = torch.sum(self.adaptive_motion_mastered.to(dtype=torch.float32))
+        base_anchor_count = torch.tensor(0.0, dtype=torch.float32, device=self.device)
+        quarantined_anchor_count = torch.tensor(0.0, dtype=torch.float32, device=self.device)
+        mastered_anchor_count = torch.tensor(0.0, dtype=torch.float32, device=self.device)
+        for motion_id in range(self.motion_lib.num_motions):
+            base_eligible = self._adaptive_base_bin_eligible(motion_id)
+            base_anchor_count += torch.sum(base_eligible.to(dtype=torch.float32))
+            quarantined_anchor_count += torch.sum(
+                (self.adaptive_bin_quarantined[motion_id] & base_eligible).to(dtype=torch.float32)
+            )
+            mastered_anchor_count += torch.sum(
+                (self.adaptive_bin_mastered[motion_id] & base_eligible).to(dtype=torch.float32)
+            )
+
+        return {
+            "adaptive_enabled": torch.tensor(1.0, device=self.device),
+            "adaptive_live_motion_count": torch.tensor(
+                float(self.motion_lib.num_motions),
+                dtype=torch.float32,
+                device=self.device,
+            )
+            - motion_quarantined_count,
+            "adaptive_quarantined_motion_count": motion_quarantined_count,
+            "adaptive_mastered_motion_count": motion_mastered_count,
+            "adaptive_live_anchor_count": base_anchor_count - quarantined_anchor_count,
+            "adaptive_quarantined_anchor_count": quarantined_anchor_count,
+            "adaptive_mastered_anchor_count": mastered_anchor_count,
+            "adaptive_probe_sample_count": torch.tensor(
+                float(self.adaptive_probe_sample_count),
+                dtype=torch.float32,
+                device=self.device,
+            ),
+        }
 
 
 Sampler = MotionSampler

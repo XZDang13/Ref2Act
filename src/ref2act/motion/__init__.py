@@ -1,6 +1,6 @@
 from .library import MotionLib
 from .models import MotionClip, MotionFileInput
-from .sampling import MotionSampler, SamplerMod, SamplingStrategy, SegmentSource
+from .sampling import AdaptiveSamplerCfg, MotionSampler, SamplerMod, SamplingStrategy, SegmentSource
 from .visualization import MotionViewer
 
 __all__ = [
@@ -9,6 +9,7 @@ __all__ = [
     "MotionLib",
     "MotionSampler",
     "MotionViewer",
+    "AdaptiveSamplerCfg",
     "SamplerMod",
     "SegmentSource",
     "SamplingStrategy",

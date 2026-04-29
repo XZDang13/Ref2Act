@@ -94,6 +94,7 @@ class MotionTrackingEnv(DirectRLEnv):
             failure_weight_max_uniform_ratio=self.cfg.failure_weight_max_uniform_ratio,
             failure_weight_exploration_bonus=self.cfg.failure_weight_exploration_bonus,
             segment_source=self.cfg.segment_source,
+            adaptive_sampler=self.cfg.adaptive_sampler,
             device=self.device,
         )
         if (
@@ -422,6 +423,7 @@ class MotionTrackingEnv(DirectRLEnv):
                 self.sampler,
             )
             self.sampler.record_failures(self.termination_model.terminated_env_ids)
+            self._log_sampler_adaptive_stats()
             return terminate, time_out
 
         quality = self._get_tracking_quality()
@@ -447,6 +449,7 @@ class MotionTrackingEnv(DirectRLEnv):
         record_env_ids = torch.nonzero(record_failure_mask, as_tuple=False).squeeze(-1)
         self.sampler.record_failures(record_env_ids)
         self._log_tracking_quality(quality, terminate, time_out, record_env_ids, fall_guard)
+        self._log_sampler_adaptive_stats()
         return terminate, time_out
 
     def _evaluate_fall_guard(self, context) -> FallGuardResult:
@@ -535,6 +538,10 @@ class MotionTrackingEnv(DirectRLEnv):
             dtype=torch.float32,
         )
 
+    def _log_sampler_adaptive_stats(self) -> None:
+        for key, value in self.sampler.get_adaptive_stats().items():
+            self.extras[f"sampler/{key}"] = value.detach() if isinstance(value, torch.Tensor) else value
+
     def _reset_idx(self, env_ids: torch.Tensor | None):
         env_ids = self._normalize_env_ids(env_ids)
         if self.tracking_quality_gate is not None:
@@ -553,6 +560,7 @@ class MotionTrackingEnv(DirectRLEnv):
             strategy=self._get_sampling_strategy(),
             temperature=self.cfg.failure_temperature,
         )
+        self._log_sampler_adaptive_stats()
         reference_motion = self._build_reference_motion(env_ids)
         self._initialize_robot_from_reference(env_ids, reference_motion)
         self._store_reference_motion(env_ids, reference_motion)

@@ -35,7 +35,7 @@ from ref2act.envs.motion_tracking.rewards import (
 )
 from ref2act.envs.motion_tracking.termination import default_termination_spec
 from ref2act.envs.motion_tracking.tracking_quality import RobustTrackingCfg, TrackingQualityGateCfg
-from ref2act.motion.sampling import SamplerMod, SamplingStrategy, SegmentSource
+from ref2act.motion.sampling import AdaptiveSamplerCfg, SamplerMod, SamplingStrategy, SegmentSource
 from ref2act.robots._articulation_shared import G1_CFG
 
 G1_ACTION_LATENCY_RANGE = (0, 2)
@@ -287,6 +287,7 @@ class G1MotionTrackingEnvCfg(DirectRLEnvCfg):
     segment_source: SegmentSource = SegmentSource.Time
     sampling_strategy: SamplingStrategy | None = None
     sampler_mod:SamplerMod = SamplerMod.Clamp
+    adaptive_sampler: AdaptiveSamplerCfg = AdaptiveSamplerCfg()
 
     root_link_name = "pelvis"
     anchor_body_name = "pelvis"
