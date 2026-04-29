@@ -70,7 +70,11 @@ class MotionTrackingEnv(DirectRLEnv):
         self.action_processer = ActionProcessor(self.robot, self.cfg.action)
         self.action_processor = self.action_processer
 
-        self.motion_lib = MotionLib(self.cfg.expert_motion_file, self.device)
+        self.motion_lib = MotionLib(
+            self.cfg.expert_motion_file,
+            self.device,
+            compact_after_packing=bool(getattr(self.cfg, "compact_motion_storage", True)),
+        )
 
         self.anchor_body_index = self._resolve_shared_body_index(self.cfg.anchor_body_name)
         self.key_body_indices = [self._resolve_shared_body_index(name) for name in self.cfg.key_body_names]
@@ -551,6 +555,8 @@ class MotionTrackingEnv(DirectRLEnv):
         )
 
     def _log_sampler_adaptive_stats(self) -> None:
+        if not hasattr(self.sampler, "get_adaptive_stats"):
+            return
         for key, value in self.sampler.get_adaptive_stats().items():
             self.extras[f"sampler/{key}"] = value.detach() if isinstance(value, torch.Tensor) else value
 

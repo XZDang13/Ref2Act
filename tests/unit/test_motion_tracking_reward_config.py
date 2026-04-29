@@ -285,6 +285,7 @@ def _load_env_cfg_shared_module():
     termination_mod.TerminationContext = type("TerminationContext", (), {})
 
     sampling_mod = types.ModuleType("ref2act.motion.sampling")
+    sampling_mod.AdaptiveSamplerCfg = type("AdaptiveSamplerCfg", (), {})
     sampling_mod.SamplerMod = Enum("SamplerMod", {"Clamp": "clamp"})
     sampling_mod.SamplingStrategy = Enum("SamplingStrategy", {"FailureWeighted": "failure_weighted"})
     sampling_mod.SegmentSource = Enum("SegmentSource", {"Time": "time", "Anchor": "anchor"})

@@ -66,6 +66,17 @@ def _validate_anchor_selection_arrays(
 
 @dataclass
 class MotionClip:
+    _FRAME_TENSOR_FIELDS = frozenset(
+        (
+            "joint_pos",
+            "joint_vel",
+            "body_positions",
+            "body_quaternions",
+            "body_linear_velocities",
+            "body_angular_velocities",
+        )
+    )
+
     motion_id: int
     name: str
     source: str
@@ -73,12 +84,12 @@ class MotionClip:
     dt: float
     num_frames: int
     duration: float
-    joint_pos: torch.Tensor
-    joint_vel: torch.Tensor
-    body_positions: torch.Tensor
-    body_quaternions: torch.Tensor
-    body_linear_velocities: torch.Tensor
-    body_angular_velocities: torch.Tensor
+    joint_pos: torch.Tensor | None
+    joint_vel: torch.Tensor | None
+    body_positions: torch.Tensor | None
+    body_quaternions: torch.Tensor | None
+    body_linear_velocities: torch.Tensor | None
+    body_angular_velocities: torch.Tensor | None
     segment_start_times: torch.Tensor | None = None
     segment_end_times: torch.Tensor | None = None
     segment_types: torch.Tensor | None = None
@@ -89,6 +100,19 @@ class MotionClip:
     anchor_times: torch.Tensor | None = None
     joint_names: list[str] = field(default_factory=list)
     body_names: list[str] = field(default_factory=list)
+
+    def __getattribute__(self, name: str):
+        value = object.__getattribute__(self, name)
+        if name in object.__getattribute__(self, "_FRAME_TENSOR_FIELDS") and value is None:
+            raise RuntimeError(
+                f"Motion clip frame tensor '{name}' is unavailable because its MotionLib was loaded "
+                "with compact_after_packing=True. Use MotionLib.sample_motion(...) instead."
+            )
+        return value
+
+    def clear_frame_tensors(self) -> None:
+        for field_name in self._FRAME_TENSOR_FIELDS:
+            object.__setattr__(self, field_name, None)
 
     @property
     def has_segments(self) -> bool:
@@ -116,8 +140,16 @@ class MotionLib:
         self,
         motion_files: MotionFileInput,
         device: torch.device = torch.device("cpu"),
+        *,
+        compact_after_packing: bool = False,
     ) -> None:
-        self.device = device
+        self.device = torch.device(device)
+        self.compact_after_packing = bool(compact_after_packing)
+        self._frame_load_device = (
+            torch.device("cpu")
+            if self.compact_after_packing and self.device.type == "cuda"
+            else self.device
+        )
         self.motion_files = self._normalize_motion_files(motion_files)
         self.clips = [self._load_clip(motion_id, motion_file) for motion_id, motion_file in enumerate(self.motion_files)]
         if not self.clips:
@@ -163,6 +195,12 @@ class MotionLib:
         self._packed_sampling_tensors: dict[str, torch.Tensor] = {}
         self._packed_frame_offsets: torch.Tensor | None = None
         self._packed_sampling_enabled = self._build_packed_sampling_tensors()
+        if self.compact_after_packing:
+            if not self._packed_sampling_enabled:
+                raise RuntimeError(
+                    "compact_after_packing=True requires compatible clips so packed sampling can be enabled."
+                )
+            self._clear_clip_frame_tensors()
         duration_values = [clip.duration for clip in self.clips]
         if self.num_motions <= 8:
             duration_summary = f"durations={[round(duration, 3) for duration in duration_values]} s"
@@ -178,6 +216,12 @@ class MotionLib:
             f"frames={sum(clip.num_frames for clip in self.clips)}, "
             f"{duration_summary}"
         )
+
+    def _clear_clip_frame_tensors(self) -> None:
+        for clip in self.clips:
+            clip.clear_frame_tensors()
+        if torch.device(self.device).type == "cuda":
+            torch.cuda.empty_cache()
 
     @staticmethod
     def _normalize_motion_files(motion_files: MotionFileInput) -> list[str]:
@@ -205,7 +249,7 @@ class MotionLib:
             dt = 1.0 / fps
             joint_names = np.asarray(motion_data["joint_names"]).tolist()
             body_names = np.asarray(motion_data["body_names"]).tolist()
-            joint_pos = torch.as_tensor(motion_data["joint_pos"], dtype=torch.float32, device=self.device)
+            joint_pos = torch.as_tensor(motion_data["joint_pos"], dtype=torch.float32, device=self._frame_load_device)
             num_frames = int(joint_pos.shape[0])
             duration = dt * num_frames
             segment_start_times = None
@@ -300,14 +344,18 @@ class MotionLib:
                 num_frames=num_frames,
                 duration=duration,
                 joint_pos=joint_pos,
-                joint_vel=torch.as_tensor(motion_data["joint_vel"], dtype=torch.float32, device=self.device),
-                body_positions=torch.as_tensor(motion_data["body_pos_w"], dtype=torch.float32, device=self.device),
-                body_quaternions=torch.as_tensor(motion_data["body_quat_w"], dtype=torch.float32, device=self.device),
+                joint_vel=torch.as_tensor(motion_data["joint_vel"], dtype=torch.float32, device=self._frame_load_device),
+                body_positions=torch.as_tensor(
+                    motion_data["body_pos_w"], dtype=torch.float32, device=self._frame_load_device
+                ),
+                body_quaternions=torch.as_tensor(
+                    motion_data["body_quat_w"], dtype=torch.float32, device=self._frame_load_device
+                ),
                 body_linear_velocities=torch.as_tensor(
-                    motion_data["body_lin_vel_w"], dtype=torch.float32, device=self.device
+                    motion_data["body_lin_vel_w"], dtype=torch.float32, device=self._frame_load_device
                 ),
                 body_angular_velocities=torch.as_tensor(
-                    motion_data["body_ang_vel_w"], dtype=torch.float32, device=self.device
+                    motion_data["body_ang_vel_w"], dtype=torch.float32, device=self._frame_load_device
                 ),
                 segment_start_times=segment_start_times,
                 segment_end_times=segment_end_times,
@@ -427,7 +475,7 @@ class MotionLib:
                 self._packed_frame_offsets = None
                 return False
 
-            packed_tensors[output_name] = torch.cat(clip_tensors, dim=0)
+            packed_tensors[output_name] = torch.cat(clip_tensors, dim=0).to(device=self.device)
 
         self._packed_sampling_tensors = packed_tensors
         self._packed_frame_offsets = torch.as_tensor(frame_offsets, dtype=torch.long, device=self.device)

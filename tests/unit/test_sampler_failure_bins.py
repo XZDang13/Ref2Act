@@ -612,6 +612,134 @@ def test_sampler_can_skip_failure_bin_initialization(tmp_path: Path) -> None:
     )
 
 
+def test_sampler_vectorized_times_to_bins_matches_segment_bounds(tmp_path: Path) -> None:
+    motion_a = tmp_path / "motion_a.npz"
+    motion_b = tmp_path / "motion_b.npz"
+    _write_motion_file(
+        motion_a,
+        segment_start_times=np.asarray([0.0, 0.5], dtype=np.float32),
+        segment_end_times=np.asarray([0.5, 1.0], dtype=np.float32),
+        segment_types=np.asarray([SEGMENT_TYPE_TIME_BIN, SEGMENT_TYPE_TIME_BIN], dtype=np.int64),
+    )
+    _write_motion_file(
+        motion_b,
+        segment_start_times=np.asarray([0.0, 0.2, 0.4, 0.8], dtype=np.float32),
+        segment_end_times=np.asarray([0.2, 0.4, 0.8, 1.0], dtype=np.float32),
+        segment_types=np.asarray([SEGMENT_TYPE_TIME_BIN] * 4, dtype=np.int64),
+    )
+    motion_lib = MotionLib([motion_a, motion_b])
+    sampler_mod = _load_sampler_module()
+    sampler = sampler_mod.Sampler(
+        num_envs=1,
+        motion_lib=motion_lib,
+        dt=0.05,
+        anchor_body_index=0,
+        device=torch.device("cpu"),
+    )
+
+    motion_ids = torch.tensor([0, 0, 1, 1, 1], dtype=torch.long)
+    times = torch.tensor([0.0, 0.5, 0.19, 0.2, 0.99], dtype=torch.float32)
+
+    assert torch.equal(sampler._times_to_bins(motion_ids, times), torch.tensor([0, 1, 0, 1, 3]))
+
+
+def test_sampler_vectorized_bin_count_accumulation_preserves_list_views(tmp_path: Path) -> None:
+    motion_a = tmp_path / "motion_a.npz"
+    motion_b = tmp_path / "motion_b.npz"
+    _write_motion_file(
+        motion_a,
+        segment_start_times=np.asarray([0.0, 0.5], dtype=np.float32),
+        segment_end_times=np.asarray([0.5, 1.0], dtype=np.float32),
+        segment_types=np.asarray([SEGMENT_TYPE_TIME_BIN, SEGMENT_TYPE_TIME_BIN], dtype=np.int64),
+    )
+    _write_motion_file(
+        motion_b,
+        segment_start_times=np.asarray([0.0, 0.25, 0.5], dtype=np.float32),
+        segment_end_times=np.asarray([0.25, 0.5, 1.0], dtype=np.float32),
+        segment_types=np.asarray([SEGMENT_TYPE_TIME_BIN] * 3, dtype=np.int64),
+    )
+    motion_lib = MotionLib([motion_a, motion_b])
+    sampler_mod = _load_sampler_module()
+    sampler = sampler_mod.Sampler(
+        num_envs=1,
+        motion_lib=motion_lib,
+        dt=0.05,
+        anchor_body_index=0,
+        device=torch.device("cpu"),
+    )
+
+    motion_ids = torch.tensor([0, 0, 1, 1, 1], dtype=torch.long)
+    bin_indices = torch.tensor([0, 1, 0, 2, 2], dtype=torch.long)
+    sampler._accumulate_bin_counts(sampler.bin_sample_counts, motion_ids, bin_indices)
+
+    assert torch.equal(sampler.bin_sample_counts[0], torch.tensor([1.0, 1.0]))
+    assert torch.equal(sampler.bin_sample_counts[1], torch.tensor([1.0, 0.0, 2.0]))
+    sampler.bin_sample_counts[1][1] = 7.0
+    assert sampler._bin_sample_counts_padded[1, 1].item() == 7.0
+
+
+def test_sampler_failure_weighted_reset_returns_valid_time_bins(tmp_path: Path) -> None:
+    motion_a = tmp_path / "motion_a.npz"
+    motion_b = tmp_path / "motion_b.npz"
+    _write_motion_file(
+        motion_a,
+        segment_start_times=np.asarray([0.0, 0.5], dtype=np.float32),
+        segment_end_times=np.asarray([0.5, 1.0], dtype=np.float32),
+        segment_types=np.asarray([SEGMENT_TYPE_TIME_BIN, SEGMENT_TYPE_TIME_BIN], dtype=np.int64),
+    )
+    _write_motion_file(
+        motion_b,
+        segment_start_times=np.asarray([0.0, 0.2, 0.8], dtype=np.float32),
+        segment_end_times=np.asarray([0.2, 0.8, 1.0], dtype=np.float32),
+        segment_types=np.asarray([SEGMENT_TYPE_TIME_BIN] * 3, dtype=np.int64),
+    )
+    motion_lib = MotionLib([motion_a, motion_b])
+    sampler_mod = _load_sampler_module()
+    sampler = sampler_mod.Sampler(
+        num_envs=64,
+        motion_lib=motion_lib,
+        dt=0.05,
+        anchor_body_index=0,
+        device=torch.device("cpu"),
+    )
+
+    reset_sample = sampler.reset(
+        torch.arange(64, dtype=torch.long),
+        strategy=sampler_mod.SamplingStrategy.FailureWeighted,
+    )
+    bin_starts = sampler._bin_start_times_padded[reset_sample.motion_ids, reset_sample.target_bin_indices]
+    bin_ends = sampler._bin_end_times_padded[reset_sample.motion_ids, reset_sample.target_bin_indices]
+
+    assert torch.all(reset_sample.target_bin_indices >= 0)
+    assert torch.all(reset_sample.target_bin_indices < sampler.num_bins_per_motion[reset_sample.motion_ids])
+    assert torch.all(reset_sample.times >= bin_starts)
+    assert torch.all(reset_sample.times <= bin_ends)
+
+
+def test_sampler_failure_weighted_reset_returns_valid_anchor_bins(tmp_path: Path) -> None:
+    motion_file = tmp_path / "anchor_motion.npz"
+    _write_anchor_sampler_motion_file(motion_file)
+    motion_lib = MotionLib([motion_file])
+    sampler_mod = _load_sampler_module()
+    sampler = sampler_mod.Sampler(
+        num_envs=32,
+        motion_lib=motion_lib,
+        dt=0.05,
+        anchor_body_index=0,
+        segment_source=sampler_mod.SegmentSource.Anchor,
+        device=torch.device("cpu"),
+    )
+
+    reset_sample = sampler.reset(
+        torch.arange(32, dtype=torch.long),
+        strategy=sampler_mod.SamplingStrategy.FailureWeighted,
+    )
+
+    assert torch.all(reset_sample.target_bin_indices >= 0)
+    assert torch.all(reset_sample.target_bin_indices < 3)
+    assert torch.allclose(reset_sample.times, sampler.bin_reset_times[0][reset_sample.target_bin_indices])
+
+
 def test_sampler_exports_segment_source_default(tmp_path: Path) -> None:
     motion_file = tmp_path / "segmented_motion.npz"
     _write_motion_file(

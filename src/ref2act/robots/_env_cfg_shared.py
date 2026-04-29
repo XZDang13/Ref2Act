@@ -289,6 +289,7 @@ class G1MotionTrackingEnvCfg(DirectRLEnvCfg):
     sampler_mod:SamplerMod = SamplerMod.Clamp
     adaptive_sampler: AdaptiveSamplerCfg = AdaptiveSamplerCfg()
     init_failure_bins: bool | None = None
+    compact_motion_storage: bool = True
 
     root_link_name = "pelvis"
     anchor_body_name = "pelvis"

@@ -144,11 +144,23 @@ class MotionSampler:
         self.bin_uses_segment_metadata: list[bool] | None = None
         self.bin_fail_counts: list[torch.Tensor] | None = None
         self.bin_sample_counts: list[torch.Tensor] | None = None
+        self.max_bins_per_motion = 0
+        self._bin_start_times_padded: torch.Tensor | None = None
+        self._bin_end_times_padded: torch.Tensor | None = None
+        self._bin_types_padded: torch.Tensor | None = None
+        self._bin_reset_times_padded: torch.Tensor | None = None
+        self._bin_reset_eligible_padded: torch.Tensor | None = None
+        self._bin_valid_mask_padded: torch.Tensor | None = None
+        self._bin_fail_counts_padded: torch.Tensor | None = None
+        self._bin_sample_counts_padded: torch.Tensor | None = None
         self.supports_failure_weighted_sampling = False
 
         self.adaptive_bin_quarantined: list[torch.Tensor] | None = None
         self.adaptive_bin_cooldowns: list[torch.Tensor] | None = None
         self.adaptive_bin_mastered: list[torch.Tensor] | None = None
+        self._adaptive_bin_quarantined_padded: torch.Tensor | None = None
+        self._adaptive_bin_cooldowns_padded: torch.Tensor | None = None
+        self._adaptive_bin_mastered_padded: torch.Tensor | None = None
         self.adaptive_motion_quarantined: torch.Tensor | None = None
         self.adaptive_motion_cooldowns: torch.Tensor | None = None
         self.adaptive_motion_mastered: torch.Tensor | None = None
@@ -348,6 +360,178 @@ class MotionSampler:
         capped_probs[eligible] = eligible_projected_probs
         return capped_probs / projected_sum
 
+    def _apply_max_uniform_probability_cap_batched(
+        self,
+        probs: torch.Tensor,
+        *,
+        eligible_mask: torch.Tensor,
+        uniform_probs: torch.Tensor,
+    ) -> torch.Tensor:
+        probs = torch.as_tensor(probs, dtype=torch.float32, device=self.device)
+        eligible = torch.as_tensor(eligible_mask, dtype=torch.bool, device=self.device)
+        uniform_probs = torch.as_tensor(uniform_probs, dtype=torch.float32, device=self.device)
+        if probs.shape != eligible.shape or probs.shape != uniform_probs.shape:
+            raise ValueError("Probability cap inputs must have the same shape.")
+        if probs.ndim != 2:
+            raise ValueError("Batched probability cap inputs must be 2-D.")
+
+        eps = torch.finfo(probs.dtype).eps
+        probs = torch.where(eligible, probs, torch.zeros_like(probs))
+        probs = probs / torch.clamp(torch.sum(probs, dim=1, keepdim=True), min=eps)
+
+        if self.failure_weight_max_uniform_ratio is None:
+            return probs
+
+        eligible_count = torch.sum(eligible.to(dtype=torch.float32), dim=1, keepdim=True)
+        if bool(torch.any(eligible_count <= 0).item()):
+            raise ValueError("eligible_mask must include at least one entry in every row.")
+
+        max_prob = float(self.failure_weight_max_uniform_ratio) / eligible_count
+        cap_needed = (max_prob < 1.0) & torch.any(probs > max_prob + eps, dim=1, keepdim=True)
+        finite_rows = torch.all(torch.isfinite(probs), dim=1, keepdim=True)
+        positive_rows = torch.sum(probs, dim=1, keepdim=True) > eps
+        cap_needed = cap_needed & finite_rows & positive_rows
+        if not bool(torch.any(cap_needed).item()):
+            return torch.where(finite_rows & positive_rows, probs, uniform_probs)
+
+        inf = torch.full_like(probs, float("inf"))
+        lower = torch.min(torch.where(eligible, probs - max_prob, inf), dim=1, keepdim=True).values
+        upper = torch.max(torch.where(eligible, probs, torch.zeros_like(probs)), dim=1, keepdim=True).values
+        for _ in range(64):
+            threshold = 0.5 * (lower + upper)
+            projected_probs = torch.clamp(probs - threshold, min=0.0)
+            projected_probs = torch.minimum(projected_probs, max_prob)
+            projected_probs = torch.where(eligible, projected_probs, torch.zeros_like(projected_probs))
+            lower = torch.where(torch.sum(projected_probs, dim=1, keepdim=True) > 1.0, threshold, lower)
+            upper = torch.where(torch.sum(projected_probs, dim=1, keepdim=True) > 1.0, upper, threshold)
+
+        capped_probs = torch.clamp(probs - upper, min=0.0)
+        capped_probs = torch.minimum(capped_probs, max_prob)
+        capped_probs = torch.where(eligible, capped_probs, torch.zeros_like(capped_probs))
+        capped_sum = torch.sum(capped_probs, dim=1, keepdim=True)
+        capped_probs = torch.where(capped_sum > eps, capped_probs / torch.clamp(capped_sum, min=eps), uniform_probs)
+        return torch.where(cap_needed, capped_probs, probs)
+
+    def _build_guarded_sampling_probabilities_batched(
+        self,
+        fail_counts: torch.Tensor,
+        sample_counts: torch.Tensor,
+        *,
+        temperature: float,
+        eligible_mask: torch.Tensor,
+        probability_scale: torch.Tensor | None = None,
+        probe_mask: torch.Tensor | None = None,
+        probe_probability: float = 0.0,
+    ) -> torch.Tensor:
+        if temperature <= 0.0:
+            raise ValueError("temperature must be > 0")
+        resolved_probe_probability = float(probe_probability)
+        if (
+            not math.isfinite(resolved_probe_probability)
+            or resolved_probe_probability < 0.0
+            or resolved_probe_probability > 1.0
+        ):
+            raise ValueError("probe_probability must be a finite value in [0, 1].")
+
+        fail_counts = torch.as_tensor(fail_counts, dtype=torch.float32, device=self.device)
+        sample_counts = torch.as_tensor(sample_counts, dtype=torch.float32, device=self.device)
+        eligible = torch.as_tensor(eligible_mask, dtype=torch.bool, device=self.device)
+        if fail_counts.shape != sample_counts.shape or fail_counts.shape != eligible.shape:
+            raise ValueError("Batched probability inputs must have the same shape.")
+        if fail_counts.ndim != 2:
+            raise ValueError("Batched probability inputs must be 2-D.")
+
+        if probability_scale is None:
+            scale = torch.ones_like(fail_counts, dtype=torch.float32, device=self.device)
+        else:
+            scale = torch.as_tensor(probability_scale, dtype=torch.float32, device=self.device)
+            if scale.shape != fail_counts.shape:
+                raise ValueError("probability_scale must have the same shape as fail_counts.")
+            if not bool(torch.all(torch.isfinite(scale)).item()) or bool(torch.any(scale < 0.0).item()):
+                raise ValueError("probability_scale must contain finite non-negative values.")
+
+        if probe_mask is None:
+            probe = torch.zeros_like(eligible, dtype=torch.bool, device=self.device)
+        else:
+            probe = torch.as_tensor(probe_mask, dtype=torch.bool, device=self.device)
+            if probe.shape != fail_counts.shape:
+                raise ValueError("probe_mask must have the same shape as fail_counts.")
+
+        eps = torch.finfo(fail_counts.dtype).eps
+        probe_probs = probe.to(dtype=torch.float32)
+        probe_sum = torch.sum(probe_probs, dim=1, keepdim=True)
+        probe_probs = torch.where(probe_sum > 0.0, probe_probs / torch.clamp(probe_sum, min=eps), probe_probs)
+
+        eligible_float = eligible.to(dtype=torch.float32)
+        eligible_count = torch.sum(eligible_float, dim=1, keepdim=True)
+        if bool(torch.any((eligible_count <= 0.0) & (probe_sum <= 0.0)).item()):
+            raise ValueError("eligible_mask must include at least one entry in every row.")
+        has_eligible = eligible_count > 0.0
+        uniform_probs = torch.where(
+            has_eligible,
+            eligible_float / torch.clamp(eligible_count, min=eps),
+            torch.zeros_like(eligible_float),
+        )
+
+        scaled_uniform_probs = torch.where(eligible, uniform_probs * scale, torch.zeros_like(uniform_probs))
+        scaled_uniform_sum = torch.sum(scaled_uniform_probs, dim=1, keepdim=True)
+        scaled_uniform_probs = torch.where(
+            scaled_uniform_sum > 0.0,
+            scaled_uniform_probs / torch.clamp(scaled_uniform_sum, min=eps),
+            uniform_probs,
+        )
+
+        eligible_sample_counts = torch.where(
+            eligible,
+            torch.clamp(sample_counts, min=0.0),
+            torch.zeros_like(sample_counts),
+        )
+        total_eligible_samples = torch.sum(eligible_sample_counts, dim=1, keepdim=True)
+        exploration_scale = torch.log(total_eligible_samples + eligible_count + 1.0)
+        exploration = torch.sqrt(exploration_scale / (eligible_sample_counts + 1.0))
+
+        fail_rate = fail_counts / torch.clamp(sample_counts, min=1.0)
+        score = fail_rate + self.failure_weight_exploration_bonus * exploration
+        learned_weights = score.pow(1.0 / temperature)
+        learned_weights = torch.where(eligible, learned_weights, torch.zeros_like(learned_weights))
+
+        learned_sum = torch.sum(learned_weights, dim=1, keepdim=True)
+        learned_valid = torch.all(torch.isfinite(learned_weights), dim=1, keepdim=True) & (learned_sum > 0.0)
+        learned_probs = torch.where(
+            learned_valid,
+            learned_weights / torch.clamp(learned_sum, min=eps),
+            uniform_probs,
+        )
+
+        probs = (
+            (1.0 - self.failure_weight_uniform_mix) * learned_probs
+            + self.failure_weight_uniform_mix * uniform_probs
+        )
+        probs = torch.where(eligible, probs * scale, torch.zeros_like(probs))
+        probs_sum = torch.sum(probs, dim=1, keepdim=True)
+        probs = torch.where(
+            probs_sum > 0.0,
+            probs / torch.clamp(probs_sum, min=eps),
+            scaled_uniform_probs,
+        )
+
+        if bool(torch.any(has_eligible).item()):
+            capped_probs = probs.clone()
+            capped_rows = has_eligible.squeeze(1)
+            capped_probs[capped_rows] = self._apply_max_uniform_probability_cap_batched(
+                probs[capped_rows],
+                eligible_mask=eligible[capped_rows],
+                uniform_probs=scaled_uniform_probs[capped_rows],
+            )
+            probs = capped_probs
+        else:
+            probs = probe_probs
+        if resolved_probe_probability > 0.0 and bool(torch.any(probe_sum > 0.0).item()):
+            probs = (1.0 - resolved_probe_probability) * probs + resolved_probe_probability * probe_probs
+            probs = probs / torch.clamp(torch.sum(probs, dim=1, keepdim=True), min=eps)
+
+        return torch.where(has_eligible, probs, probe_probs)
+
     def _has_adaptive_state(self) -> bool:
         return (
             bool(self.adaptive_sampler.enabled)
@@ -355,6 +539,9 @@ class MotionSampler:
             and self.adaptive_bin_quarantined is not None
             and self.adaptive_bin_cooldowns is not None
             and self.adaptive_bin_mastered is not None
+            and self._adaptive_bin_quarantined_padded is not None
+            and self._adaptive_bin_cooldowns_padded is not None
+            and self._adaptive_bin_mastered_padded is not None
             and self.adaptive_motion_quarantined is not None
             and self.adaptive_motion_cooldowns is not None
             and self.adaptive_motion_mastered is not None
@@ -365,23 +552,43 @@ class MotionSampler:
             self.adaptive_bin_quarantined = None
             self.adaptive_bin_cooldowns = None
             self.adaptive_bin_mastered = None
+            self._adaptive_bin_quarantined_padded = None
+            self._adaptive_bin_cooldowns_padded = None
+            self._adaptive_bin_mastered_padded = None
             self.adaptive_motion_quarantined = None
             self.adaptive_motion_cooldowns = None
             self.adaptive_motion_mastered = None
             self.adaptive_probe_sample_count = 0
             return
 
+        if self._bin_sample_counts_padded is None:
+            raise RuntimeError("Adaptive sampler requires padded failure bins.")
+        self._adaptive_bin_quarantined_padded = torch.zeros_like(
+            self._bin_sample_counts_padded,
+            dtype=torch.bool,
+            device=self.device,
+        )
+        self._adaptive_bin_cooldowns_padded = torch.zeros_like(
+            self._bin_sample_counts_padded,
+            dtype=torch.long,
+            device=self.device,
+        )
+        self._adaptive_bin_mastered_padded = torch.zeros_like(
+            self._bin_sample_counts_padded,
+            dtype=torch.bool,
+            device=self.device,
+        )
         self.adaptive_bin_quarantined = [
-            torch.zeros_like(sample_counts, dtype=torch.bool, device=self.device)
-            for sample_counts in self.bin_sample_counts
+            self._adaptive_bin_quarantined_padded[motion_id, : int(num_bins)]
+            for motion_id, num_bins in enumerate(self.num_bins_per_motion.tolist())
         ]
         self.adaptive_bin_cooldowns = [
-            torch.zeros_like(sample_counts, dtype=torch.long, device=self.device)
-            for sample_counts in self.bin_sample_counts
+            self._adaptive_bin_cooldowns_padded[motion_id, : int(num_bins)]
+            for motion_id, num_bins in enumerate(self.num_bins_per_motion.tolist())
         ]
         self.adaptive_bin_mastered = [
-            torch.zeros_like(sample_counts, dtype=torch.bool, device=self.device)
-            for sample_counts in self.bin_sample_counts
+            self._adaptive_bin_mastered_padded[motion_id, : int(num_bins)]
+            for motion_id, num_bins in enumerate(self.num_bins_per_motion.tolist())
         ]
         self.adaptive_motion_quarantined = torch.zeros(
             self.motion_lib.num_motions,
@@ -515,8 +722,12 @@ class MotionSampler:
 
     def _update_adaptive_motion_state(self) -> None:
         cfg = self.adaptive_sampler
-        motion_fail_counts = torch.stack([fail_counts.sum() for fail_counts in self.bin_fail_counts], dim=0)
-        motion_sample_counts = torch.stack([sample_counts.sum() for sample_counts in self.bin_sample_counts], dim=0)
+        if self._bin_fail_counts_padded is not None and self._bin_sample_counts_padded is not None:
+            motion_fail_counts = torch.sum(self._bin_fail_counts_padded, dim=1)
+            motion_sample_counts = torch.sum(self._bin_sample_counts_padded, dim=1)
+        else:
+            motion_fail_counts = torch.stack([fail_counts.sum() for fail_counts in self.bin_fail_counts], dim=0)
+            motion_sample_counts = torch.stack([sample_counts.sum() for sample_counts in self.bin_sample_counts], dim=0)
         motion_fail_rate = self._adaptive_fail_rate(motion_fail_counts, motion_sample_counts)
         anchor_quarantine_fraction = self._adaptive_motion_anchor_quarantine_fraction()
         warmed = motion_sample_counts >= float(cfg.motion_min_samples)
@@ -607,6 +818,42 @@ class MotionSampler:
         )
         return eligible, scale, quarantined, float(self.adaptive_sampler.probe_probability)
 
+    def _adaptive_bin_probability_inputs_padded(
+        self,
+        motion_ids: torch.Tensor,
+        base_eligible: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None, float]:
+        if not self._has_adaptive_state():
+            return base_eligible, None, None, 0.0
+        if (
+            self._adaptive_bin_quarantined_padded is None
+            or self._adaptive_bin_mastered_padded is None
+        ):
+            raise RuntimeError("Adaptive padded bin state is not initialized.")
+
+        quarantined = self._adaptive_bin_quarantined_padded[motion_ids] & base_eligible
+        eligible = base_eligible & ~quarantined
+        mastered = self._adaptive_bin_mastered_padded[motion_ids]
+        scale = torch.where(
+            mastered,
+            torch.full_like(mastered, float(self.adaptive_sampler.mastered_probability_scale), dtype=torch.float32),
+            torch.ones_like(mastered, dtype=torch.float32),
+        )
+        return eligible, scale, quarantined, float(self.adaptive_sampler.probe_probability)
+
+    def _record_adaptive_probe_samples_batched(
+        self,
+        sampled_indices: torch.Tensor,
+        probe_mask: torch.Tensor | None,
+    ) -> None:
+        if not self._has_adaptive_state() or probe_mask is None:
+            return
+        if sampled_indices.numel() == 0 or not bool(torch.any(probe_mask).item()):
+            return
+        sampled_indices = torch.as_tensor(sampled_indices, dtype=torch.long, device=self.device).reshape(-1, 1)
+        selected_probe = torch.gather(probe_mask.to(dtype=torch.bool), dim=1, index=sampled_indices)
+        self.adaptive_probe_sample_count += int(torch.sum(selected_probe).item())
+
     def _sample_failure_weighted_motion_ids(
         self,
         env_ids: IndexLike | None = None,
@@ -621,8 +868,12 @@ class MotionSampler:
         if num_samples == 0:
             return torch.empty(0, dtype=torch.long, device=self.device)
 
-        motion_fail_counts = torch.stack([fail_counts.sum() for fail_counts in self.bin_fail_counts], dim=0)
-        motion_sample_counts = torch.stack([sample_counts.sum() for sample_counts in self.bin_sample_counts], dim=0)
+        if self._bin_fail_counts_padded is not None and self._bin_sample_counts_padded is not None:
+            motion_fail_counts = torch.sum(self._bin_fail_counts_padded, dim=1)
+            motion_sample_counts = torch.sum(self._bin_sample_counts_padded, dim=1)
+        else:
+            motion_fail_counts = torch.stack([fail_counts.sum() for fail_counts in self.bin_fail_counts], dim=0)
+            motion_sample_counts = torch.stack([sample_counts.sum() for sample_counts in self.bin_sample_counts], dim=0)
         eligible_mask, probability_scale, probe_mask, probe_probability = self._adaptive_motion_probability_inputs()
         motion_probs = self._build_guarded_sampling_probabilities(
             motion_fail_counts,
@@ -665,6 +916,18 @@ class MotionSampler:
         if not torch.any(self.motion_lib.motion_has_segments[motion_ids]):
             return times, target_bin_indices
 
+        if (
+            self._has_padded_failure_bins()
+            and self._bin_start_times_padded is not None
+            and bool(torch.all(self.motion_lib.motion_has_segments[motion_ids]).item())
+        ):
+            num_bins = self.num_bins_per_motion[motion_ids]
+            segment_indices = torch.floor(torch.rand(motion_ids.shape, device=self.device) * num_bins).long()
+            segment_indices = torch.clamp(segment_indices, max=num_bins - 1)
+            times = self._bin_start_times_padded[motion_ids, segment_indices]
+            target_bin_indices = segment_indices
+            return times, target_bin_indices
+
         for motion_id in torch.unique(motion_ids, sorted=True).tolist():
             if not bool(self.motion_lib.motion_has_segments[motion_id].item()):
                 continue
@@ -694,6 +957,17 @@ class MotionSampler:
         motion_ids = torch.as_tensor(motion_ids, dtype=torch.long, device=self.device).reshape(-1)
         times = torch.empty(motion_ids.shape, dtype=torch.float32, device=self.device)
         target_bin_indices = torch.empty(motion_ids.shape, dtype=torch.long, device=self.device)
+
+        if self._has_padded_failure_bins() and self._bin_reset_times_padded is not None:
+            num_anchor_bins = self.num_bins_per_motion[motion_ids]
+            if bool(torch.any(num_anchor_bins <= 0).item()):
+                raise self._anchor_sampling_error(
+                    "Anchor segment sampling requires at least one reset anchor for every motion clip."
+                )
+            target_bin_indices = torch.floor(torch.rand(motion_ids.shape, device=self.device) * num_anchor_bins).long()
+            target_bin_indices = torch.clamp(target_bin_indices, max=num_anchor_bins - 1)
+            times = self._bin_reset_times_padded[motion_ids, target_bin_indices]
+            return times, target_bin_indices
 
         for motion_id in torch.unique(motion_ids, sorted=True).tolist():
             mask = motion_ids == motion_id
@@ -728,6 +1002,46 @@ class MotionSampler:
         motion_ids = torch.as_tensor(motion_ids, dtype=torch.long, device=self.device).reshape(-1)
         times = torch.empty(motion_ids.shape, dtype=torch.float32, device=self.device)
         target_bin_indices = torch.empty(motion_ids.shape, dtype=torch.long, device=self.device)
+
+        if (
+            self._has_padded_failure_bins()
+            and self._bin_fail_counts_padded is not None
+            and self._bin_sample_counts_padded is not None
+            and self._bin_valid_mask_padded is not None
+            and self._bin_start_times_padded is not None
+            and self._bin_end_times_padded is not None
+            and self._bin_reset_times_padded is not None
+            and self._bin_reset_eligible_padded is not None
+            and self.max_bins_per_motion > 0
+        ):
+            fail_counts = self._bin_fail_counts_padded[motion_ids]
+            sample_counts = self._bin_sample_counts_padded[motion_ids]
+            if self.segment_source == SegmentSource.Anchor:
+                base_eligible = self._bin_reset_eligible_padded[motion_ids] & self._bin_valid_mask_padded[motion_ids]
+            else:
+                base_eligible = self._bin_valid_mask_padded[motion_ids]
+            eligible_mask, probability_scale, probe_mask, probe_probability = (
+                self._adaptive_bin_probability_inputs_padded(motion_ids, base_eligible)
+            )
+            probs = self._build_guarded_sampling_probabilities_batched(
+                fail_counts,
+                sample_counts,
+                temperature=temperature,
+                eligible_mask=eligible_mask,
+                probability_scale=probability_scale,
+                probe_mask=probe_mask,
+                probe_probability=probe_probability,
+            )
+            target_bin_indices = torch.multinomial(probs, num_samples=1, replacement=True).squeeze(-1)
+            self._record_adaptive_probe_samples_batched(target_bin_indices, probe_mask)
+
+            if self.segment_source == SegmentSource.Anchor:
+                times = self._bin_reset_times_padded[motion_ids, target_bin_indices]
+            else:
+                bin_starts = self._bin_start_times_padded[motion_ids, target_bin_indices]
+                bin_ends = self._bin_end_times_padded[motion_ids, target_bin_indices]
+                times = bin_starts + torch.rand(motion_ids.shape, device=self.device) * (bin_ends - bin_starts)
+            return times, target_bin_indices
 
         for motion_id in torch.unique(motion_ids, sorted=True).tolist():
             mask = motion_ids == motion_id
@@ -905,6 +1219,61 @@ class MotionSampler:
         eligible = torch.ones(anchor_times.shape, dtype=torch.bool, device=self.device)
         return start_times, end_times, anchor_labels, reset_times, eligible
 
+    def _build_padded_bin_tensors(self) -> None:
+        if self.num_bins_per_motion is None:
+            raise RuntimeError("num_bins_per_motion must be initialized before padded bin tensors.")
+        if (
+            self.bin_start_times is None
+            or self.bin_end_times is None
+            or self.bin_types is None
+            or self.bin_reset_times is None
+            or self.bin_reset_eligible is None
+        ):
+            raise RuntimeError("Bin metadata lists must be initialized before padded bin tensors.")
+
+        num_motions = self.motion_lib.num_motions
+        self.max_bins_per_motion = int(self.num_bins_per_motion.max().item()) if num_motions > 0 else 0
+        shape = (num_motions, self.max_bins_per_motion)
+        self._bin_start_times_padded = torch.zeros(shape, dtype=torch.float32, device=self.device)
+        self._bin_end_times_padded = torch.full(shape, float("inf"), dtype=torch.float32, device=self.device)
+        self._bin_types_padded = torch.zeros(shape, dtype=torch.long, device=self.device)
+        self._bin_reset_times_padded = torch.zeros(shape, dtype=torch.float32, device=self.device)
+        self._bin_reset_eligible_padded = torch.zeros(shape, dtype=torch.bool, device=self.device)
+        self._bin_valid_mask_padded = torch.zeros(shape, dtype=torch.bool, device=self.device)
+        self._bin_fail_counts_padded = torch.zeros(shape, dtype=torch.float32, device=self.device)
+        self._bin_sample_counts_padded = torch.zeros(shape, dtype=torch.float32, device=self.device)
+
+        for motion_id, num_bins in enumerate(self.num_bins_per_motion.tolist()):
+            if num_bins == 0:
+                continue
+            bin_slice = slice(0, int(num_bins))
+            self._bin_start_times_padded[motion_id, bin_slice] = self.bin_start_times[motion_id]
+            self._bin_end_times_padded[motion_id, bin_slice] = self.bin_end_times[motion_id]
+            self._bin_types_padded[motion_id, bin_slice] = self.bin_types[motion_id]
+            self._bin_reset_times_padded[motion_id, bin_slice] = self.bin_reset_times[motion_id]
+            self._bin_reset_eligible_padded[motion_id, bin_slice] = self.bin_reset_eligible[motion_id]
+            self._bin_valid_mask_padded[motion_id, bin_slice] = True
+
+        self.bin_fail_counts = [
+            self._bin_fail_counts_padded[motion_id, : int(num_bins)]
+            for motion_id, num_bins in enumerate(self.num_bins_per_motion.tolist())
+        ]
+        self.bin_sample_counts = [
+            self._bin_sample_counts_padded[motion_id, : int(num_bins)]
+            for motion_id, num_bins in enumerate(self.num_bins_per_motion.tolist())
+        ]
+
+    def _has_padded_failure_bins(self) -> bool:
+        return (
+            self._bin_start_times_padded is not None
+            and self._bin_end_times_padded is not None
+            and self._bin_reset_times_padded is not None
+            and self._bin_reset_eligible_padded is not None
+            and self._bin_valid_mask_padded is not None
+            and self._bin_fail_counts_padded is not None
+            and self._bin_sample_counts_padded is not None
+        )
+
     def init_failure_bins(self, bin_size: float | None = None) -> None:
         if bin_size is not None and bin_size <= 0.0:
             raise ValueError("bin_size must be > 0")
@@ -941,14 +1310,7 @@ class MotionSampler:
 
         self.num_bins_per_motion = torch.as_tensor(num_bins_per_motion, dtype=torch.long, device=self.device)
         self.num_bins = int(self.num_bins_per_motion.sum().item())
-        self.bin_fail_counts = [
-            torch.zeros(int(num_bins), dtype=torch.float32, device=self.device)
-            for num_bins in self.num_bins_per_motion.tolist()
-        ]
-        self.bin_sample_counts = [
-            torch.zeros(int(num_bins), dtype=torch.float32, device=self.device)
-            for num_bins in self.num_bins_per_motion.tolist()
-        ]
+        self._build_padded_bin_tensors()
         self.supports_failure_weighted_sampling = all(self.bin_uses_segment_metadata)
         self._init_adaptive_state()
 
@@ -1015,6 +1377,7 @@ class MotionSampler:
             and self.bin_uses_segment_metadata is not None
             and self.bin_fail_counts is not None
             and self.bin_sample_counts is not None
+            and self._has_padded_failure_bins()
         )
 
     def _check_failure_bins(self) -> None:
@@ -1040,6 +1403,17 @@ class MotionSampler:
     def _times_to_bins(self, motion_ids: torch.Tensor, times: torch.Tensor) -> torch.Tensor:
         motion_ids = torch.as_tensor(motion_ids, dtype=torch.long, device=self.device).reshape(-1)
         times = torch.as_tensor(times, dtype=torch.float32, device=self.device).reshape(-1)
+        if (
+            self._has_padded_failure_bins()
+            and self._bin_end_times_padded is not None
+            and self.num_bins_per_motion is not None
+            and self.max_bins_per_motion > 0
+        ):
+            motion_times = torch.clamp(times, min=0.0).unsqueeze(1)
+            end_times = self._bin_end_times_padded[motion_ids]
+            bin_indices = torch.sum(motion_times >= end_times, dim=1).to(dtype=torch.long)
+            return torch.minimum(bin_indices, self.num_bins_per_motion[motion_ids] - 1)
+
         bin_indices = torch.empty_like(motion_ids)
 
         for motion_id in torch.unique(motion_ids, sorted=True).tolist():
@@ -1058,6 +1432,29 @@ class MotionSampler:
         motion_ids: torch.Tensor,
         bin_indices: torch.Tensor,
     ) -> None:
+        if (
+            self._has_padded_failure_bins()
+            and self.num_bins_per_motion is not None
+            and self.max_bins_per_motion > 0
+            and (counts_by_motion is self.bin_fail_counts or counts_by_motion is self.bin_sample_counts)
+        ):
+            target_counts = (
+                self._bin_fail_counts_padded
+                if counts_by_motion is self.bin_fail_counts
+                else self._bin_sample_counts_padded
+            )
+            if target_counts is None:
+                raise RuntimeError("Padded count tensor is not initialized.")
+            motion_ids = torch.as_tensor(motion_ids, dtype=torch.long, device=self.device).reshape(-1)
+            bin_indices = torch.as_tensor(bin_indices, dtype=torch.long, device=self.device).reshape(-1)
+            flat_indices = motion_ids * int(self.max_bins_per_motion) + bin_indices
+            increments = torch.bincount(
+                flat_indices,
+                minlength=self.motion_lib.num_motions * int(self.max_bins_per_motion),
+            ).to(device=self.device, dtype=torch.float32)
+            target_counts.add_(increments.view(self.motion_lib.num_motions, int(self.max_bins_per_motion)))
+            return
+
         for motion_id in torch.unique(motion_ids, sorted=True).tolist():
             motion_mask = motion_ids == motion_id
             counts_by_motion[motion_id] += torch.bincount(
@@ -1085,9 +1482,13 @@ class MotionSampler:
                 raise ValueError("target_bin_indices must have the same shape as motion_ids.")
 
         if self.failure_decay < 1.0:
-            for fail_counts, sample_counts in zip(self.bin_fail_counts, self.bin_sample_counts, strict=False):
-                fail_counts.mul_(self.failure_decay)
-                sample_counts.mul_(self.failure_decay)
+            if self._bin_fail_counts_padded is not None and self._bin_sample_counts_padded is not None:
+                self._bin_fail_counts_padded.mul_(self.failure_decay)
+                self._bin_sample_counts_padded.mul_(self.failure_decay)
+            else:
+                for fail_counts, sample_counts in zip(self.bin_fail_counts, self.bin_sample_counts, strict=False):
+                    fail_counts.mul_(self.failure_decay)
+                    sample_counts.mul_(self.failure_decay)
         self._accumulate_bin_counts(self.bin_sample_counts, motion_ids, target_bin_indices)
         self._advance_adaptive_cooldowns()
         self._update_adaptive_state()

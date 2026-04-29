@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import numpy as np
+import pytest
 import torch
 
 from ref2act.motion import MotionLib
@@ -15,6 +16,7 @@ def _write_motion_file(
     fps: float,
     joint_pos: np.ndarray,
     name: str | None = None,
+    include_segments: bool = False,
 ) -> None:
     joint_pos = np.asarray(joint_pos, dtype=np.float32)
     num_frames = int(joint_pos.shape[0])
@@ -38,6 +40,10 @@ def _write_motion_file(
     }
     if name is not None:
         payload["name"] = np.asarray(name)
+    if include_segments:
+        payload["segment_start_times"] = np.asarray([0.0], dtype=np.float32)
+        payload["segment_end_times"] = np.asarray([num_frames / fps], dtype=np.float32)
+        payload["segment_types"] = np.asarray([0], dtype=np.int64)
     np.savez(path, **payload)
 
 
@@ -194,3 +200,52 @@ def test_motion_lib_packed_sampling_uses_flat_frame_storage(tmp_path: Path) -> N
     assert motion_lib._packed_sampling_enabled
     assert motion_lib._packed_sampling_tensors["joint_pos"].shape[0] == 7
     assert torch.equal(motion_lib._packed_frame_offsets, torch.tensor([0, 2], dtype=torch.long))
+
+
+def test_motion_lib_compact_storage_samples_like_non_compact(tmp_path: Path) -> None:
+    motion_a = tmp_path / "short.npz"
+    motion_b = tmp_path / "long.npz"
+    _write_motion_file(
+        motion_a,
+        fps=10.0,
+        joint_pos=np.asarray([[0.0], [1.0]], dtype=np.float32),
+        name="short",
+        include_segments=True,
+    )
+    _write_motion_file(
+        motion_b,
+        fps=10.0,
+        joint_pos=np.asarray([[10.0], [11.0], [12.0]], dtype=np.float32),
+        name="long",
+        include_segments=True,
+    )
+
+    full_motion_lib = MotionLib([motion_a, motion_b])
+    compact_motion_lib = MotionLib([motion_a, motion_b], compact_after_packing=True)
+    motion_ids = torch.tensor([0, 1, 0, 1], dtype=torch.long)
+    times = torch.tensor([0.0, 0.05, 0.1, 0.2], dtype=torch.float32)
+
+    full_samples = full_motion_lib.sample_motion(motion_ids=motion_ids, times=times)
+    compact_samples = compact_motion_lib.sample_motion(motion_ids=motion_ids, times=times)
+
+    assert compact_motion_lib._packed_sampling_enabled
+    assert compact_motion_lib.get_clip(0).has_segments
+    assert compact_motion_lib.get_clip(0).segment_start_times is not None
+    with pytest.raises(RuntimeError, match="compact_after_packing=True"):
+        _ = compact_motion_lib.get_clip(0).joint_pos
+    for key, full_value in full_samples.items():
+        assert torch.allclose(compact_samples[key], full_value, atol=1.0e-6, rtol=1.0e-6)
+
+
+def test_motion_lib_default_storage_keeps_clip_frame_tensors(tmp_path: Path) -> None:
+    motion_file = tmp_path / "motion.npz"
+    _write_motion_file(
+        motion_file,
+        fps=10.0,
+        joint_pos=np.asarray([[0.0], [1.0]], dtype=np.float32),
+        name="motion",
+    )
+
+    motion_lib = MotionLib([motion_file])
+
+    assert torch.equal(motion_lib.get_clip(0).joint_pos.reshape(-1), torch.tensor([0.0, 1.0]))
