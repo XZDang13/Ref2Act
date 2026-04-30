@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 from importlib import import_module
+from time import perf_counter
 from typing import TYPE_CHECKING
 
 import isaaclab.sim as sim_utils
@@ -70,10 +71,21 @@ class MotionTrackingEnv(DirectRLEnv):
         self.action_processer = ActionProcessor(self.robot, self.cfg.action)
         self.action_processor = self.action_processer
 
+        motion_file_input = self.cfg.expert_motion_file
+        motion_file_count = len(motion_file_input) if isinstance(motion_file_input, (list, tuple)) else 1
+        motion_lib_start_time = perf_counter()
+        print(
+            f"initializing motion library for {motion_file_count} motion clip(s)",
+            flush=True,
+        )
         self.motion_lib = MotionLib(
             self.cfg.expert_motion_file,
             self.device,
             compact_after_packing=bool(getattr(self.cfg, "compact_motion_storage", True)),
+        )
+        print(
+            f"motion library initialized: elapsed={perf_counter() - motion_lib_start_time:.1f}s",
+            flush=True,
         )
 
         self.anchor_body_index = self._resolve_shared_body_index(self.cfg.anchor_body_name)
@@ -94,11 +106,16 @@ class MotionTrackingEnv(DirectRLEnv):
             enable_failure_bins = (
                 self.cfg.segment_source == SegmentSource.Anchor
                 or sampling_strategy == SamplingStrategy.FailureWeighted
-                or bool(getattr(self.cfg.adaptive_sampler, "enabled", False))
             )
         else:
             enable_failure_bins = bool(cfg_init_failure_bins)
 
+        sampler_start_time = perf_counter()
+        print(
+            "initializing motion sampler: "
+            f"failure_bins={enable_failure_bins}, segment_source={self.cfg.segment_source}",
+            flush=True,
+        )
         self.sampler = MotionSampler(
             num_envs=self.cfg.scene.num_envs,
             motion_lib=self.motion_lib,
@@ -109,9 +126,12 @@ class MotionTrackingEnv(DirectRLEnv):
             failure_weight_max_uniform_ratio=self.cfg.failure_weight_max_uniform_ratio,
             failure_weight_exploration_bonus=self.cfg.failure_weight_exploration_bonus,
             segment_source=self.cfg.segment_source,
-            adaptive_sampler=self.cfg.adaptive_sampler,
             enable_failure_bins=enable_failure_bins,
             device=self.device,
+        )
+        print(
+            f"motion sampler initialized: elapsed={perf_counter() - sampler_start_time:.1f}s",
+            flush=True,
         )
         if (
             sampling_strategy == SamplingStrategy.FailureWeighted
@@ -439,7 +459,6 @@ class MotionTrackingEnv(DirectRLEnv):
                 self.sampler,
             )
             self.sampler.record_failures(self.termination_model.terminated_env_ids)
-            self._log_sampler_adaptive_stats()
             return terminate, time_out
 
         quality = self._get_tracking_quality()
@@ -465,7 +484,6 @@ class MotionTrackingEnv(DirectRLEnv):
         record_env_ids = torch.nonzero(record_failure_mask, as_tuple=False).squeeze(-1)
         self.sampler.record_failures(record_env_ids)
         self._log_tracking_quality(quality, terminate, time_out, record_env_ids, fall_guard)
-        self._log_sampler_adaptive_stats()
         return terminate, time_out
 
     def _evaluate_fall_guard(self, context) -> FallGuardResult:
@@ -554,12 +572,6 @@ class MotionTrackingEnv(DirectRLEnv):
             dtype=torch.float32,
         )
 
-    def _log_sampler_adaptive_stats(self) -> None:
-        if not hasattr(self.sampler, "get_adaptive_stats"):
-            return
-        for key, value in self.sampler.get_adaptive_stats().items():
-            self.extras[f"sampler/{key}"] = value.detach() if isinstance(value, torch.Tensor) else value
-
     def _reset_idx(self, env_ids: torch.Tensor | None):
         env_ids = self._normalize_env_ids(env_ids)
         if self.tracking_quality_gate is not None:
@@ -578,7 +590,6 @@ class MotionTrackingEnv(DirectRLEnv):
             strategy=self._get_sampling_strategy(),
             temperature=self.cfg.failure_temperature,
         )
-        self._log_sampler_adaptive_stats()
         reference_motion = self._build_reference_motion(env_ids)
         self._initialize_robot_from_reference(env_ids, reference_motion)
         self._store_reference_motion(env_ids, reference_motion)

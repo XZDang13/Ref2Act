@@ -150,7 +150,7 @@ Anchor mode still writes the normal `segment_*` arrays for compatibility, and al
 - `anchor_frame_indices`
 - `anchor_times`
 
-Use this mode when you want the converted file to carry stable reset-anchor annotations alongside the current time-segment metadata. With `cfg.segment_source = SegmentSource.Anchor`, the sampler uses `anchor_times` as the adaptive reset units instead of label-run segments.
+Use this mode when you want the converted file to carry stable reset-anchor annotations alongside the current time-segment metadata. With `cfg.segment_source = SegmentSource.Anchor`, the sampler uses `anchor_times` as reset units instead of label-run segments.
 
 6. Adjust the vertical offset or airborne detection if the imported motion needs it:
 

@@ -67,17 +67,6 @@ def test_shared_env_cfg_defaults_failure_weight_exploration_bonus() -> None:
         assert value.value == 0.5
 
 
-def test_shared_env_cfg_defines_adaptive_sampler_cfg() -> None:
-    tree = ast.parse(ENV_CFG_SHARED.read_text())
-
-    for class_name in ("G1MotionTrackingEnvCfg",):
-        class_def = _find_class(tree, class_name)
-        value = _find_class_assignment(class_def, "adaptive_sampler")
-        assert isinstance(value, ast.Call)
-        assert isinstance(value.func, ast.Name)
-        assert value.func.id == "AdaptiveSamplerCfg"
-
-
 def test_motion_tracking_env_threads_segment_source_into_sampler() -> None:
     tree = ast.parse(MOTION_TRACKING_ENV.read_text())
 
@@ -99,33 +88,6 @@ def test_motion_tracking_env_threads_segment_source_into_sampler() -> None:
     value = segment_source_keywords[0].value
     assert isinstance(value, ast.Attribute)
     assert value.attr == "segment_source"
-    assert isinstance(value.value, ast.Attribute)
-    assert value.value.attr == "cfg"
-    assert isinstance(value.value.value, ast.Name)
-    assert value.value.value.id == "self"
-
-
-def test_motion_tracking_env_threads_adaptive_sampler_into_sampler() -> None:
-    tree = ast.parse(MOTION_TRACKING_ENV.read_text())
-
-    sampler_calls = [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "MotionSampler"
-    ]
-    assert sampler_calls, "Expected MotionSampler(...) call in motion_tracking/env.py."
-
-    adaptive_sampler_keywords = [
-        keyword
-        for call in sampler_calls
-        for keyword in call.keywords
-        if keyword.arg == "adaptive_sampler"
-    ]
-    assert adaptive_sampler_keywords, "Expected MotionSampler(...) to receive adaptive_sampler=..."
-
-    value = adaptive_sampler_keywords[0].value
-    assert isinstance(value, ast.Attribute)
-    assert value.attr == "adaptive_sampler"
     assert isinstance(value.value, ast.Attribute)
     assert value.value.attr == "cfg"
     assert isinstance(value.value.value, ast.Name)

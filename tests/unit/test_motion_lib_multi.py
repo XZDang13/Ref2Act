@@ -237,6 +237,48 @@ def test_motion_lib_compact_storage_samples_like_non_compact(tmp_path: Path) -> 
         assert torch.allclose(compact_samples[key], full_value, atol=1.0e-6, rtol=1.0e-6)
 
 
+def test_motion_lib_compact_storage_reuses_packed_cache(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    cache_dir = tmp_path / "cache"
+    monkeypatch.setenv("REF2ACT_MOTION_PACK_CACHE_DIR", str(cache_dir))
+    motion_a = tmp_path / "short.npz"
+    motion_b = tmp_path / "long.npz"
+    _write_motion_file(
+        motion_a,
+        fps=10.0,
+        joint_pos=np.asarray([[0.0], [1.0]], dtype=np.float32),
+        name="short",
+        include_segments=True,
+    )
+    _write_motion_file(
+        motion_b,
+        fps=10.0,
+        joint_pos=np.asarray([[10.0], [11.0], [12.0]], dtype=np.float32),
+        name="long",
+        include_segments=True,
+    )
+
+    first_motion_lib = MotionLib([motion_a, motion_b], compact_after_packing=True)
+    cache_files = list(cache_dir.glob("motionlib_*.pt"))
+    second_motion_lib = MotionLib([motion_a, motion_b], compact_after_packing=True)
+    output = capsys.readouterr().out
+    motion_ids = torch.tensor([0, 1], dtype=torch.long)
+    times = torch.tensor([0.0, 0.1], dtype=torch.float32)
+
+    assert len(cache_files) == 1
+    assert "packed motion cache loaded:" in output
+    assert second_motion_lib._packed_sampling_enabled
+    assert second_motion_lib.get_clip(0).has_segments
+    with pytest.raises(RuntimeError, match="compact_after_packing=True"):
+        _ = second_motion_lib.get_clip(0).joint_pos
+    for key, first_value in first_motion_lib.sample_motion(motion_ids=motion_ids, times=times).items():
+        second_value = second_motion_lib.sample_motion(motion_ids=motion_ids, times=times)[key]
+        assert torch.allclose(second_value, first_value, atol=1.0e-6, rtol=1.0e-6)
+
+
 def test_motion_lib_default_storage_keeps_clip_frame_tensors(tmp_path: Path) -> None:
     motion_file = tmp_path / "motion.npz"
     _write_motion_file(

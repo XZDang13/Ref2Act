@@ -437,6 +437,35 @@ def test_motion_lib_loads_anchor_metadata(tmp_path: Path) -> None:
     assert np.allclose(clip.anchor_times.cpu().numpy(), np.asarray([0.1, 0.4, 0.7], dtype=np.float32))
 
 
+def test_motion_lib_drops_zero_duration_anchor_segments(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    motion_file = tmp_path / "anchor_motion_with_zero_tail.npz"
+    _write_motion_file(
+        motion_file,
+        anchor_segment_start_times=np.asarray([0.0, 0.5, 1.0], dtype=np.float32),
+        anchor_segment_end_times=np.asarray([0.5, 1.0, 1.0], dtype=np.float32),
+        anchor_segment_labels=np.asarray(
+            [ANCHOR_FRAME_LABEL_GREEN, ANCHOR_FRAME_LABEL_YELLOW, ANCHOR_FRAME_LABEL_RED],
+            dtype=np.int64,
+        ),
+        anchor_frame_indices=np.asarray([0], dtype=np.int64),
+        anchor_times=np.asarray([0.0], dtype=np.float32),
+    )
+
+    motion_lib = MotionLib([motion_file])
+    output = capsys.readouterr().out
+    clip = motion_lib.get_clip(0)
+
+    assert "dropping zero-duration anchor segment(s): count=1" in output
+    assert clip.num_anchor_segments == 2
+    assert motion_lib.motion_num_anchor_segments.tolist() == [2]
+    assert np.allclose(clip.anchor_segment_start_times.cpu().numpy(), np.asarray([0.0, 0.5], dtype=np.float32))
+    assert np.allclose(clip.anchor_segment_end_times.cpu().numpy(), np.asarray([0.5, 1.0], dtype=np.float32))
+    assert clip.anchor_segment_labels.cpu().tolist() == [int(ANCHOR_FRAME_LABEL_GREEN), int(ANCHOR_FRAME_LABEL_YELLOW)]
+
+
 def test_motion_lib_rejects_partial_anchor_metadata(tmp_path: Path) -> None:
     motion_file = tmp_path / "partial_anchor_motion.npz"
     _write_motion_file(

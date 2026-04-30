@@ -1,6 +1,11 @@
 from collections.abc import Sequence
+import gc
+import hashlib
+from math import ceil
+import os
 from os import PathLike
 from pathlib import Path
+from time import perf_counter
 import numpy as np
 import torch
 import matplotlib
@@ -25,6 +30,30 @@ _ANCHOR_SEGMENT_LABELS = (
     int(ANCHOR_FRAME_LABEL_YELLOW),
     int(ANCHOR_FRAME_LABEL_GREEN),
 )
+_MOTION_LOAD_PROGRESS_STEPS = 10
+_MOTION_LOAD_PROGRESS_FILES = int(os.getenv("REF2ACT_MOTION_LOAD_PROGRESS_FILES", "100"))
+_MOTION_LOAD_PROGRESS_SECONDS = float(os.getenv("REF2ACT_MOTION_LOAD_PROGRESS_SECONDS", "5.0"))
+_MOTION_SLOW_CLIP_SECONDS = float(os.getenv("REF2ACT_MOTION_SLOW_CLIP_SECONDS", "2.0"))
+_MOTION_PACK_CACHE_VERSION = 1
+
+
+def _progress_interval(total: int) -> int:
+    if total <= 0:
+        return 1
+    if _MOTION_LOAD_PROGRESS_FILES > 0:
+        return max(1, min(total, _MOTION_LOAD_PROGRESS_FILES))
+    return max(1, min(500, ceil(total / _MOTION_LOAD_PROGRESS_STEPS)))
+
+
+def _motion_file_group(motion_file: str | PathLike[str]) -> str:
+    path = Path(motion_file)
+    parts = path.parts
+    if "mocap_data" in parts:
+        mocap_index = parts.index("mocap_data")
+        if mocap_index + 1 < len(parts):
+            return parts[mocap_index + 1]
+    parent_name = path.parent.name
+    return parent_name or "."
 
 
 def _validate_anchor_segment_arrays(
@@ -40,6 +69,39 @@ def _validate_anchor_segment_arrays(
         raise ValueError("anchor_segment_labels must have the same shape as anchor_segment_start_times.")
     if np.any(~np.isin(resolved_labels, _ANCHOR_SEGMENT_LABELS)):
         raise ValueError("anchor_segment_labels contains unknown anchor label ids.")
+
+
+def _drop_zero_duration_anchor_segments(
+    start_times: np.ndarray,
+    end_times: np.ndarray,
+    labels: np.ndarray,
+    *,
+    motion_file: str,
+    atol: float = 1.0e-5,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    starts = np.asarray(start_times, dtype=np.float32).reshape(-1)
+    ends = np.asarray(end_times, dtype=np.float32).reshape(-1)
+    resolved_labels = np.asarray(labels, dtype=np.int64).reshape(-1)
+
+    non_positive_mask = ends <= starts
+    if not np.any(non_positive_mask):
+        return starts, ends, resolved_labels
+
+    zero_duration_mask = non_positive_mask & np.isclose(ends, starts, atol=atol)
+    if not np.all(non_positive_mask == zero_duration_mask):
+        return starts, ends, resolved_labels
+
+    keep_mask = ~zero_duration_mask
+    if not np.any(keep_mask):
+        return starts, ends, resolved_labels
+
+    dropped_count = int(np.count_nonzero(zero_duration_mask))
+    print(
+        "dropping zero-duration anchor segment(s): "
+        f"count={dropped_count}, path={motion_file}",
+        flush=True,
+    )
+    return starts[keep_mask], ends[keep_mask], resolved_labels[keep_mask]
 
 
 def _validate_anchor_selection_arrays(
@@ -151,14 +213,152 @@ class MotionLib:
             else self.device
         )
         self.motion_files = self._normalize_motion_files(motion_files)
-        self.clips = [self._load_clip(motion_id, motion_file) for motion_id, motion_file in enumerate(self.motion_files)]
-        if not self.clips:
-            raise ValueError("No motion clips were loaded.")
+        load_start_time = perf_counter()
+        total_motion_files = len(self.motion_files)
+        print(
+            "loading motion data: "
+            f"{total_motion_files} clip(s), target_device={self.device}, "
+            f"frame_load_device={self._frame_load_device}, compact_after_packing={self.compact_after_packing}",
+            flush=True,
+        )
+        packed_cache_path = self._packed_cache_path()
+        if self.compact_after_packing and self._try_load_packed_cache(packed_cache_path, load_start_time):
+            return
+
+        gc_was_enabled = gc.isenabled()
+        if gc_was_enabled:
+            gc.disable()
+            print("disabled Python GC during motion bulk load", flush=True)
+        progress_interval = _progress_interval(total_motion_files)
+        self.clips = []
+        loaded_frames = 0
+        last_progress_time = load_start_time
+        current_group = None
+        try:
+            for motion_id, motion_file in enumerate(self.motion_files):
+                motion_group = _motion_file_group(motion_file)
+                loaded_count = motion_id + 1
+                should_log_start = (
+                    total_motion_files > 8
+                    and (
+                        loaded_count == 1
+                        or loaded_count == total_motion_files
+                        or loaded_count % progress_interval == 1
+                    )
+                )
+                if should_log_start:
+                    print(
+                        "loading motion file: "
+                        f"index={loaded_count}/{total_motion_files}, group={motion_group}, path={motion_file}",
+                        flush=True,
+                    )
+                if motion_group != current_group:
+                    current_group = motion_group
+                    print(
+                        "loading motion group: "
+                        f"group={motion_group}, index={loaded_count}/{total_motion_files}, path={motion_file}",
+                        flush=True,
+                    )
+                clip_start_time = perf_counter()
+                clip = self._load_clip(motion_id, motion_file)
+                clip_elapsed = perf_counter() - clip_start_time
+                if _MOTION_SLOW_CLIP_SECONDS > 0.0 and clip_elapsed >= _MOTION_SLOW_CLIP_SECONDS:
+                    try:
+                        size_mb = Path(motion_file).stat().st_size / 1024**2
+                    except OSError:
+                        size_mb = 0.0
+                    print(
+                        "slow motion file load: "
+                        f"index={loaded_count}/{total_motion_files}, elapsed={clip_elapsed:.1f}s, "
+                        f"size_mb={size_mb:.1f}, frames={clip.num_frames}, path={motion_file}",
+                        flush=True,
+                    )
+                self.clips.append(clip)
+                loaded_frames += int(clip.num_frames)
+                now = perf_counter()
+                should_log_by_count = loaded_count == total_motion_files or loaded_count % progress_interval == 0
+                should_log_by_time = (
+                    _MOTION_LOAD_PROGRESS_SECONDS > 0.0
+                    and now - last_progress_time >= _MOTION_LOAD_PROGRESS_SECONDS
+                )
+                if (
+                    total_motion_files > 8
+                    and (should_log_by_count or should_log_by_time)
+                ):
+                    print(
+                        "loading motion data: "
+                        f"{loaded_count}/{total_motion_files} clip(s), "
+                        f"frames={loaded_frames}, elapsed={now - load_start_time:.1f}s, "
+                        f"group={motion_group}, last_path={motion_file}",
+                        flush=True,
+                    )
+                    last_progress_time = now
+            if not self.clips:
+                raise ValueError("No motion clips were loaded.")
+            load_elapsed = perf_counter() - load_start_time
+
+            self._finalize_clip_metadata(validate_frame_shapes=True)
+            self._packed_sampling_tensors: dict[str, torch.Tensor] = {}
+            self._packed_frame_offsets: torch.Tensor | None = None
+            pack_start_time = perf_counter()
+            print("packing motion sampling tensors", flush=True)
+            self._packed_sampling_enabled = self._build_packed_sampling_tensors()
+            pack_elapsed = perf_counter() - pack_start_time
+            print(
+                f"packed motion sampling tensors: enabled={self._packed_sampling_enabled}, elapsed={pack_elapsed:.1f}s",
+                flush=True,
+            )
+            if self.compact_after_packing:
+                if not self._packed_sampling_enabled:
+                    raise RuntimeError(
+                        "compact_after_packing=True requires compatible clips so packed sampling can be enabled."
+                    )
+                self._save_packed_cache(packed_cache_path)
+                compact_start_time = perf_counter()
+                print("clearing per-clip frame tensors after packing", flush=True)
+                self._clear_clip_frame_tensors()
+                print(
+                    f"cleared per-clip frame tensors after packing: elapsed={perf_counter() - compact_start_time:.1f}s",
+                    flush=True,
+                )
+        except Exception as exc:
+            print(
+                "motion bulk load failed: "
+                f"loaded_clips={len(self.clips)}/{total_motion_files}, "
+                f"error={type(exc).__name__}: {exc}",
+                flush=True,
+            )
+            raise
+        finally:
+            if gc_was_enabled:
+                gc.enable()
+                print("restored Python GC after motion bulk load", flush=True)
+        duration_values = [clip.duration for clip in self.clips]
+        if self.num_motions <= 8:
+            duration_summary = f"durations={[round(duration, 3) for duration in duration_values]} s"
+        else:
+            total_duration = sum(duration_values)
+            duration_summary = (
+                f"duration_s=min:{min(duration_values):.3f} "
+                f"mean:{total_duration / self.num_motions:.3f} "
+                f"max:{max(duration_values):.3f} total:{total_duration:.3f}"
+            )
+        print(
+            f"motion data loaded: {self.num_motions} clip(s), "
+            f"frames={sum(clip.num_frames for clip in self.clips)}, "
+            f"{duration_summary}, load_elapsed={load_elapsed:.1f}s, "
+            f"total_elapsed={perf_counter() - load_start_time:.1f}s",
+            flush=True,
+        )
+
+    def _finalize_clip_metadata(self, *, validate_frame_shapes: bool) -> None:
+        if validate_frame_shapes:
+            self._validate_clip_compatibility()
+        else:
+            self._validate_clip_names()
 
         self.joint_names = self.clips[0].joint_names
         self.body_names = self.clips[0].body_names
-        self._validate_clip_compatibility()
-
         self.num_motions = len(self.clips)
         self.motion_names = [clip.name for clip in self.clips]
         self.motion_durations = torch.tensor(
@@ -192,29 +392,165 @@ class MotionLib:
         self.motion_anchor_times = [clip.anchor_times for clip in self.clips]
         self.all_clips_have_segments = bool(torch.all(self.motion_has_segments).item())
         self.all_clips_have_anchor_segments = bool(torch.all(self.motion_has_anchor_segments).item())
-        self._packed_sampling_tensors: dict[str, torch.Tensor] = {}
-        self._packed_frame_offsets: torch.Tensor | None = None
-        self._packed_sampling_enabled = self._build_packed_sampling_tensors()
-        if self.compact_after_packing:
-            if not self._packed_sampling_enabled:
-                raise RuntimeError(
-                    "compact_after_packing=True requires compatible clips so packed sampling can be enabled."
-                )
-            self._clear_clip_frame_tensors()
-        duration_values = [clip.duration for clip in self.clips]
-        if self.num_motions <= 8:
-            duration_summary = f"durations={[round(duration, 3) for duration in duration_values]} s"
-        else:
-            total_duration = sum(duration_values)
-            duration_summary = (
-                f"duration_s=min:{min(duration_values):.3f} "
-                f"mean:{total_duration / self.num_motions:.3f} "
-                f"max:{max(duration_values):.3f} total:{total_duration:.3f}"
+
+    @staticmethod
+    def _optional_tensor_to_cpu(value: torch.Tensor | None) -> torch.Tensor | None:
+        if value is None:
+            return None
+        return value.detach().to(device="cpu")
+
+    def _optional_tensor_to_device(self, value: torch.Tensor | None) -> torch.Tensor | None:
+        if value is None:
+            return None
+        return torch.as_tensor(value).to(device=self.device)
+
+    def _motion_file_stats(self) -> list[tuple[str, int, int]]:
+        stats = []
+        for motion_file in self.motion_files:
+            path = Path(motion_file).expanduser().resolve()
+            stat = path.stat()
+            stats.append((str(path), int(stat.st_size), int(stat.st_mtime_ns)))
+        return stats
+
+    def _packed_cache_path(self) -> Path | None:
+        cache_dir = os.getenv("REF2ACT_MOTION_PACK_CACHE_DIR")
+        if not cache_dir:
+            return None
+
+        try:
+            stats = self._motion_file_stats()
+        except OSError as exc:
+            print(f"skipping motion pack cache: failed to stat motion files: {exc}", flush=True)
+            return None
+
+        digest = hashlib.sha256()
+        digest.update(str(_MOTION_PACK_CACHE_VERSION).encode("utf-8"))
+        for path, size, mtime_ns in stats:
+            digest.update(path.encode("utf-8"))
+            digest.update(str(size).encode("ascii"))
+            digest.update(str(mtime_ns).encode("ascii"))
+        return Path(cache_dir).expanduser().resolve() / f"motionlib_{digest.hexdigest()[:24]}.pt"
+
+    def _clip_cache_payload(self, clip: MotionClip) -> dict[str, object]:
+        return {
+            "motion_id": int(clip.motion_id),
+            "name": str(clip.name),
+            "source": str(clip.source),
+            "fps": float(clip.fps),
+            "dt": float(clip.dt),
+            "num_frames": int(clip.num_frames),
+            "duration": float(clip.duration),
+            "joint_names": list(clip.joint_names),
+            "body_names": list(clip.body_names),
+            "segment_start_times": self._optional_tensor_to_cpu(clip.segment_start_times),
+            "segment_end_times": self._optional_tensor_to_cpu(clip.segment_end_times),
+            "segment_types": self._optional_tensor_to_cpu(clip.segment_types),
+            "anchor_segment_start_times": self._optional_tensor_to_cpu(clip.anchor_segment_start_times),
+            "anchor_segment_end_times": self._optional_tensor_to_cpu(clip.anchor_segment_end_times),
+            "anchor_segment_labels": self._optional_tensor_to_cpu(clip.anchor_segment_labels),
+            "anchor_frame_indices": self._optional_tensor_to_cpu(clip.anchor_frame_indices),
+            "anchor_times": self._optional_tensor_to_cpu(clip.anchor_times),
+        }
+
+    def _clip_from_cache_payload(self, payload: dict[str, object]) -> MotionClip:
+        return MotionClip(
+            motion_id=int(payload["motion_id"]),
+            name=str(payload["name"]),
+            source=str(payload["source"]),
+            fps=float(payload["fps"]),
+            dt=float(payload["dt"]),
+            num_frames=int(payload["num_frames"]),
+            duration=float(payload["duration"]),
+            joint_pos=None,
+            joint_vel=None,
+            body_positions=None,
+            body_quaternions=None,
+            body_linear_velocities=None,
+            body_angular_velocities=None,
+            segment_start_times=self._optional_tensor_to_device(payload["segment_start_times"]),
+            segment_end_times=self._optional_tensor_to_device(payload["segment_end_times"]),
+            segment_types=self._optional_tensor_to_device(payload["segment_types"]),
+            anchor_segment_start_times=self._optional_tensor_to_device(payload["anchor_segment_start_times"]),
+            anchor_segment_end_times=self._optional_tensor_to_device(payload["anchor_segment_end_times"]),
+            anchor_segment_labels=self._optional_tensor_to_device(payload["anchor_segment_labels"]),
+            anchor_frame_indices=self._optional_tensor_to_device(payload["anchor_frame_indices"]),
+            anchor_times=self._optional_tensor_to_device(payload["anchor_times"]),
+            joint_names=list(payload["joint_names"]),
+            body_names=list(payload["body_names"]),
+        )
+
+    def _try_load_packed_cache(self, cache_path: Path | None, start_time: float) -> bool:
+        if cache_path is None or not cache_path.exists():
+            return False
+
+        cache_start_time = perf_counter()
+        print(f"loading packed motion cache: {cache_path}", flush=True)
+        try:
+            payload = torch.load(cache_path, map_location="cpu")
+            if int(payload.get("version", -1)) != _MOTION_PACK_CACHE_VERSION:
+                print("packed motion cache version mismatch; rebuilding", flush=True)
+                return False
+            if payload.get("file_stats") != self._motion_file_stats():
+                print("packed motion cache file stats mismatch; rebuilding", flush=True)
+                return False
+
+            self.clips = [self._clip_from_cache_payload(item) for item in payload["clips"]]
+            if not self.clips:
+                return False
+            self._finalize_clip_metadata(validate_frame_shapes=False)
+            self._packed_sampling_tensors = {
+                str(name): torch.as_tensor(tensor).to(device=self.device)
+                for name, tensor in payload["packed_sampling_tensors"].items()
+            }
+            self._packed_frame_offsets = torch.as_tensor(
+                payload["packed_frame_offsets"], dtype=torch.long, device=self.device
             )
+            self._packed_sampling_enabled = True
+        except Exception as exc:
+            print(f"failed to load packed motion cache; rebuilding: {exc}", flush=True)
+            return False
+
         print(
-            f"motion data loaded: {self.num_motions} clip(s), "
-            f"frames={sum(clip.num_frames for clip in self.clips)}, "
-            f"{duration_summary}"
+            f"packed motion cache loaded: {self.num_motions} clip(s), "
+            f"frames={int(self.motion_num_frames.sum().item())}, "
+            f"cache_elapsed={perf_counter() - cache_start_time:.1f}s, "
+            f"total_elapsed={perf_counter() - start_time:.1f}s",
+            flush=True,
+        )
+        return True
+
+    def _save_packed_cache(self, cache_path: Path | None) -> None:
+        if cache_path is None:
+            return
+
+        cache_start_time = perf_counter()
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path = cache_path.with_name(f"{cache_path.name}.{os.getpid()}.tmp")
+        print(f"saving packed motion cache: {cache_path}", flush=True)
+        try:
+            payload = {
+                "version": _MOTION_PACK_CACHE_VERSION,
+                "file_stats": self._motion_file_stats(),
+                "clips": [self._clip_cache_payload(clip) for clip in self.clips],
+                "packed_sampling_tensors": {
+                    name: tensor.detach().to(device="cpu")
+                    for name, tensor in self._packed_sampling_tensors.items()
+                },
+                "packed_frame_offsets": self._packed_frame_offsets.detach().to(device="cpu"),
+            }
+            torch.save(payload, temporary_path)
+            os.replace(temporary_path, cache_path)
+        except Exception as exc:
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            print(f"failed to save packed motion cache: {exc}", flush=True)
+            return
+
+        print(
+            f"packed motion cache saved: elapsed={perf_counter() - cache_start_time:.1f}s",
+            flush=True,
         )
 
     def _clear_clip_frame_tensors(self) -> None:
@@ -309,6 +645,16 @@ class MotionLib:
                 ).reshape(-1)
                 anchor_frame_indices_np = np.asarray(motion_data["anchor_frame_indices"], dtype=np.int64).reshape(-1)
                 anchor_times_np = np.asarray(motion_data["anchor_times"], dtype=np.float32).reshape(-1)
+                (
+                    anchor_segment_start_times_np,
+                    anchor_segment_end_times_np,
+                    anchor_segment_labels_np,
+                ) = _drop_zero_duration_anchor_segments(
+                    anchor_segment_start_times_np,
+                    anchor_segment_end_times_np,
+                    anchor_segment_labels_np,
+                    motion_file=motion_file,
+                )
                 _validate_anchor_segment_arrays(
                     anchor_segment_start_times_np,
                     anchor_segment_end_times_np,
@@ -368,20 +714,25 @@ class MotionLib:
             )
 
     def _validate_clip_compatibility(self) -> None:
-        reference_joint_names = self.clips[0].joint_names
-        reference_body_names = self.clips[0].body_names
+        self._validate_clip_names()
         reference_joint_dim = self.clips[0].joint_pos.shape[1:]
         reference_body_dim = self.clips[0].body_positions.shape[1:]
+
+        for clip in self.clips[1:]:
+            if clip.joint_pos.shape[1:] != reference_joint_dim:
+                raise ValueError(f"Joint tensor shape mismatch across motion clips: {clip.source}")
+            if clip.body_positions.shape[1:] != reference_body_dim:
+                raise ValueError(f"Body tensor shape mismatch across motion clips: {clip.source}")
+
+    def _validate_clip_names(self) -> None:
+        reference_joint_names = self.clips[0].joint_names
+        reference_body_names = self.clips[0].body_names
 
         for clip in self.clips[1:]:
             if clip.joint_names != reference_joint_names:
                 raise ValueError(f"Joint names do not match across motion clips: {clip.source}")
             if clip.body_names != reference_body_names:
                 raise ValueError(f"Body names do not match across motion clips: {clip.source}")
-            if clip.joint_pos.shape[1:] != reference_joint_dim:
-                raise ValueError(f"Joint tensor shape mismatch across motion clips: {clip.source}")
-            if clip.body_positions.shape[1:] != reference_body_dim:
-                raise ValueError(f"Body tensor shape mismatch across motion clips: {clip.source}")
 
     def _require_single_motion(self, attribute_name: str) -> MotionClip:
         if self.num_motions != 1:
@@ -475,7 +826,15 @@ class MotionLib:
                 self._packed_frame_offsets = None
                 return False
 
+            field_start_time = perf_counter()
+            print(f"packing motion sampling tensor: {output_name}", flush=True)
             packed_tensors[output_name] = torch.cat(clip_tensors, dim=0).to(device=self.device)
+            print(
+                f"packed motion sampling tensor: {output_name}, "
+                f"shape={tuple(packed_tensors[output_name].shape)}, "
+                f"elapsed={perf_counter() - field_start_time:.1f}s",
+                flush=True,
+            )
 
         self._packed_sampling_tensors = packed_tensors
         self._packed_frame_offsets = torch.as_tensor(frame_offsets, dtype=torch.long, device=self.device)
