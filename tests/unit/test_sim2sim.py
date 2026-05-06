@@ -80,6 +80,8 @@ def _make_observation_env(sim2sim_mod):
         torch.tensor([1.0, 2.0], dtype=torch.float32),
         torch.tensor([3.0, 4.0], dtype=torch.float32),
         torch.tensor([5.0, 6.0, 7.0], dtype=torch.float32),
+        torch.tensor([20.0, 21.0, 22.0], dtype=torch.float32),
+        torch.tensor([23.0, 24.0, 25.0], dtype=torch.float32),
     )
     env.get_projected_gravity = lambda: torch.tensor([8.0, 9.0, 10.0], dtype=torch.float32)
     env.get_anchor_ang_vel_b = lambda: torch.tensor([11.0, 12.0, 13.0], dtype=torch.float32)
@@ -179,12 +181,13 @@ def test_get_obs_dict_matches_isaac_style_motion_and_robot_split() -> None:
 
     obs = env.get_obs_dict(advance_time=False)
 
-    assert set(obs) == {"motion", "robot"}
+    assert set(obs) == {"motion", "robot", "privilege"}
     assert torch.allclose(obs["motion"], torch.tensor([5.0, 6.0, 7.0, 1.0, 2.0, 3.0, 4.0], dtype=torch.float32))
     assert torch.allclose(
         obs["robot"],
         torch.tensor([8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0, 19.0], dtype=torch.float32),
     )
+    assert torch.allclose(obs["privilege"], torch.tensor([20.0, 21.0, 22.0, 23.0, 24.0, 25.0], dtype=torch.float32))
     assert torch.allclose(env.times, torch.zeros(1, dtype=torch.float32))
 
 
@@ -207,7 +210,7 @@ def test_custom_observation_builder_can_override_policy_and_default_outputs() ->
     obs_dict = env.get_obs_dict(advance_time=False)
 
     assert torch.allclose(obs, torch.tensor([42.0, 24.0], dtype=torch.float32))
-    assert set(obs_dict) == {"motion", "robot", "custom"}
+    assert set(obs_dict) == {"motion", "robot", "privilege", "custom"}
     assert torch.allclose(obs_dict["custom"], torch.tensor([14.0, 15.0, 18.0, 19.0], dtype=torch.float32))
     assert torch.allclose(env.times, torch.zeros(1, dtype=torch.float32))
 
@@ -345,13 +348,29 @@ def test_get_motion_command_uses_anchor_body_for_target_projected_gravity() -> N
             [[[1.0, 0.0, 0.0, 0.0], [0.70710677, 0.70710677, 0.0, 0.0]]],
             dtype=torch.float32,
         ),
+        "body_linear_velocities": torch.tensor(
+            [[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]],
+            dtype=torch.float32,
+        ),
+        "body_angular_velocities": torch.tensor(
+            [[[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]]],
+            dtype=torch.float32,
+        ),
     }
     env.motion_lib = types.SimpleNamespace(sample_motion=lambda motion_ids, times: reference_motion)
 
-    _, _, projected_gravity = env.get_motion_command(torch.zeros(1, dtype=torch.float32))
+    _, _, projected_gravity, target_anchor_lin_vel, target_anchor_ang_vel_b = env.get_motion_command(
+        torch.zeros(1, dtype=torch.float32)
+    )
 
     expected_gravity = sim2sim_mod.quat_rotate_inverse(reference_motion["body_quaternions"][0, 1], env.gravity_vector)
+    expected_anchor_ang_vel_b = sim2sim_mod.quat_rotate_inverse(
+        reference_motion["body_quaternions"][0, 1],
+        reference_motion["body_angular_velocities"][0, 1],
+    )
     assert torch.allclose(projected_gravity, expected_gravity.float())
+    assert torch.allclose(target_anchor_lin_vel, reference_motion["body_linear_velocities"][0, 1])
+    assert torch.allclose(target_anchor_ang_vel_b, expected_anchor_ang_vel_b.float())
 
 
 def test_current_anchor_state_uses_anchor_body_quaternion_and_body_frame_ang_vel() -> None:

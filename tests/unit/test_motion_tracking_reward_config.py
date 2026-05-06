@@ -346,7 +346,12 @@ def test_build_reward_spec_autofills_end_effector_indices_alongside_existing_fie
             terms=(
                 rewards_mod.KeyPositionRewardTermCfg(),
                 rewards_mod.EndEffectorPositionRewardTermCfg(),
+                rewards_mod.MultiScaleEndEffectorQuaternionRewardTermCfg(),
                 rewards_mod.EndEffectorVelocityRewardTermCfg(),
+                rewards_mod.MultiScaleAnchorPositionRewardTermCfg(),
+                rewards_mod.MultiScaleAnchorQuaternionRewardTermCfg(),
+                rewards_mod.MultiScaleAnchorLinearVelocityRewardTermCfg(),
+                rewards_mod.MultiScaleAnchorAngularVelocityRewardTermCfg(),
                 rewards_mod.FootSlipPenaltyTermCfg(),
                 rewards_mod.SelfCollisionPenaltyTermCfg(),
                 rewards_mod.CoMSupportRewardTermCfg(),
@@ -363,13 +368,18 @@ def test_build_reward_spec_autofills_end_effector_indices_alongside_existing_fie
 
     assert reward_spec.terms[0].key_body_indices == (4, 5)
     assert reward_spec.terms[1].end_effector_body_indices == (6, 7)
-    assert reward_spec.terms[2].anchor_body_index == 3
     assert reward_spec.terms[2].end_effector_body_indices == (6, 7)
-    assert reward_spec.terms[3].foot_body_indices == (10, 11)
-    assert reward_spec.terms[3].foot_contact_body_indices == (12, 13)
-    assert reward_spec.terms[4].body_indices == (8, 9)
-    assert reward_spec.terms[5].foot_body_indices == (10, 11)
-    assert reward_spec.terms[5].foot_contact_body_indices == (12, 13)
+    assert reward_spec.terms[3].anchor_body_index == 3
+    assert reward_spec.terms[3].end_effector_body_indices == (6, 7)
+    assert reward_spec.terms[4].anchor_body_index == 3
+    assert reward_spec.terms[5].anchor_body_index == 3
+    assert reward_spec.terms[6].anchor_body_index == 3
+    assert reward_spec.terms[7].anchor_body_index == 3
+    assert reward_spec.terms[8].foot_body_indices == (10, 11)
+    assert reward_spec.terms[8].foot_contact_body_indices == (12, 13)
+    assert reward_spec.terms[9].body_indices == (8, 9)
+    assert reward_spec.terms[10].foot_body_indices == (10, 11)
+    assert reward_spec.terms[10].foot_contact_body_indices == (12, 13)
     assert reward_spec.dt == 0.02
 
 

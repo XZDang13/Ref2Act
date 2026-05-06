@@ -55,6 +55,13 @@ def default_mujoco_observation_spec() -> ObservationSpec:
                     ObservationTermSpec(id="previous_action", type="previous_action"),
                 ),
             ),
+            ObservationGroupSpec(
+                name="privilege",
+                terms=(
+                    ObservationTermSpec(id="target_anchor_lin_vel", type="target_anchor_lin_vel"),
+                    ObservationTermSpec(id="target_priv_anchor_ang_vel_b", type="target_anchor_ang_vel_b"),
+                ),
+            ),
         )
     )
 
@@ -111,4 +118,9 @@ class IsaacLabMujocoObservation:
 
     def get_policy_observation(self, env: MujocoEnv, context: MujocoObservationContext) -> torch.Tensor:
         default_observation = self.get_default_observation(env, context)
-        return torch.cat([default_observation[group.name] for group in self.spec.enabled_groups()])
+        policy_groups = [
+            default_observation[group.name]
+            for group in self.spec.enabled_groups()
+            if group.name != "privilege"
+        ]
+        return torch.cat(policy_groups)

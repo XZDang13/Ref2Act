@@ -1,5 +1,3 @@
-import dataclasses
-
 import isaaclab.envs.mdp as mdp
 import isaaclab.sim as sim_utils
 import isaaclab.terrains as terrain_gen
@@ -24,15 +22,7 @@ from ref2act.envs.motion_tracking.randomization import (
     randomize_rigid_body_collider_offsets_by_body,
     randomize_rigid_body_com_from_default,
 )
-from ref2act.envs.motion_tracking.rewards import (
-    CoMPositionRewardTermCfg,
-    CoMSupportRewardTermCfg,
-    CoMVelocityRewardTermCfg,
-    EndEffectorPositionRewardTermCfg,
-    EndEffectorVelocityRewardTermCfg,
-    default_reward_spec,
-    robust_tracking_reward_spec,
-)
+from ref2act.envs.motion_tracking.rewards import default_reward_spec, robust_tracking_reward_spec
 from ref2act.envs.motion_tracking.termination import default_termination_spec
 from ref2act.envs.motion_tracking.tracking_quality import RobustTrackingCfg, TrackingQualityGateCfg
 from ref2act.motion.sampling import SamplerMod, SamplingStrategy, SegmentSource
@@ -93,18 +83,7 @@ def _rough_terrain_importer_cfg() -> TerrainImporterCfg:
 
 
 def _g1_reward_spec():
-    base_spec = default_reward_spec(dt=0.0, anchor_height_only=True)
-    return dataclasses.replace(
-        base_spec,
-        terms=base_spec.terms
-        + (
-            CoMPositionRewardTermCfg(),
-            CoMVelocityRewardTermCfg(),
-            CoMSupportRewardTermCfg(),
-            EndEffectorPositionRewardTermCfg(),
-            EndEffectorVelocityRewardTermCfg(),
-        ),
-    )
+    return default_reward_spec(dt=0.0, anchor_height_only=True)
 
 
 @configclass

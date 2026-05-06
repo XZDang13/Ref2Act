@@ -181,9 +181,9 @@ class MultiScaleJointPositionRewardTermCfg(RewardTermCfg):
     fine_std: float = 0.25**2
     medium_std: float = 0.75**2
     coarse_std: float = 1.50**2
-    fine_weight: float = 0.50
-    medium_weight: float = 0.30
-    coarse_weight: float = 0.20
+    fine_weight: float = 0.70
+    medium_weight: float = 0.20
+    coarse_weight: float = 0.10
     coarse_kernel: str = "rational"
 
 
@@ -195,9 +195,9 @@ class MultiScaleJointVelocityRewardTermCfg(RewardTermCfg):
     fine_std: float = 1.0**2
     medium_std: float = 3.0**2
     coarse_std: float = 6.0**2
-    fine_weight: float = 0.50
-    medium_weight: float = 0.30
-    coarse_weight: float = 0.20
+    fine_weight: float = 0.70
+    medium_weight: float = 0.20
+    coarse_weight: float = 0.10
     coarse_kernel: str = "rational"
 
 
@@ -210,9 +210,39 @@ class MultiScaleAnchorHeightRewardTermCfg(RewardTermCfg):
     fine_std: float = 0.10**2
     medium_std: float = 0.30**2
     coarse_std: float = 0.70**2
-    fine_weight: float = 0.45
-    medium_weight: float = 0.35
-    coarse_weight: float = 0.20
+    fine_weight: float = 0.70
+    medium_weight: float = 0.20
+    coarse_weight: float = 0.10
+    coarse_kernel: str = "rational"
+
+
+@dataclass(frozen=True)
+class MultiScaleAnchorPositionRewardTermCfg(RewardTermCfg):
+    id: str = "multi_scale_anchor_position_reward"
+    type: str = "multi_scale_anchor_position_reward"
+    weight: float = 0.50
+    anchor_body_index: int = -1
+    fine_std: float = 0.30**2
+    medium_std: float = 0.75**2
+    coarse_std: float = 1.50**2
+    fine_weight: float = 0.70
+    medium_weight: float = 0.20
+    coarse_weight: float = 0.10
+    coarse_kernel: str = "rational"
+
+
+@dataclass(frozen=True)
+class MultiScaleAnchorQuaternionRewardTermCfg(RewardTermCfg):
+    id: str = "multi_scale_anchor_quaternion_reward"
+    type: str = "multi_scale_anchor_quaternion_reward"
+    weight: float = 0.50
+    anchor_body_index: int = -1
+    fine_std: float = 0.40**2
+    medium_std: float = 1.0**2
+    coarse_std: float = 2.0**2
+    fine_weight: float = 0.70
+    medium_weight: float = 0.20
+    coarse_weight: float = 0.10
     coarse_kernel: str = "rational"
 
 
@@ -225,9 +255,39 @@ class MultiScaleProjectedGravityRewardTermCfg(RewardTermCfg):
     fine_std: float = 0.10**2
     medium_std: float = 0.35**2
     coarse_std: float = 0.80**2
-    fine_weight: float = 0.50
-    medium_weight: float = 0.30
-    coarse_weight: float = 0.20
+    fine_weight: float = 0.70
+    medium_weight: float = 0.20
+    coarse_weight: float = 0.10
+    coarse_kernel: str = "rational"
+
+
+@dataclass(frozen=True)
+class MultiScaleAnchorLinearVelocityRewardTermCfg(RewardTermCfg):
+    id: str = "multi_scale_anchor_linear_velocity_reward"
+    type: str = "multi_scale_anchor_linear_velocity_reward"
+    weight: float = 1.0
+    anchor_body_index: int = -1
+    fine_std: float = 1.0**2
+    medium_std: float = 3.0**2
+    coarse_std: float = 6.0**2
+    fine_weight: float = 0.70
+    medium_weight: float = 0.20
+    coarse_weight: float = 0.10
+    coarse_kernel: str = "rational"
+
+
+@dataclass(frozen=True)
+class MultiScaleAnchorAngularVelocityRewardTermCfg(RewardTermCfg):
+    id: str = "multi_scale_anchor_angular_velocity_reward"
+    type: str = "multi_scale_anchor_angular_velocity_reward"
+    weight: float = 1.0
+    anchor_body_index: int = -1
+    fine_std: float = 3.14**2
+    medium_std: float = 6.0**2
+    coarse_std: float = 12.0**2
+    fine_weight: float = 0.70
+    medium_weight: float = 0.20
+    coarse_weight: float = 0.10
     coarse_kernel: str = "rational"
 
 
@@ -240,9 +300,9 @@ class MultiScaleKeyPositionRewardTermCfg(RewardTermCfg):
     fine_std: float = 0.30**2
     medium_std: float = 0.75**2
     coarse_std: float = 1.50**2
-    fine_weight: float = 0.50
-    medium_weight: float = 0.30
-    coarse_weight: float = 0.20
+    fine_weight: float = 0.70
+    medium_weight: float = 0.20
+    coarse_weight: float = 0.10
     coarse_kernel: str = "rational"
 
 
@@ -255,9 +315,9 @@ class MultiScaleKeyQuaternionRewardTermCfg(RewardTermCfg):
     fine_std: float = 0.40**2
     medium_std: float = 1.0**2
     coarse_std: float = 2.0**2
-    fine_weight: float = 0.50
-    medium_weight: float = 0.30
-    coarse_weight: float = 0.20
+    fine_weight: float = 0.70
+    medium_weight: float = 0.20
+    coarse_weight: float = 0.10
     coarse_kernel: str = "rational"
 
 
@@ -271,9 +331,9 @@ class MultiScaleKeyLinearVelocityRewardTermCfg(RewardTermCfg):
     fine_std: float = 1.0**2
     medium_std: float = 3.0**2
     coarse_std: float = 6.0**2
-    fine_weight: float = 0.50
-    medium_weight: float = 0.30
-    coarse_weight: float = 0.20
+    fine_weight: float = 0.70
+    medium_weight: float = 0.20
+    coarse_weight: float = 0.10
     coarse_kernel: str = "rational"
 
 
@@ -287,9 +347,9 @@ class MultiScaleKeyAngularVelocityRewardTermCfg(RewardTermCfg):
     fine_std: float = 3.14**2
     medium_std: float = 6.0**2
     coarse_std: float = 12.0**2
-    fine_weight: float = 0.50
-    medium_weight: float = 0.30
-    coarse_weight: float = 0.20
+    fine_weight: float = 0.70
+    medium_weight: float = 0.20
+    coarse_weight: float = 0.10
     coarse_kernel: str = "rational"
 
 
@@ -302,9 +362,24 @@ class MultiScaleEndEffectorPositionRewardTermCfg(RewardTermCfg):
     fine_std: float = 0.30**2
     medium_std: float = 0.75**2
     coarse_std: float = 1.50**2
-    fine_weight: float = 0.50
-    medium_weight: float = 0.30
-    coarse_weight: float = 0.20
+    fine_weight: float = 0.70
+    medium_weight: float = 0.20
+    coarse_weight: float = 0.10
+    coarse_kernel: str = "rational"
+
+
+@dataclass(frozen=True)
+class MultiScaleEndEffectorQuaternionRewardTermCfg(RewardTermCfg):
+    id: str = "multi_scale_end_effector_quaternion_reward"
+    type: str = "multi_scale_end_effector_quaternion_reward"
+    weight: float = 1.0
+    end_effector_body_indices: tuple[int, ...] = ()
+    fine_std: float = 0.40**2
+    medium_std: float = 1.0**2
+    coarse_std: float = 2.0**2
+    fine_weight: float = 0.70
+    medium_weight: float = 0.20
+    coarse_weight: float = 0.10
     coarse_kernel: str = "rational"
 
 
@@ -318,9 +393,9 @@ class MultiScaleEndEffectorVelocityRewardTermCfg(RewardTermCfg):
     fine_std: float = 1.0**2
     medium_std: float = 3.0**2
     coarse_std: float = 6.0**2
-    fine_weight: float = 0.50
-    medium_weight: float = 0.30
-    coarse_weight: float = 0.20
+    fine_weight: float = 0.70
+    medium_weight: float = 0.20
+    coarse_weight: float = 0.10
     coarse_kernel: str = "rational"
 
 
@@ -486,6 +561,9 @@ class RewardContext:
         result = (position_error, quaternion_error)
         self._cache[cache_key] = result
         return result
+
+    def anchor_body_state_error(self, anchor_body_index: int) -> tuple[torch.Tensor, torch.Tensor]:
+        return self._body_state_error("anchor_body_state_error", anchor_body_index, (anchor_body_index,))
 
     def projected_gravity_error(self, anchor_body_index: int) -> torch.Tensor:
         cache_key = ("projected_gravity_error", anchor_body_index)
@@ -1027,12 +1105,44 @@ class MultiScaleAnchorHeightRewardTerm:
         return _multi_scale_result(height_error, spec)
 
 
+class MultiScaleAnchorPositionRewardTerm:
+    type_name = "multi_scale_anchor_position_reward"
+
+    def compute(self, context: RewardContext, spec: MultiScaleAnchorPositionRewardTermCfg) -> RewardTermResult:
+        position_error, _ = context.anchor_body_pose_error(spec.anchor_body_index, height_only=False)
+        return _multi_scale_result(position_error, spec)
+
+
+class MultiScaleAnchorQuaternionRewardTerm:
+    type_name = "multi_scale_anchor_quaternion_reward"
+
+    def compute(self, context: RewardContext, spec: MultiScaleAnchorQuaternionRewardTermCfg) -> RewardTermResult:
+        _, quaternion_error = context.anchor_body_pose_error(spec.anchor_body_index, height_only=False)
+        return _multi_scale_result(quaternion_error, spec)
+
+
 class MultiScaleProjectedGravityRewardTerm:
     type_name = "multi_scale_projected_gravity_reward"
 
     def compute(self, context: RewardContext, spec: MultiScaleProjectedGravityRewardTermCfg) -> RewardTermResult:
         gravity_error = context.projected_gravity_error(spec.anchor_body_index)
         return _multi_scale_result(gravity_error, spec)
+
+
+class MultiScaleAnchorLinearVelocityRewardTerm:
+    type_name = "multi_scale_anchor_linear_velocity_reward"
+
+    def compute(self, context: RewardContext, spec: MultiScaleAnchorLinearVelocityRewardTermCfg) -> RewardTermResult:
+        lin_vel_error, _ = context.anchor_body_state_error(spec.anchor_body_index)
+        return _multi_scale_result(lin_vel_error, spec)
+
+
+class MultiScaleAnchorAngularVelocityRewardTerm:
+    type_name = "multi_scale_anchor_angular_velocity_reward"
+
+    def compute(self, context: RewardContext, spec: MultiScaleAnchorAngularVelocityRewardTermCfg) -> RewardTermResult:
+        _, ang_vel_error = context.anchor_body_state_error(spec.anchor_body_index)
+        return _multi_scale_result(ang_vel_error, spec)
 
 
 class MultiScaleKeyPositionRewardTerm:
@@ -1073,6 +1183,14 @@ class MultiScaleEndEffectorPositionRewardTerm:
     def compute(self, context: RewardContext, spec: MultiScaleEndEffectorPositionRewardTermCfg) -> RewardTermResult:
         position_error, _ = context.end_effector_pose_error(spec.end_effector_body_indices)
         return _multi_scale_result(position_error, spec)
+
+
+class MultiScaleEndEffectorQuaternionRewardTerm:
+    type_name = "multi_scale_end_effector_quaternion_reward"
+
+    def compute(self, context: RewardContext, spec: MultiScaleEndEffectorQuaternionRewardTermCfg) -> RewardTermResult:
+        _, quaternion_error = context.end_effector_pose_error(spec.end_effector_body_indices)
+        return _multi_scale_result(quaternion_error, spec)
 
 
 class MultiScaleEndEffectorVelocityRewardTerm:
@@ -1150,12 +1268,17 @@ REWARD_TERM_REGISTRY: dict[str, RewardTerm] = {
         MultiScaleJointPositionRewardTerm(),
         MultiScaleJointVelocityRewardTerm(),
         MultiScaleAnchorHeightRewardTerm(),
+        MultiScaleAnchorPositionRewardTerm(),
+        MultiScaleAnchorQuaternionRewardTerm(),
         MultiScaleProjectedGravityRewardTerm(),
+        MultiScaleAnchorLinearVelocityRewardTerm(),
+        MultiScaleAnchorAngularVelocityRewardTerm(),
         MultiScaleKeyPositionRewardTerm(),
         MultiScaleKeyQuaternionRewardTerm(),
         MultiScaleKeyLinearVelocityRewardTerm(),
         MultiScaleKeyAngularVelocityRewardTerm(),
         MultiScaleEndEffectorPositionRewardTerm(),
+        MultiScaleEndEffectorQuaternionRewardTerm(),
         MultiScaleEndEffectorVelocityRewardTerm(),
         TrackingProgressRewardTerm(),
         TrackingRecoveryPenaltyTerm(),
@@ -1171,52 +1294,52 @@ def default_reward_spec(*, dt: float, anchor_height_only: bool = False) -> Rewar
     return RewardSpec(
         dt=dt,
         terms=(
+            MultiScaleAnchorPositionRewardTermCfg(),
+            MultiScaleAnchorQuaternionRewardTermCfg(),
+            MultiScaleKeyPositionRewardTermCfg(),
+            MultiScaleKeyQuaternionRewardTermCfg(),
+            MultiScaleKeyLinearVelocityRewardTermCfg(weight=1.5),
+            MultiScaleKeyAngularVelocityRewardTermCfg(weight=1.5),
+            MultiScaleAnchorLinearVelocityRewardTermCfg(),
+            MultiScaleAnchorAngularVelocityRewardTermCfg(),
+            MultiScaleEndEffectorPositionRewardTermCfg(weight=1.0),
+            MultiScaleEndEffectorQuaternionRewardTermCfg(),
+            SelfCollisionPenaltyTermCfg(),
+            ActionRatePenaltyTermCfg(),
+            JointLimitPenaltyTermCfg(),
             JointAccPenaltyTermCfg(),
             JointTorquePenaltyTermCfg(),
-            JointLimitPenaltyTermCfg(),
-            SelfCollisionPenaltyTermCfg(),
-            FootSlipPenaltyTermCfg(),
-            ActionRatePenaltyTermCfg(),
-            AnchorPositionRewardTermCfg(height_only=anchor_height_only),
-            AnchorQuaternionRewardTermCfg(),
-            KeyPositionRewardTermCfg(),
-            KeyQuaternionRewardTermCfg(),
-            KeyLinearVelocityRewardTermCfg(),
-            KeyAngularVelocityRewardTermCfg(),
+            CoMPositionRewardTermCfg(),
+            CoMVelocityRewardTermCfg(),
+            CoMSupportRewardTermCfg(),
         ),
     )
 
 
 def robust_tracking_reward_spec(*, dt: float, include_com_terms: bool = False) -> RewardSpec:
-    terms: tuple[RewardTermCfg, ...] = (
-        MultiScaleJointPositionRewardTermCfg(),
-        MultiScaleJointVelocityRewardTermCfg(),
-        MultiScaleAnchorHeightRewardTermCfg(),
-        MultiScaleProjectedGravityRewardTermCfg(),
-        MultiScaleKeyPositionRewardTermCfg(),
-        MultiScaleKeyQuaternionRewardTermCfg(),
-        MultiScaleKeyLinearVelocityRewardTermCfg(),
-        MultiScaleKeyAngularVelocityRewardTermCfg(),
-        MultiScaleEndEffectorPositionRewardTermCfg(),
-        MultiScaleEndEffectorVelocityRewardTermCfg(),
-        TrackingProgressRewardTermCfg(),
-        TrackingRecoveryPenaltyTermCfg(),
-    )
-    if include_com_terms:
-        terms += (
+    return RewardSpec(
+        dt=dt,
+        terms=(
+            MultiScaleAnchorPositionRewardTermCfg(),
+            MultiScaleAnchorQuaternionRewardTermCfg(),
+            MultiScaleKeyPositionRewardTermCfg(),
+            MultiScaleKeyQuaternionRewardTermCfg(),
+            MultiScaleKeyLinearVelocityRewardTermCfg(weight=1.5),
+            MultiScaleKeyAngularVelocityRewardTermCfg(weight=1.5),
+            MultiScaleAnchorLinearVelocityRewardTermCfg(),
+            MultiScaleAnchorAngularVelocityRewardTermCfg(),
+            MultiScaleEndEffectorPositionRewardTermCfg(weight=1.0),
+            MultiScaleEndEffectorQuaternionRewardTermCfg(),
+            SelfCollisionPenaltyTermCfg(),
+            ActionRatePenaltyTermCfg(),
+            JointLimitPenaltyTermCfg(),
+            JointAccPenaltyTermCfg(),
+            JointTorquePenaltyTermCfg(),
             CoMPositionRewardTermCfg(),
             CoMVelocityRewardTermCfg(),
             CoMSupportRewardTermCfg(),
-        )
-    terms += (
-        JointAccPenaltyTermCfg(),
-        JointTorquePenaltyTermCfg(),
-        JointLimitPenaltyTermCfg(),
-        SelfCollisionPenaltyTermCfg(),
-        FootSlipPenaltyTermCfg(weight=-0.05),
-        ActionRatePenaltyTermCfg(),
+        ),
     )
-    return RewardSpec(dt=dt, terms=terms)
 
 
 class Rewards:

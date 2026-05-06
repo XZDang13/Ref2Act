@@ -66,6 +66,8 @@ def default_training_observation_spec(add_noise: bool = True) -> ObservationSpec
                 terms=(
                     ObservationTermSpec(id="priv_target_joint_pos", type="target_joint_pos"),
                     ObservationTermSpec(id="priv_target_joint_vel", type="target_joint_vel"),
+                    ObservationTermSpec(id="target_anchor_lin_vel", type="target_anchor_lin_vel"),
+                    ObservationTermSpec(id="target_priv_anchor_ang_vel_b", type="target_anchor_ang_vel_b"),
                     ObservationTermSpec(id="relative_anchor_pos", type="relative_anchor_pos"),
                     ObservationTermSpec(
                         id="relative_anchor_tangent_and_normal",
@@ -194,6 +196,7 @@ class Observation:
 
         target_projected_gravity_b = quat_apply_inverse(reference_state.anchor_quat, gravity_vector)
         robot_projected_gravity_b = quat_apply_inverse(robot_state.anchor_quat, gravity_vector)
+        target_anchor_ang_vel_b = _anchor_ang_vel_b(reference_state.anchor_quat, reference_state.anchor_ang_vel)
         robot_anchor_ang_vel_b = _anchor_ang_vel_b(robot_state.anchor_quat, robot_state.anchor_ang_vel)
 
         relative_anchor_pos, relative_anchor_quat = relative_transform(
@@ -213,6 +216,8 @@ class Observation:
             target_projected_gravity=target_projected_gravity_b,
             target_joint_pos=reference_state.joint_pos,
             target_joint_vel=reference_state.joint_vel,
+            target_anchor_lin_vel=reference_state.anchor_lin_vel,
+            target_anchor_ang_vel_b=target_anchor_ang_vel_b,
             projected_gravity=robot_projected_gravity_b,
             anchor_ang_vel_b=robot_anchor_ang_vel_b,
             joint_pos=robot_state.joint_pos,

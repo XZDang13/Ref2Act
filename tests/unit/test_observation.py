@@ -120,6 +120,8 @@ def test_default_observation_keeps_privileged_observation_clean() -> None:
     joint_pos = torch.tensor([[0.1, 0.2]], dtype=torch.float32)
     joint_vel = torch.tensor([[0.3, 0.4]], dtype=torch.float32)
     anchor_ang_vel = torch.tensor([[0.4, 0.5, 0.6]], dtype=torch.float32)
+    target_anchor_lin_vel = torch.tensor([[1.2, 1.3, 1.4]], dtype=torch.float32)
+    target_anchor_ang_vel = torch.tensor([[1.5, 1.6, 1.7]], dtype=torch.float32)
     last_action = torch.tensor([[0.7, 0.8]], dtype=torch.float32)
 
     robot = types.SimpleNamespace(
@@ -156,8 +158,20 @@ def test_default_observation_keeps_privileged_observation_clean() -> None:
             [[[1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]]],
             dtype=torch.float32,
         ),
-        body_linear_velocities=torch.zeros((1, 2, 3), dtype=torch.float32),
-        body_angular_velocities=torch.zeros((1, 2, 3), dtype=torch.float32),
+        body_linear_velocities=torch.stack(
+            (
+                target_anchor_lin_vel,
+                torch.zeros((1, 3), dtype=torch.float32),
+            ),
+            dim=1,
+        ),
+        body_angular_velocities=torch.stack(
+            (
+                target_anchor_ang_vel,
+                torch.zeros((1, 3), dtype=torch.float32),
+            ),
+            dim=1,
+        ),
     )
     scene = types.SimpleNamespace(env_origins=torch.zeros((1, 3), dtype=torch.float32))
 
@@ -176,12 +190,22 @@ def test_default_observation_keeps_privileged_observation_clean() -> None:
 
     num_joints = joint_pos.shape[1]
     num_keys = 2
-    anchor_lin_start = 2 * num_joints + 3 + 6 + num_keys * 3 + num_keys * 6
+    target_anchor_lin_start = 2 * num_joints
+    target_anchor_ang_start = target_anchor_lin_start + 3
+    anchor_lin_start = target_anchor_ang_start + 3 + 3 + 6 + num_keys * 3 + num_keys * 6
     anchor_ang_start = anchor_lin_start + 3
     joint_pos_start = anchor_ang_start + 3
     joint_vel_start = joint_pos_start + num_joints
     last_action_start = joint_vel_start + num_joints
 
+    assert torch.allclose(
+        privilege_obs[0, target_anchor_lin_start:target_anchor_lin_start + 3],
+        target_anchor_lin_vel[0],
+    )
+    assert torch.allclose(
+        privilege_obs[0, target_anchor_ang_start:target_anchor_ang_start + 3],
+        target_anchor_ang_vel[0],
+    )
     assert torch.allclose(privilege_obs[0, anchor_ang_start:anchor_ang_start + 3], anchor_ang_vel[0])
     assert torch.allclose(privilege_obs[0, joint_pos_start:joint_pos_start + num_joints], joint_pos[0])
     assert torch.allclose(privilege_obs[0, joint_vel_start:joint_vel_start + num_joints], joint_vel[0])

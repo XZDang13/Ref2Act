@@ -875,7 +875,42 @@ def test_anchor_failure_weighted_probability_cap_limits_anchor_mass(tmp_path: Pa
     assert float(probs[eligible_mask].max().item()) <= max_allowed_prob + 1.0e-6
 
 
-def test_anchor_sample_and_fail_counts_accumulate_on_nearest_previous_anchor(tmp_path: Path, monkeypatch) -> None:
+def test_anchor_failure_counts_accumulate_on_nearest_previous_anchor_for_failure_weighted(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    motion_file = tmp_path / "anchor_motion.npz"
+    _write_anchor_sampler_motion_file(motion_file)
+    motion_lib = MotionLib([motion_file])
+    sampler_mod = _load_sampler_module()
+    sampler = sampler_mod.Sampler(
+        num_envs=1,
+        motion_lib=motion_lib,
+        dt=0.05,
+        anchor_body_index=0,
+        segment_source=sampler_mod.SegmentSource.Anchor,
+        device=torch.device("cpu"),
+    )
+    monkeypatch.setattr(
+        sampler,
+        "_sample_failure_weighted_times_for_motion_ids",
+        lambda motion_ids, temperature=1.0: (
+            torch.tensor([0.5], dtype=torch.float32, device=sampler.device),
+            torch.tensor([1], dtype=torch.long, device=sampler.device),
+        ),
+    )
+
+    reset_sample = sampler.reset(torch.tensor([0]), strategy=sampler_mod.SamplingStrategy.FailureWeighted)
+    sampler.current_times[0] = 0.95
+    sampler.record_failures(torch.tensor([0]))
+
+    assert torch.equal(reset_sample.target_bin_indices, torch.tensor([1], dtype=torch.long))
+    assert torch.allclose(reset_sample.times, torch.tensor([0.5], dtype=torch.float32))
+    assert torch.equal(sampler.bin_sample_counts[0], torch.tensor([0.0, 1.0, 0.0]))
+    assert torch.equal(sampler.bin_fail_counts[0], torch.tensor([0.0, 0.0, 1.0]))
+
+
+def test_sampler_does_not_record_failures_for_non_failure_weighted_reset(tmp_path: Path, monkeypatch) -> None:
     motion_file = tmp_path / "anchor_motion.npz"
     _write_anchor_sampler_motion_file(motion_file)
     motion_lib = MotionLib([motion_file])
@@ -902,14 +937,12 @@ def test_anchor_sample_and_fail_counts_accumulate_on_nearest_previous_anchor(tmp
         ),
     )
 
-    reset_sample = sampler.reset(torch.tensor([0]), strategy=sampler_mod.SamplingStrategy.Random)
+    sampler.reset(torch.tensor([0]), strategy=sampler_mod.SamplingStrategy.Random)
     sampler.current_times[0] = 0.95
     sampler.record_failures(torch.tensor([0]))
 
-    assert torch.equal(reset_sample.target_bin_indices, torch.tensor([1], dtype=torch.long))
-    assert torch.allclose(reset_sample.times, torch.tensor([0.5], dtype=torch.float32))
     assert torch.equal(sampler.bin_sample_counts[0], torch.tensor([0.0, 1.0, 0.0]))
-    assert torch.equal(sampler.bin_fail_counts[0], torch.tensor([0.0, 0.0, 1.0]))
+    assert torch.equal(sampler.bin_fail_counts[0], torch.zeros(3, dtype=torch.float32))
 
 
 def test_anchor_source_requires_anchor_metadata(tmp_path: Path) -> None:

@@ -107,6 +107,8 @@ class ObservationContext:
     target_projected_gravity: torch.Tensor | None = None
     target_joint_pos: torch.Tensor | None = None
     target_joint_vel: torch.Tensor | None = None
+    target_anchor_lin_vel: torch.Tensor | None = None
+    target_anchor_ang_vel_b: torch.Tensor | None = None
     projected_gravity: torch.Tensor | None = None
     anchor_ang_vel_b: torch.Tensor | None = None
     joint_pos: torch.Tensor | None = None
@@ -163,6 +165,21 @@ DEFAULT_OBSERVATION_TERM_REGISTRY: dict[str, ObservationTerm] = {
         "target_joint_vel",
         "target_joint_vel",
         lambda layout: layout.joint_dim,
+    ),
+    "target_anchor_lin_vel": ContextFieldObservationTerm(
+        "target_anchor_lin_vel",
+        "target_anchor_lin_vel",
+        lambda layout: 3,
+    ),
+    "target_anchor_ang_vel_b": ContextFieldObservationTerm(
+        "target_anchor_ang_vel_b",
+        "target_anchor_ang_vel_b",
+        lambda layout: 3,
+    ),
+    "target_priv_anchor_ang_vel_b": ContextFieldObservationTerm(
+        "target_priv_anchor_ang_vel_b",
+        "target_anchor_ang_vel_b",
+        lambda layout: 3,
     ),
     "projected_gravity": ContextFieldObservationTerm(
         "projected_gravity",

@@ -248,11 +248,15 @@ class MujocoEnv:
         joint_pos = reference_motion["joint_pos"].squeeze(0)
         joint_vel = reference_motion["joint_vel"].squeeze(0)
         body_quat = reference_motion["body_quaternions"].squeeze(0)
+        body_linear_velocities = reference_motion["body_linear_velocities"].squeeze(0)
+        body_angular_velocities = reference_motion["body_angular_velocities"].squeeze(0)
         anchor_quat = body_quat[self.anchor_body_index]
+        anchor_lin_vel = body_linear_velocities[self.anchor_body_index]
+        anchor_ang_vel_b = quat_rotate_inverse(anchor_quat, body_angular_velocities[self.anchor_body_index]).float()
 
         projected_gravity = quat_rotate_inverse(anchor_quat, self.gravity_vector).float()
 
-        return joint_pos, joint_vel, projected_gravity
+        return joint_pos, joint_vel, projected_gravity, anchor_lin_vel.float(), anchor_ang_vel_b
 
     def _get_observation_builder(self) -> MujocoObservationBuilder:
         builder = getattr(self, "observation_builder", None)
@@ -277,12 +281,20 @@ class MujocoEnv:
             self.times = torch.zeros(1)
             self.previous_action[:] = 0.0
 
-        target_joint_pos, target_joint_vel, target_projected_gravity = self.get_motion_command(self.times)
+        (
+            target_joint_pos,
+            target_joint_vel,
+            target_projected_gravity,
+            target_anchor_lin_vel,
+            target_anchor_ang_vel_b,
+        ) = self.get_motion_command(self.times)
 
         return MujocoObservationContext(
             target_projected_gravity=target_projected_gravity,
             target_joint_pos=target_joint_pos,
             target_joint_vel=target_joint_vel,
+            target_anchor_lin_vel=target_anchor_lin_vel,
+            target_anchor_ang_vel_b=target_anchor_ang_vel_b,
             projected_gravity=self.get_projected_gravity(),
             anchor_ang_vel_b=self.get_anchor_ang_vel_b(),
             joint_pos=self.get_joint_pos(),

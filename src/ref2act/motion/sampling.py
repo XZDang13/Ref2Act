@@ -82,6 +82,12 @@ class MotionSampler:
         self.episode_start_motion_ids = torch.zeros(num_envs, dtype=torch.long, device=self.device)
         self.episode_start_times = torch.zeros(num_envs, device=self.device)
         self.episode_start_bin_indices = torch.zeros(num_envs, dtype=torch.long, device=self.device)
+        self.episode_start_sampling_strategy_values = torch.full(
+            (num_envs,),
+            SamplingStrategy.Random.value,
+            dtype=torch.long,
+            device=self.device,
+        )
 
         self.bin_size: float | None = float(bin_size) if bin_size is not None else None
         self.num_bins = 0
@@ -628,6 +634,7 @@ class MotionSampler:
         self.episode_start_motion_ids[resolved_env_ids] = motion_ids
         self.episode_start_times[resolved_env_ids] = times
         self.episode_start_bin_indices[resolved_env_ids] = target_bin_indices
+        self.episode_start_sampling_strategy_values[resolved_env_ids] = strategy.value
         self._record_sample_bins(motion_ids, times, target_bin_indices=target_bin_indices)
         return ResetSample(
             env_ids=resolved_env_ids,
@@ -839,26 +846,27 @@ class MotionSampler:
             return
 
         env_ids = self._normalize_env_ids(env_ids)
-        if self.segment_source == SegmentSource.Anchor:
-            if times is None:
-                times = self.current_times[env_ids]
-            else:
-                times = torch.as_tensor(times, dtype=torch.float32, device=self.device)
-                if times.shape[0] != env_ids.shape[0]:
-                    raise ValueError("times must have the same batch size as env_ids.")
-            motion_ids = self.current_motion_ids[env_ids]
-            # Anchor bins cover the interval until the next anchor, so binning the
-            # failure time attributes the failure to the nearest previous anchor.
-            bin_indices = self._times_to_bins(motion_ids, times)
+        if env_ids.numel() == 0:
+            return
+
+        if times is None:
+            times = self.current_times[env_ids]
         else:
-            if times is None:
-                times = self.current_times[env_ids]
-            else:
-                times = torch.as_tensor(times, dtype=torch.float32, device=self.device)
-                if times.shape[0] != env_ids.shape[0]:
-                    raise ValueError("times must have the same batch size as env_ids.")
-            motion_ids = self.current_motion_ids[env_ids]
-            bin_indices = self._times_to_bins(motion_ids, times)
+            times = torch.as_tensor(times, dtype=torch.float32, device=self.device)
+            if times.shape[0] != env_ids.shape[0]:
+                raise ValueError("times must have the same batch size as env_ids.")
+
+        failure_weighted_mask = (
+            self.episode_start_sampling_strategy_values[env_ids] == SamplingStrategy.FailureWeighted.value
+        )
+        if not bool(torch.any(failure_weighted_mask).item()):
+            return
+
+        env_ids = env_ids[failure_weighted_mask]
+        times = times[failure_weighted_mask]
+        motion_ids = self.current_motion_ids[env_ids]
+        # For anchor bins, this attributes the failure to the nearest previous anchor.
+        bin_indices = self._times_to_bins(motion_ids, times)
 
         self._accumulate_bin_counts(self.bin_fail_counts, motion_ids, bin_indices)
 
