@@ -24,6 +24,7 @@ def _load_sim2sim_module():
     mujoco_mod.mj_step = lambda model, data: None
     mujoco_mod.mjtObj = types.SimpleNamespace(mjOBJ_BODY=1, mjOBJ_JOINT=2)
     mujoco_mod.mjtJoint = types.SimpleNamespace(mjJNT_FREE=0)
+    mujoco_mod.mjtCamera = types.SimpleNamespace(mjCAMERA_TRACKING=1)
     mujoco_mod.mj_name2id = (
         lambda model, objtype, name: model.body_name_to_id.get(name, -1)
         if objtype == mujoco_mod.mjtObj.mjOBJ_BODY
@@ -42,6 +43,14 @@ def _load_sim2sim_module():
     class _Viewer:
         def __init__(self, *args, **kwargs):
             self.is_alive = True
+            self.cam = types.SimpleNamespace(
+                type=None,
+                fixedcamid=None,
+                trackbodyid=None,
+                distance=None,
+                azimuth=None,
+                elevation=None,
+            )
 
         def render(self):
             return None
@@ -157,6 +166,59 @@ def _make_fake_root_alignment_system(sim2sim_mod):
 
 def _assert_quat_matches(actual: np.ndarray, expected: np.ndarray, atol: float = 1.0e-6) -> None:
     assert np.allclose(actual, expected, atol=atol) or np.allclose(actual, -expected, atol=atol)
+
+
+def test_rendered_env_configures_viewer_camera_to_track_root_body() -> None:
+    sim2sim_mod = _load_sim2sim_module()
+    model = types.SimpleNamespace(
+        opt=types.SimpleNamespace(timestep=0.0),
+        body_name_to_id={"pelvis": 1, "torso_link": 2},
+        id_to_body_name={1: "pelvis", 2: "torso_link"},
+        joint_name_to_id={},
+        id_to_joint_name={},
+        jnt_type=np.array([sim2sim_mod.mujoco.mjtJoint.mjJNT_FREE], dtype=np.int32),
+        jnt_bodyid=np.array([1], dtype=np.int32),
+    )
+    data = types.SimpleNamespace()
+    sim2sim_mod.mujoco.MjModel.from_xml_path = staticmethod(lambda path: model)
+    sim2sim_mod.mujoco.MjData = lambda model: data
+    sim2sim_mod.MotionLib = lambda expert_motion_file: types.SimpleNamespace(
+        body_names=["pelvis", "torso_link"],
+    )
+
+    env = sim2sim_mod.MujocoEnv(
+        simulation_dt=0.005,
+        decimation=4,
+        kp=torch.ones(2),
+        kd=torch.ones(2),
+        effort_limits=torch.ones(2),
+        joint_pos_limits=torch.tensor([[-1.0, 1.0], [-1.0, 1.0]], dtype=torch.float32),
+        action_offset=torch.zeros(2),
+        action_scale=torch.ones(2),
+        expert_motion_file="dummy.npz",
+        root_link_name="torso_link",
+        anchor_body_name="pelvis",
+        render=True,
+    )
+
+    assert env.mj_viewer is not None
+    assert env.mj_viewer.cam.type == sim2sim_mod.mujoco.mjtCamera.mjCAMERA_TRACKING
+    assert env.mj_viewer.cam.trackbodyid == 2
+    assert env.mj_viewer.cam.fixedcamid == -1
+    assert env.mj_viewer.cam.distance == 4.0
+    assert env.mj_viewer.cam.azimuth == -140.0
+    assert env.mj_viewer.cam.elevation == -20.0
+
+
+def test_follow_camera_noops_without_viewer() -> None:
+    sim2sim_mod = _load_sim2sim_module()
+    env = object.__new__(sim2sim_mod.MujocoEnv)
+    env.mj_viewer = None
+    env.root_body_id = 2
+
+    env._configure_follow_camera()
+
+    assert env.mj_viewer is None
 
 
 def test_get_obs_matches_policy_observation_layout() -> None:

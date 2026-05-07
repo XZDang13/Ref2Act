@@ -107,6 +107,7 @@ class MujocoEnv:
             self.anchor_body_index,
             self.anchor_body_id,
         ) = self._resolve_body_ids(root_link_name, anchor_body_name)
+        self._configure_follow_camera()
         self.motion_id = torch.zeros(1, dtype=torch.long)
 
         self.gravity_vector = torch.tensor([0.0, 0.0, -1.0]).float()
@@ -187,6 +188,18 @@ class MujocoEnv:
             anchor_body_index,
             anchor_body_id,
         )
+
+    def _configure_follow_camera(self) -> None:
+        if self.mj_viewer is None:
+            return
+
+        camera = self.mj_viewer.cam
+        camera.type = mujoco.mjtCamera.mjCAMERA_TRACKING
+        camera.trackbodyid = self.root_body_id
+        camera.fixedcamid = -1
+        camera.distance = 4.0
+        camera.azimuth = -140.0
+        camera.elevation = -20.0
 
     def _normalize_action_mode(self, action_mode: object | str) -> str:
         if isinstance(action_mode, str):

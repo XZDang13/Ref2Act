@@ -44,6 +44,7 @@ _ANCHOR_ALIGNED_KEYS = {
     "anchor_energy_norm",
     "anchor_pose_extreme",
     "anchor_torso_tilt_deg",
+    "anchor_joint_kinetic_energy",
 }
 
 

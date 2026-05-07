@@ -311,7 +311,7 @@ class G1MotionTrackingEnvCfg(DirectRLEnvCfg):
     rewards = robust_tracking_reward_spec(dt=0.0, include_com_terms=True)
     termination = default_termination_spec(
         anchor_height_only=True,
-        end_effector_height_only=False,
+        end_effector_height_only=True,
         probabilistic_error_termination=True,
         error_termination_ramp_multiplier=2.0,
         error_termination_sigmoid_steepness=8.0,

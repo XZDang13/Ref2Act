@@ -296,21 +296,17 @@ def test_anchor_selection_only_selects_anchors_inside_hard_safe_mask() -> None:
     assert np.all(hard_safe_mask[non_bootstrap_anchor_indices])
 
 
-def test_anchor_selection_promotes_relaxed_fallback_when_strict_anchor_count_is_zero() -> None:
+def test_anchor_selection_uses_strict_low_kinetic_anchor_when_legacy_green_is_absent() -> None:
     torso_x = np.full(12, 0.8, dtype=np.float32)
     torso_x[5] = 0.0
     diagnostics = build_anchor_selection_diagnostics(_build_anchor_log(num_frames=12, torso_x=torso_x))
     metadata = diagnostics.metadata
 
-    green_segment_durations = metadata.segment_end_times[metadata.segment_labels == ANCHOR_FRAME_LABEL_GREEN] - metadata.segment_start_times[
-        metadata.segment_labels == ANCHOR_FRAME_LABEL_GREEN
-    ]
-
     assert diagnostics.strict_anchor_frame_indices.shape[0] == 0
-    assert diagnostics.used_fallback_promotion is True
-    assert metadata.frame_indices.shape[0] > 0
-    assert np.any(metadata.frame_labels == ANCHOR_FRAME_LABEL_GREEN)
-    assert np.any(green_segment_durations > 0.15)
+    assert diagnostics.used_fallback_promotion is False
+    assert np.array_equal(metadata.frame_indices, np.asarray([0, 5], dtype=np.int64))
+    assert metadata.frame_labels[5] == ANCHOR_FRAME_LABEL_YELLOW
+    assert metadata.joint_kinetic_energy.shape == metadata.times.shape
 
 
 def test_anchor_selection_keeps_multiple_anchors_in_long_green_interval() -> None:
@@ -321,6 +317,24 @@ def test_anchor_selection_keeps_multiple_anchors_in_long_green_interval() -> Non
     assert metadata.frame_indices.shape[0] >= 3
     non_bootstrap_times = metadata.times[metadata.frame_indices != 0]
     assert np.all(np.diff(non_bootstrap_times) >= 0.35 - 1.0e-6)
+
+
+def test_anchor_selection_enforces_max_reset_gap_when_safe_candidates_exist() -> None:
+    num_frames = 70
+    frame_index = np.arange(num_frames, dtype=np.float32)
+    joint_pos = np.zeros((num_frames, 2), dtype=np.float32)
+    joint_pos[:, 0] = np.sin((2.0 * np.pi * frame_index) / 20.0)
+
+    metadata = build_anchor_selection_metadata(
+        _build_anchor_log(
+            fps=10.0,
+            num_frames=num_frames,
+            joint_pos=joint_pos,
+        )
+    )
+
+    assert metadata.times.shape[0] > 1
+    assert float(np.max(np.diff(metadata.times))) <= 1.0 + 1.0e-6
 
 
 def test_anchor_selection_inserts_bootstrap_start_anchor_without_promoting_opening_segment() -> None:

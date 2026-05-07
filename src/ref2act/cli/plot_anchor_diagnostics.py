@@ -39,6 +39,7 @@ STORED_ANCHOR_METADATA_KEYS = (
     "anchor_pose_extreme",
     "anchor_torso_tilt_deg",
 )
+OPTIONAL_STORED_ANCHOR_METADATA_KEYS = ("anchor_joint_kinetic_energy",)
 SUPPORT_MODE_LABELS = {
     ANCHOR_SUPPORT_MODE_NONE: "none",
     ANCHOR_SUPPORT_MODE_LEFT: "left",
@@ -120,7 +121,11 @@ def _load_motion_log(motion_data: object) -> dict[str, object]:
 
 
 def _load_stored_anchor_metadata(motion_data: object) -> AnchorSelectionMetadata | None:
-    present_keys = [key for key in STORED_ANCHOR_METADATA_KEYS if key in motion_data]
+    present_keys = [
+        key
+        for key in (*STORED_ANCHOR_METADATA_KEYS, *OPTIONAL_STORED_ANCHOR_METADATA_KEYS)
+        if key in motion_data
+    ]
     if not present_keys:
         return None
 
@@ -128,18 +133,25 @@ def _load_stored_anchor_metadata(motion_data: object) -> AnchorSelectionMetadata
     if missing_keys:
         raise ValueError(f"Motion file contains partial anchor metadata: {', '.join(missing_keys)}")
 
+    anchor_times = np.asarray(motion_data["anchor_times"], dtype=np.float32).reshape(-1)
+    if "anchor_joint_kinetic_energy" in motion_data:
+        joint_kinetic_energy = np.asarray(motion_data["anchor_joint_kinetic_energy"], dtype=np.float32).reshape(-1)
+    else:
+        joint_kinetic_energy = np.zeros(anchor_times.shape, dtype=np.float32)
+
     return AnchorSelectionMetadata(
         frame_labels=np.asarray(motion_data["anchor_frame_labels"], dtype=np.int8).reshape(-1),
         segment_start_times=np.asarray(motion_data["anchor_segment_start_times"], dtype=np.float32).reshape(-1),
         segment_end_times=np.asarray(motion_data["anchor_segment_end_times"], dtype=np.float32).reshape(-1),
         segment_labels=np.asarray(motion_data["anchor_segment_labels"], dtype=np.int8).reshape(-1),
         frame_indices=np.asarray(motion_data["anchor_frame_indices"], dtype=np.int64).reshape(-1),
-        times=np.asarray(motion_data["anchor_times"], dtype=np.float32).reshape(-1),
+        times=anchor_times,
         scores=np.asarray(motion_data["anchor_scores"], dtype=np.float32).reshape(-1),
         support_modes=np.asarray(motion_data["anchor_support_modes"], dtype=np.int8).reshape(-1),
         energy_norm=np.asarray(motion_data["anchor_energy_norm"], dtype=np.float32).reshape(-1),
         pose_extreme=np.asarray(motion_data["anchor_pose_extreme"], dtype=np.float32).reshape(-1),
         torso_tilt_deg=np.asarray(motion_data["anchor_torso_tilt_deg"], dtype=np.float32).reshape(-1),
+        joint_kinetic_energy=joint_kinetic_energy,
     )
 
 
@@ -156,6 +168,7 @@ def _metadata_matches(lhs: AnchorSelectionMetadata, rhs: AnchorSelectionMetadata
         and np.allclose(lhs.energy_norm, rhs.energy_norm)
         and np.allclose(lhs.pose_extreme, rhs.pose_extreme)
         and np.allclose(lhs.torso_tilt_deg, rhs.torso_tilt_deg)
+        and np.allclose(lhs.joint_kinetic_energy, rhs.joint_kinetic_energy)
     )
 
 

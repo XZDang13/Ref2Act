@@ -116,6 +116,7 @@ def _build_split_motion_log(
         "anchor_energy_norm": np.zeros(num_anchors, dtype=np.float32),
         "anchor_pose_extreme": np.zeros(num_anchors, dtype=np.float32),
         "anchor_torso_tilt_deg": np.zeros(num_anchors, dtype=np.float32),
+        "anchor_joint_kinetic_energy": np.zeros(num_anchors, dtype=np.float32),
     }
 
 
@@ -177,6 +178,7 @@ def test_finalize_motion_slot_anchor_mode_exports_anchor_metadata(tmp_path: Path
         assert motion_data["anchor_times"].dtype == np.float32
         assert motion_data["anchor_scores"].dtype == np.float32
         assert motion_data["anchor_support_modes"].dtype == np.int8
+        assert motion_data["anchor_joint_kinetic_energy"].dtype == np.float32
         assert motion_data["anchor_frame_indices"].shape[0] > 0
         if motion_data["anchor_times"].shape[0] > 1:
             assert float(motion_data["anchor_times"][1] - motion_data["anchor_times"][0]) >= 0.35 - 1.0e-6
@@ -210,7 +212,7 @@ def test_finalize_motion_slot_anchor_mode_inserts_bootstrap_and_trims_tail_ancho
     assert "tail_trimmed=1" in captured.out
 
 
-def test_finalize_motion_slot_anchor_mode_logs_fallback_promotion(tmp_path: Path, capsys) -> None:
+def test_finalize_motion_slot_anchor_mode_logs_hybrid_low_kinetic_anchor(tmp_path: Path, capsys) -> None:
     torso_x = np.full(10, 0.8, dtype=np.float32)
     torso_x[4] = 0.0
     output_file = _build_conversion_slot(
@@ -221,16 +223,13 @@ def test_finalize_motion_slot_anchor_mode_logs_fallback_promotion(tmp_path: Path
 
     captured = capsys.readouterr()
     with np.load(output_file) as motion_data:
-        green_segment_durations = motion_data["anchor_segment_end_times"][
-            motion_data["anchor_segment_labels"] == 2
-        ] - motion_data["anchor_segment_start_times"][motion_data["anchor_segment_labels"] == 2]
-        assert motion_data["anchor_frame_indices"].shape[0] > 0
-        assert np.any(green_segment_durations > 0.15)
-        assert motion_data["anchor_frame_indices"][0] == 0
+        assert np.array_equal(motion_data["anchor_frame_indices"], np.asarray([0, 4], dtype=np.int64))
+        assert motion_data["anchor_frame_labels"][4] == 1
+        assert motion_data["anchor_joint_kinetic_energy"].shape == motion_data["anchor_times"].shape
     assert "strict=0" in captured.out
-    assert "fallback_promotion=yes" in captured.out
-    assert "bootstrap_start=no" in captured.out
-    assert "tail_trimmed=1" in captured.out
+    assert "fallback_promotion=no" in captured.out
+    assert "bootstrap_start=yes" in captured.out
+    assert "tail_trimmed=0" in captured.out
 
 
 def test_finalize_motion_slot_time_mode_omits_anchor_metadata(tmp_path: Path) -> None:

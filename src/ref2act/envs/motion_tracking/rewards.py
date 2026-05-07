@@ -88,6 +88,24 @@ class AnchorQuaternionRewardTermCfg(RewardTermCfg):
 
 
 @dataclass(frozen=True)
+class AnchorLinearVelocityRewardTermCfg(RewardTermCfg):
+    id: str = "anchor_linear_velocity_reward"
+    type: str = "anchor_linear_velocity_reward"
+    weight: float = 1.0
+    anchor_body_index: int = -1
+    std: float = 1.0**2
+
+
+@dataclass(frozen=True)
+class AnchorAngularVelocityRewardTermCfg(RewardTermCfg):
+    id: str = "anchor_angular_velocity_reward"
+    type: str = "anchor_angular_velocity_reward"
+    weight: float = 1.0
+    anchor_body_index: int = -1
+    std: float = 3.14**2
+
+
+@dataclass(frozen=True)
 class KeyPositionRewardTermCfg(RewardTermCfg):
     id: str = "key_position_reward"
     type: str = "key_position_reward"
@@ -161,6 +179,15 @@ class EndEffectorPositionRewardTermCfg(RewardTermCfg):
     weight: float = 0.35
     end_effector_body_indices: tuple[int, ...] = ()
     std: float = 0.3**2
+
+
+@dataclass(frozen=True)
+class EndEffectorQuaternionRewardTermCfg(RewardTermCfg):
+    id: str = "end_effector_quaternion_reward"
+    type: str = "end_effector_quaternion_reward"
+    weight: float = 1.0
+    end_effector_body_indices: tuple[int, ...] = ()
+    std: float = 0.4**2
 
 
 @dataclass(frozen=True)
@@ -837,17 +864,7 @@ def _multi_scale_tracking_kernel(
     coarse_weight: float,
     coarse_kernel: str = "rational",
 ) -> torch.Tensor:
-    fine = torch.exp(-error / fine_std)
-    medium = torch.exp(-error / medium_std)
-
-    if coarse_kernel == "rational":
-        coarse = 1.0 / (1.0 + error / coarse_std)
-    elif coarse_kernel == "exp":
-        coarse = torch.exp(-error / coarse_std)
-    else:
-        raise ValueError(f"Unknown coarse kernel: {coarse_kernel}")
-
-    return fine_weight * fine + medium_weight * medium + coarse_weight * coarse
+    return torch.exp(-error / fine_std)
 
 
 def _smoothstep(lo: float, hi: float, x: torch.Tensor) -> torch.Tensor:
@@ -988,6 +1005,24 @@ class AnchorQuaternionRewardTerm:
         return _weighted_result(raw, spec.weight, metrics={"error": quaternion_error})
 
 
+class AnchorLinearVelocityRewardTerm:
+    type_name = "anchor_linear_velocity_reward"
+
+    def compute(self, context: RewardContext, spec: AnchorLinearVelocityRewardTermCfg) -> RewardTermResult:
+        lin_vel_error, _ = context.anchor_body_state_error(spec.anchor_body_index)
+        raw = torch.exp(-lin_vel_error / spec.std)
+        return _weighted_result(raw, spec.weight, metrics={"error": lin_vel_error})
+
+
+class AnchorAngularVelocityRewardTerm:
+    type_name = "anchor_angular_velocity_reward"
+
+    def compute(self, context: RewardContext, spec: AnchorAngularVelocityRewardTermCfg) -> RewardTermResult:
+        _, ang_vel_error = context.anchor_body_state_error(spec.anchor_body_index)
+        raw = torch.exp(-ang_vel_error / spec.std)
+        return _weighted_result(raw, spec.weight, metrics={"error": ang_vel_error})
+
+
 class KeyPositionRewardTerm:
     type_name = "key_position_reward"
 
@@ -1070,6 +1105,15 @@ class EndEffectorPositionRewardTerm:
         position_error, _ = context.end_effector_pose_error(spec.end_effector_body_indices)
         raw = torch.exp(-position_error / spec.std)
         return _weighted_result(raw, spec.weight, metrics={"error": position_error})
+
+
+class EndEffectorQuaternionRewardTerm:
+    type_name = "end_effector_quaternion_reward"
+
+    def compute(self, context: RewardContext, spec: EndEffectorQuaternionRewardTermCfg) -> RewardTermResult:
+        _, quaternion_error = context.end_effector_pose_error(spec.end_effector_body_indices)
+        raw = torch.exp(-quaternion_error / spec.std)
+        return _weighted_result(raw, spec.weight, metrics={"error": quaternion_error})
 
 
 class EndEffectorVelocityRewardTerm:
@@ -1256,6 +1300,8 @@ REWARD_TERM_REGISTRY: dict[str, RewardTerm] = {
         ActionRatePenaltyTerm(),
         AnchorPositionRewardTerm(),
         AnchorQuaternionRewardTerm(),
+        AnchorLinearVelocityRewardTerm(),
+        AnchorAngularVelocityRewardTerm(),
         KeyPositionRewardTerm(),
         KeyQuaternionRewardTerm(),
         KeyLinearVelocityRewardTerm(),
@@ -1264,6 +1310,7 @@ REWARD_TERM_REGISTRY: dict[str, RewardTerm] = {
         CoMVelocityRewardTerm(),
         CoMSupportRewardTerm(),
         EndEffectorPositionRewardTerm(),
+        EndEffectorQuaternionRewardTerm(),
         EndEffectorVelocityRewardTerm(),
         MultiScaleJointPositionRewardTerm(),
         MultiScaleJointVelocityRewardTerm(),
@@ -1294,16 +1341,16 @@ def default_reward_spec(*, dt: float, anchor_height_only: bool = False) -> Rewar
     return RewardSpec(
         dt=dt,
         terms=(
-            MultiScaleAnchorPositionRewardTermCfg(),
-            MultiScaleAnchorQuaternionRewardTermCfg(),
-            MultiScaleKeyPositionRewardTermCfg(),
-            MultiScaleKeyQuaternionRewardTermCfg(),
-            MultiScaleKeyLinearVelocityRewardTermCfg(weight=1.5),
-            MultiScaleKeyAngularVelocityRewardTermCfg(weight=1.5),
-            MultiScaleAnchorLinearVelocityRewardTermCfg(),
-            MultiScaleAnchorAngularVelocityRewardTermCfg(),
-            MultiScaleEndEffectorPositionRewardTermCfg(weight=1.0),
-            MultiScaleEndEffectorQuaternionRewardTermCfg(),
+            AnchorPositionRewardTermCfg(height_only=anchor_height_only),
+            AnchorQuaternionRewardTermCfg(),
+            KeyPositionRewardTermCfg(),
+            KeyQuaternionRewardTermCfg(),
+            KeyLinearVelocityRewardTermCfg(weight=1.5),
+            KeyAngularVelocityRewardTermCfg(weight=1.5),
+            AnchorLinearVelocityRewardTermCfg(),
+            AnchorAngularVelocityRewardTermCfg(),
+            EndEffectorPositionRewardTermCfg(weight=1.0),
+            EndEffectorQuaternionRewardTermCfg(),
             SelfCollisionPenaltyTermCfg(),
             ActionRatePenaltyTermCfg(),
             JointLimitPenaltyTermCfg(),
@@ -1320,16 +1367,16 @@ def robust_tracking_reward_spec(*, dt: float, include_com_terms: bool = False) -
     return RewardSpec(
         dt=dt,
         terms=(
-            MultiScaleAnchorPositionRewardTermCfg(),
-            MultiScaleAnchorQuaternionRewardTermCfg(),
-            MultiScaleKeyPositionRewardTermCfg(),
-            MultiScaleKeyQuaternionRewardTermCfg(),
-            MultiScaleKeyLinearVelocityRewardTermCfg(weight=1.5),
-            MultiScaleKeyAngularVelocityRewardTermCfg(weight=1.5),
-            MultiScaleAnchorLinearVelocityRewardTermCfg(),
-            MultiScaleAnchorAngularVelocityRewardTermCfg(),
-            MultiScaleEndEffectorPositionRewardTermCfg(weight=1.0),
-            MultiScaleEndEffectorQuaternionRewardTermCfg(),
+            AnchorPositionRewardTermCfg(),
+            AnchorQuaternionRewardTermCfg(),
+            KeyPositionRewardTermCfg(),
+            KeyQuaternionRewardTermCfg(),
+            KeyLinearVelocityRewardTermCfg(weight=1.5),
+            KeyAngularVelocityRewardTermCfg(weight=1.5),
+            AnchorLinearVelocityRewardTermCfg(),
+            AnchorAngularVelocityRewardTermCfg(),
+            EndEffectorPositionRewardTermCfg(weight=1.0),
+            EndEffectorQuaternionRewardTermCfg(),
             SelfCollisionPenaltyTermCfg(),
             ActionRatePenaltyTermCfg(),
             JointLimitPenaltyTermCfg(),

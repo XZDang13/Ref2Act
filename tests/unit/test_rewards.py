@@ -265,16 +265,16 @@ def test_reward_specs_keep_requested_terms_weights_and_stds() -> None:
     rewards_mod = _load_rewards_module()
 
     expected_types = [
-        "multi_scale_anchor_position_reward",
-        "multi_scale_anchor_quaternion_reward",
-        "multi_scale_key_position_reward",
-        "multi_scale_key_quaternion_reward",
-        "multi_scale_key_linear_velocity_reward",
-        "multi_scale_key_angular_velocity_reward",
-        "multi_scale_anchor_linear_velocity_reward",
-        "multi_scale_anchor_angular_velocity_reward",
-        "multi_scale_end_effector_position_reward",
-        "multi_scale_end_effector_quaternion_reward",
+        "anchor_position_reward",
+        "anchor_quaternion_reward",
+        "key_position_reward",
+        "key_quaternion_reward",
+        "key_linear_velocity_reward",
+        "key_angular_velocity_reward",
+        "anchor_linear_velocity_reward",
+        "anchor_angular_velocity_reward",
+        "end_effector_position_reward",
+        "end_effector_quaternion_reward",
         "self_collision_penalty",
         "action_rate_penalty",
         "joint_limit_penalty",
@@ -293,36 +293,36 @@ def test_reward_specs_keep_requested_terms_weights_and_stds() -> None:
     assert [term.type for term in robust_with_com_flag.terms] == expected_types
 
     terms = {term.type: term for term in robust_spec.terms}
-    assert terms["multi_scale_anchor_position_reward"].weight == 0.5
-    assert terms["multi_scale_anchor_position_reward"].fine_std == 0.30**2
-    assert terms["multi_scale_anchor_position_reward"].medium_std == 0.75**2
-    assert terms["multi_scale_anchor_position_reward"].coarse_std == 1.50**2
-    assert terms["multi_scale_anchor_quaternion_reward"].weight == 0.5
-    assert terms["multi_scale_anchor_quaternion_reward"].fine_std == 0.40**2
-    assert terms["multi_scale_anchor_quaternion_reward"].medium_std == 1.0**2
-    assert terms["multi_scale_anchor_quaternion_reward"].coarse_std == 2.0**2
-    assert terms["multi_scale_key_position_reward"].weight == 1.0
-    assert terms["multi_scale_key_quaternion_reward"].weight == 1.0
-    assert terms["multi_scale_key_linear_velocity_reward"].weight == 1.5
-    assert terms["multi_scale_key_angular_velocity_reward"].weight == 1.5
-    assert terms["multi_scale_anchor_linear_velocity_reward"].weight == 1.0
-    assert terms["multi_scale_anchor_angular_velocity_reward"].weight == 1.0
-    assert terms["multi_scale_end_effector_position_reward"].weight == 1.0
-    assert terms["multi_scale_end_effector_quaternion_reward"].weight == 1.0
+    assert terms["anchor_position_reward"].weight == 0.5
+    assert terms["anchor_position_reward"].std == 0.30**2
+    assert terms["anchor_quaternion_reward"].weight == 0.5
+    assert terms["anchor_quaternion_reward"].std == 0.40**2
+    assert terms["key_position_reward"].weight == 1.0
+    assert terms["key_position_reward"].std == 0.30**2
+    assert terms["key_quaternion_reward"].weight == 1.0
+    assert terms["key_quaternion_reward"].std == 0.40**2
+    assert terms["key_linear_velocity_reward"].weight == 1.5
+    assert terms["key_linear_velocity_reward"].std == 1.0**2
+    assert terms["key_angular_velocity_reward"].weight == 1.5
+    assert terms["key_angular_velocity_reward"].std == 3.14**2
+    assert terms["anchor_linear_velocity_reward"].weight == 1.0
+    assert terms["anchor_linear_velocity_reward"].std == 1.0**2
+    assert terms["anchor_angular_velocity_reward"].weight == 1.0
+    assert terms["anchor_angular_velocity_reward"].std == 3.14**2
+    assert terms["end_effector_position_reward"].weight == 1.0
+    assert terms["end_effector_position_reward"].std == 0.30**2
+    assert terms["end_effector_quaternion_reward"].weight == 1.0
+    assert terms["end_effector_quaternion_reward"].std == 0.40**2
     assert terms["com_position_reward"].weight == 0.25
     assert terms["com_position_reward"].std == 0.30**2
     assert terms["com_velocity_reward"].weight == 0.10
     assert terms["com_velocity_reward"].std == 1.0**2
     assert terms["com_support_reward"].weight == 0.30
     assert terms["com_support_reward"].std == 0.10**2
-    for term in terms.values():
-        if hasattr(term, "fine_weight"):
-            assert term.fine_weight == 0.70
-            assert term.medium_weight == 0.20
-            assert term.coarse_weight == 0.10
+    assert all("multi_scale" not in term.type for term in robust_spec.terms)
 
 
-def test_multi_scale_tracking_kernel_is_monotonic_and_keeps_coarse_signal() -> None:
+def test_legacy_multi_scale_tracking_kernel_uses_only_fine_term() -> None:
     rewards_mod = _load_rewards_module()
     errors = torch.tensor([0.0, 1.0, 10.0], dtype=torch.float32)
 
@@ -337,9 +337,7 @@ def test_multi_scale_tracking_kernel_is_monotonic_and_keeps_coarse_signal() -> N
         coarse_kernel="rational",
     )
 
-    assert torch.allclose(raw[0], torch.tensor(1.0, dtype=torch.float32))
-    assert torch.all(raw[1:] < raw[:-1])
-    assert raw[-1] > 0.0
+    assert torch.allclose(raw, torch.exp(-errors / 0.25))
 
 
 def test_robust_tracking_reward_terms_are_finite_and_report_metrics() -> None:
@@ -369,16 +367,16 @@ def test_robust_tracking_reward_terms_are_finite_and_report_metrics() -> None:
     assert reward_vector.shape == (2, len(spec.terms))
     assert torch.all(torch.isfinite(reward_vector))
     expected_terms = [
-        "multi_scale_anchor_position_reward",
-        "multi_scale_anchor_quaternion_reward",
-        "multi_scale_key_position_reward",
-        "multi_scale_key_quaternion_reward",
-        "multi_scale_key_linear_velocity_reward",
-        "multi_scale_key_angular_velocity_reward",
-        "multi_scale_anchor_linear_velocity_reward",
-        "multi_scale_anchor_angular_velocity_reward",
-        "multi_scale_end_effector_position_reward",
-        "multi_scale_end_effector_quaternion_reward",
+        "anchor_position_reward",
+        "anchor_quaternion_reward",
+        "key_position_reward",
+        "key_quaternion_reward",
+        "key_linear_velocity_reward",
+        "key_angular_velocity_reward",
+        "anchor_linear_velocity_reward",
+        "anchor_angular_velocity_reward",
+        "end_effector_position_reward",
+        "end_effector_quaternion_reward",
         "self_collision_penalty",
         "action_rate_penalty",
         "joint_limit_penalty",
@@ -389,16 +387,16 @@ def test_robust_tracking_reward_terms_are_finite_and_report_metrics() -> None:
         "com_support_reward",
     ]
     expected_error_terms = {
-        "multi_scale_anchor_position_reward",
-        "multi_scale_anchor_quaternion_reward",
-        "multi_scale_key_position_reward",
-        "multi_scale_key_quaternion_reward",
-        "multi_scale_key_linear_velocity_reward",
-        "multi_scale_key_angular_velocity_reward",
-        "multi_scale_anchor_linear_velocity_reward",
-        "multi_scale_anchor_angular_velocity_reward",
-        "multi_scale_end_effector_position_reward",
-        "multi_scale_end_effector_quaternion_reward",
+        "anchor_position_reward",
+        "anchor_quaternion_reward",
+        "key_position_reward",
+        "key_quaternion_reward",
+        "key_linear_velocity_reward",
+        "key_angular_velocity_reward",
+        "anchor_linear_velocity_reward",
+        "anchor_angular_velocity_reward",
+        "end_effector_position_reward",
+        "end_effector_quaternion_reward",
         "com_position_reward",
         "com_velocity_reward",
         "com_support_reward",
@@ -743,7 +741,7 @@ def test_end_effector_quaternion_reward_ignores_non_end_effector_body_errors() -
             dt=1.0,
             output_mode="vector",
             terms=(
-                rewards_mod.MultiScaleEndEffectorQuaternionRewardTermCfg(
+                rewards_mod.EndEffectorQuaternionRewardTermCfg(
                     weight=1.0,
                     end_effector_body_indices=(0, 1),
                 ),
@@ -768,19 +766,11 @@ def test_end_effector_quaternion_reward_ignores_non_end_effector_body_errors() -
     )
 
     error = torch.tensor([0.0, 2.0], dtype=torch.float32)
-    expected = rewards_mod._multi_scale_tracking_kernel(
-        error,
-        fine_std=0.40**2,
-        medium_std=1.0**2,
-        coarse_std=2.0**2,
-        fine_weight=0.70,
-        medium_weight=0.20,
-        coarse_weight=0.10,
-    )
+    expected = torch.exp(-error / (0.40**2))
 
     assert reward_vector.shape == (2, 1)
     assert torch.allclose(reward_vector[:, 0], expected)
-    assert torch.allclose(rewards.last_result.metrics["multi_scale_end_effector_quaternion_reward"]["error"], error)
+    assert torch.allclose(rewards.last_result.metrics["end_effector_quaternion_reward"]["error"], error)
 
 
 def test_anchor_position_reward_uses_only_configured_anchor_body_full_xyz() -> None:
@@ -789,7 +779,7 @@ def test_anchor_position_reward_uses_only_configured_anchor_body_full_xyz() -> N
         rewards_mod.RewardSpec(
             dt=1.0,
             output_mode="vector",
-            terms=(rewards_mod.MultiScaleAnchorPositionRewardTermCfg(anchor_body_index=1),),
+            terms=(rewards_mod.AnchorPositionRewardTermCfg(anchor_body_index=1),),
         )
     )
 
@@ -812,19 +802,11 @@ def test_anchor_position_reward_uses_only_configured_anchor_body_full_xyz() -> N
     )
 
     error = torch.tensor([0.0, 9.0], dtype=torch.float32)
-    expected = 0.50 * rewards_mod._multi_scale_tracking_kernel(
-        error,
-        fine_std=0.30**2,
-        medium_std=0.75**2,
-        coarse_std=1.50**2,
-        fine_weight=0.70,
-        medium_weight=0.20,
-        coarse_weight=0.10,
-    )
+    expected = 0.50 * torch.exp(-error / (0.30**2))
 
     assert reward_vector.shape == (2, 1)
     assert torch.allclose(reward_vector[:, 0], expected)
-    assert torch.allclose(rewards.last_result.metrics["multi_scale_anchor_position_reward"]["error"], error)
+    assert torch.allclose(rewards.last_result.metrics["anchor_position_reward"]["error"], error)
 
 
 def test_anchor_quaternion_reward_uses_only_configured_anchor_body_orientation() -> None:
@@ -834,7 +816,7 @@ def test_anchor_quaternion_reward_uses_only_configured_anchor_body_orientation()
         rewards_mod.RewardSpec(
             dt=1.0,
             output_mode="vector",
-            terms=(rewards_mod.MultiScaleAnchorQuaternionRewardTermCfg(anchor_body_index=1),),
+            terms=(rewards_mod.AnchorQuaternionRewardTermCfg(anchor_body_index=1),),
         )
     )
 
@@ -856,19 +838,11 @@ def test_anchor_quaternion_reward_uses_only_configured_anchor_body_orientation()
     )
 
     error = torch.tensor([0.0, 4.0], dtype=torch.float32)
-    expected = 0.50 * rewards_mod._multi_scale_tracking_kernel(
-        error,
-        fine_std=0.40**2,
-        medium_std=1.0**2,
-        coarse_std=2.0**2,
-        fine_weight=0.70,
-        medium_weight=0.20,
-        coarse_weight=0.10,
-    )
+    expected = 0.50 * torch.exp(-error / (0.40**2))
 
     assert reward_vector.shape == (2, 1)
     assert torch.allclose(reward_vector[:, 0], expected)
-    assert torch.allclose(rewards.last_result.metrics["multi_scale_anchor_quaternion_reward"]["error"], error)
+    assert torch.allclose(rewards.last_result.metrics["anchor_quaternion_reward"]["error"], error)
 
 
 def test_anchor_velocity_rewards_use_only_configured_anchor_body() -> None:
@@ -878,8 +852,8 @@ def test_anchor_velocity_rewards_use_only_configured_anchor_body() -> None:
             dt=1.0,
             output_mode="vector",
             terms=(
-                rewards_mod.MultiScaleAnchorLinearVelocityRewardTermCfg(anchor_body_index=1),
-                rewards_mod.MultiScaleAnchorAngularVelocityRewardTermCfg(anchor_body_index=1),
+                rewards_mod.AnchorLinearVelocityRewardTermCfg(anchor_body_index=1),
+                rewards_mod.AnchorAngularVelocityRewardTermCfg(anchor_body_index=1),
             ),
         )
     )
@@ -908,24 +882,8 @@ def test_anchor_velocity_rewards_use_only_configured_anchor_body() -> None:
         _make_action_model(num_envs=2),
     )
 
-    expected_linear = rewards_mod._multi_scale_tracking_kernel(
-        torch.tensor([0.0, 1.0], dtype=torch.float32),
-        fine_std=1.0**2,
-        medium_std=3.0**2,
-        coarse_std=6.0**2,
-        fine_weight=0.70,
-        medium_weight=0.20,
-        coarse_weight=0.10,
-    )
-    expected_angular = rewards_mod._multi_scale_tracking_kernel(
-        torch.tensor([0.0, 4.0], dtype=torch.float32),
-        fine_std=3.14**2,
-        medium_std=6.0**2,
-        coarse_std=12.0**2,
-        fine_weight=0.70,
-        medium_weight=0.20,
-        coarse_weight=0.10,
-    )
+    expected_linear = torch.exp(-torch.tensor([0.0, 1.0], dtype=torch.float32) / (1.0**2))
+    expected_angular = torch.exp(-torch.tensor([0.0, 4.0], dtype=torch.float32) / (3.14**2))
     expected = torch.stack((expected_linear, expected_angular), dim=-1)
 
     assert reward_vector.shape == (2, 2)

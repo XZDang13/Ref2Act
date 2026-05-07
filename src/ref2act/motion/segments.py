@@ -43,6 +43,7 @@ DEFAULT_ANCHOR_POSE_THRESHOLD = 1.00
 DEFAULT_ANCHOR_TILT_THRESHOLD_DEG = 30.0
 DEFAULT_ANCHOR_MIN_INTERVAL_LENGTH = 0.15
 DEFAULT_ANCHOR_MIN_SPACING = 0.35
+DEFAULT_ANCHOR_MAX_RESET_GAP = 1.0
 DEFAULT_ANCHOR_POSE_WEIGHT = 0.75
 DEFAULT_ANCHOR_TILT_WEIGHT = 0.75
 
@@ -60,10 +61,11 @@ class AnchorSelectionMetadata:
     energy_norm: np.ndarray
     pose_extreme: np.ndarray
     torso_tilt_deg: np.ndarray
+    joint_kinetic_energy: np.ndarray
 
     def as_npz_dict(self) -> dict[str, np.ndarray]:
         return {
-            "anchor_selection_version": np.asarray(1, dtype=np.int64),
+            "anchor_selection_version": np.asarray(2, dtype=np.int64),
             "anchor_frame_labels": self.frame_labels.astype(np.int8, copy=False),
             "anchor_segment_start_times": self.segment_start_times.astype(np.float32, copy=False),
             "anchor_segment_end_times": self.segment_end_times.astype(np.float32, copy=False),
@@ -75,6 +77,7 @@ class AnchorSelectionMetadata:
             "anchor_energy_norm": self.energy_norm.astype(np.float32, copy=False),
             "anchor_pose_extreme": self.pose_extreme.astype(np.float32, copy=False),
             "anchor_torso_tilt_deg": self.torso_tilt_deg.astype(np.float32, copy=False),
+            "anchor_joint_kinetic_energy": self.joint_kinetic_energy.astype(np.float32, copy=False),
         }
 
 
@@ -96,6 +99,7 @@ class AnchorSelectionDiagnostics:
     energy_norm: np.ndarray
     pose_extreme: np.ndarray
     torso_tilt_deg: np.ndarray
+    joint_kinetic_energy: np.ndarray
     high_swing_pose: np.ndarray
     no_support: np.ndarray
     unstable_support: np.ndarray
@@ -231,6 +235,8 @@ def build_anchor_selection_diagnostics(
     num_frames = int(joint_pos.shape[0])
     if num_frames < 1:
         raise ValueError("Anchor selection requires at least one frame.")
+    if joint_vel.shape[0] != num_frames:
+        raise ValueError("Anchor selection requires joint velocities for every frame.")
     if body_pos_w.shape[0] != num_frames or body_lin_vel_w.shape[0] != num_frames:
         raise ValueError("Anchor selection requires body positions and velocities for every frame.")
 
@@ -294,6 +300,11 @@ def build_anchor_selection_diagnostics(
         percentile=DEFAULT_ANCHOR_SCORE_NORMALIZATION_PERCENTILE,
     )
     energy_norm = (0.5 * (support_foot_speed_norm + root_vertical_speed_norm)).astype(np.float32)
+    joint_kinetic_energy = np.sum(np.abs(joint_vel), axis=1).astype(np.float32)
+    joint_kinetic_energy_norm = _normalize_by_percentile(
+        joint_kinetic_energy,
+        percentile=DEFAULT_ANCHOR_SCORE_NORMALIZATION_PERCENTILE,
+    ).astype(np.float32)
 
     joint_median = np.median(joint_pos, axis=0, keepdims=True)
     joint_scale = np.percentile(joint_pos, 95.0, axis=0, keepdims=True) - np.percentile(
@@ -369,9 +380,22 @@ def build_anchor_selection_diagnostics(
         dt=dt,
         min_spacing_seconds=DEFAULT_ANCHOR_MIN_SPACING,
     )
+    strict_low_kinetic_frame_indices = _select_low_kinetic_anchor_frame_indices(
+        strict_safe_mask,
+        joint_kinetic_energy_norm,
+        dt=dt,
+        min_spacing_seconds=DEFAULT_ANCHOR_MIN_SPACING,
+    )
+    relaxed_low_kinetic_frame_indices = _select_low_kinetic_anchor_frame_indices(
+        relaxed_safe_mask,
+        joint_kinetic_energy_norm,
+        dt=dt,
+        min_spacing_seconds=DEFAULT_ANCHOR_MIN_SPACING,
+    )
+    relaxed_candidate_frame_indices = np.empty(0, dtype=np.int64)
 
     used_fallback_promotion = False
-    if strict_anchor_frame_indices.size == 0:
+    if strict_anchor_frame_indices.size == 0 and strict_low_kinetic_frame_indices.size == 0:
         fallback_anchor_indices = _select_fallback_anchor_frame_indices(
             relaxed_safe_mask,
             frame_scores,
@@ -386,12 +410,35 @@ def build_anchor_selection_diagnostics(
                 fallback_anchor_indices,
             )
             used_fallback_promotion = True
+            relaxed_candidate_frame_indices = relaxed_low_kinetic_frame_indices
 
-    anchor_frame_indices = _select_anchor_frame_indices(
+    green_anchor_frame_indices = _select_anchor_frame_indices(
         frame_labels,
         frame_scores,
         dt=dt,
         min_spacing_seconds=DEFAULT_ANCHOR_MIN_SPACING,
+    )
+    anchor_frame_indices = _merge_anchor_frame_indices_by_priority(
+        (
+            green_anchor_frame_indices,
+            strict_low_kinetic_frame_indices,
+            relaxed_candidate_frame_indices,
+        ),
+        dt=dt,
+        min_spacing_seconds=DEFAULT_ANCHOR_MIN_SPACING,
+    )
+    anchor_frame_indices = _enforce_anchor_max_reset_gap(
+        anchor_frame_indices,
+        (
+            green_anchor_frame_indices,
+            strict_low_kinetic_frame_indices,
+            relaxed_candidate_frame_indices,
+        ),
+        dt=dt,
+        duration=duration,
+        min_spacing_seconds=DEFAULT_ANCHOR_MIN_SPACING,
+        max_gap_seconds=DEFAULT_ANCHOR_MAX_RESET_GAP,
+        min_future_horizon_seconds=DEFAULT_ANCHOR_MIN_FUTURE_HORIZON,
     )
     anchor_frame_indices, bootstrap_start_anchor_inserted, num_tail_trimmed_anchors = _postprocess_anchor_frame_indices(
         anchor_frame_indices,
@@ -420,6 +467,7 @@ def build_anchor_selection_diagnostics(
         energy_norm=energy_norm[anchor_frame_indices].astype(np.float32, copy=False),
         pose_extreme=pose_extreme[anchor_frame_indices].astype(np.float32, copy=False),
         torso_tilt_deg=torso_tilt_deg[anchor_frame_indices].astype(np.float32, copy=False),
+        joint_kinetic_energy=joint_kinetic_energy_norm[anchor_frame_indices].astype(np.float32, copy=False),
     )
     energy_fail_threshold = _masked_percentile(
         energy_norm,
@@ -461,6 +509,7 @@ def build_anchor_selection_diagnostics(
         energy_norm=energy_norm.astype(np.float32, copy=False),
         pose_extreme=pose_extreme.astype(np.float32, copy=False),
         torso_tilt_deg=torso_tilt_deg.astype(np.float32, copy=False),
+        joint_kinetic_energy=joint_kinetic_energy_norm.astype(np.float32, copy=False),
         high_swing_pose=high_swing_pose.astype(bool, copy=False),
         no_support=no_support.astype(bool, copy=False),
         unstable_support=unstable_support.astype(bool, copy=False),
@@ -774,6 +823,122 @@ def _select_anchor_frame_indices(
         anchor_indices.extend(sorted(selected_frames))
 
     return np.asarray(anchor_indices, dtype=np.int64)
+
+
+def _select_low_kinetic_anchor_frame_indices(
+    candidate_mask: np.ndarray,
+    joint_kinetic_energy: np.ndarray,
+    *,
+    dt: float,
+    min_spacing_seconds: float,
+) -> np.ndarray:
+    mask = np.asarray(candidate_mask, dtype=bool).reshape(-1)
+    energy = np.asarray(joint_kinetic_energy, dtype=np.float32).reshape(-1)
+    if mask.shape != energy.shape:
+        raise ValueError("candidate_mask and joint_kinetic_energy must have matching shapes.")
+
+    candidate_indices: set[int] = {index for index in _find_local_minima(energy) if mask[index]}
+    for run_start, run_end in _find_true_runs(mask):
+        run_energy = energy[run_start : run_end + 1]
+        if run_energy.size > 0:
+            candidate_indices.add(run_start + int(np.argmin(run_energy)))
+
+    min_spacing_frames = max(int(np.ceil(min_spacing_seconds / dt)), 1)
+    selected_frames: list[int] = []
+    for frame_index in sorted(candidate_indices, key=lambda index: (energy[index], index)):
+        if all(abs(frame_index - selected_frame) >= min_spacing_frames for selected_frame in selected_frames):
+            selected_frames.append(frame_index)
+
+    return np.asarray(selected_frames, dtype=np.int64)
+
+
+def _merge_anchor_frame_indices_by_priority(
+    candidate_groups: tuple[np.ndarray, ...],
+    *,
+    dt: float,
+    min_spacing_seconds: float,
+) -> np.ndarray:
+    if dt <= 0.0:
+        raise ValueError("dt must be > 0.")
+
+    min_spacing_frames = max(int(np.ceil(min_spacing_seconds / dt)), 1)
+    selected_frames: list[int] = []
+    for group in candidate_groups:
+        candidates = np.asarray(group, dtype=np.int64).reshape(-1)
+        for frame_index in candidates.tolist():
+            if frame_index < 0:
+                raise ValueError("candidate frame indices must be non-negative.")
+            if all(abs(frame_index - selected_frame) >= min_spacing_frames for selected_frame in selected_frames):
+                selected_frames.append(int(frame_index))
+
+    return np.asarray(sorted(set(selected_frames)), dtype=np.int64)
+
+
+def _enforce_anchor_max_reset_gap(
+    frame_indices: np.ndarray,
+    candidate_groups: tuple[np.ndarray, ...],
+    *,
+    dt: float,
+    duration: float,
+    min_spacing_seconds: float,
+    max_gap_seconds: float,
+    min_future_horizon_seconds: float,
+) -> np.ndarray:
+    if dt <= 0.0:
+        raise ValueError("dt must be > 0.")
+    if max_gap_seconds <= 0.0:
+        raise ValueError("max_gap_seconds must be > 0.")
+    if min_spacing_seconds < 0.0:
+        raise ValueError("min_spacing_seconds must be >= 0.")
+
+    selected = {int(index) for index in np.asarray(frame_indices, dtype=np.int64).reshape(-1)}
+    selected = {index for index in selected if index >= 0}
+    min_spacing_frames = int(np.ceil(float(min_spacing_seconds) / float(dt)))
+    max_gap_frames = int(np.ceil(float(max_gap_seconds) / float(dt)))
+    tail_cutoff_time = max(float(duration) - float(min_future_horizon_seconds), 0.0)
+    tail_cutoff_frame = int(np.floor(tail_cutoff_time / float(dt) + 1.0e-6))
+
+    candidate_order: list[int] = []
+    seen_candidates: set[int] = set()
+    for group in candidate_groups:
+        for frame_index in np.asarray(group, dtype=np.int64).reshape(-1).tolist():
+            resolved_index = int(frame_index)
+            if resolved_index < 0 or resolved_index > tail_cutoff_frame or resolved_index in seen_candidates:
+                continue
+            seen_candidates.add(resolved_index)
+            candidate_order.append(resolved_index)
+
+    def _spacing_ok(candidate: int) -> bool:
+        if min_spacing_frames <= 0:
+            return True
+        return all(abs(candidate - selected_frame) >= min_spacing_frames for selected_frame in selected)
+
+    while True:
+        ordered_selected = sorted(selected)
+        boundaries = [0] + ordered_selected + [tail_cutoff_frame]
+        inserted = False
+        for left_frame, right_frame in zip(boundaries[:-1], boundaries[1:], strict=False):
+            if right_frame - left_frame <= max_gap_frames:
+                continue
+
+            for candidate in candidate_order:
+                if candidate in selected or not (left_frame < candidate < right_frame):
+                    continue
+                if left_frame == 0 and candidate < min_spacing_frames:
+                    continue
+                if not _spacing_ok(candidate):
+                    continue
+                selected.add(candidate)
+                inserted = True
+                break
+
+            if inserted:
+                break
+
+        if not inserted:
+            break
+
+    return np.asarray(sorted(selected), dtype=np.int64)
 
 
 def _find_local_minima(values: np.ndarray) -> list[int]:

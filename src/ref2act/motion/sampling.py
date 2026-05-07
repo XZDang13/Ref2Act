@@ -9,7 +9,10 @@ import torch
 from ref2act.common.utils import IndexLike
 
 from .library import MotionClip, MotionLib
-from .segments import build_legacy_time_segments
+from .segments import ANCHOR_FRAME_LABEL_RED, build_legacy_time_segments
+
+
+DEFAULT_ANCHOR_FAILURE_BIN_SIZE = 0.3
 
 
 class SamplerMod(Enum):
@@ -478,26 +481,33 @@ class MotionSampler:
         times = torch.empty(motion_ids.shape, dtype=torch.float32, device=self.device)
         target_bin_indices = torch.empty(motion_ids.shape, dtype=torch.long, device=self.device)
 
-        if self._has_padded_failure_bins() and self._bin_reset_times_padded is not None:
-            num_anchor_bins = self.num_bins_per_motion[motion_ids]
-            if bool(torch.any(num_anchor_bins <= 0).item()):
+        if (
+            self._has_padded_failure_bins()
+            and self._bin_reset_times_padded is not None
+            and self._bin_valid_mask_padded is not None
+            and self._bin_reset_eligible_padded is not None
+        ):
+            eligible = self._bin_valid_mask_padded[motion_ids] & self._bin_reset_eligible_padded[motion_ids]
+            eligible_count = torch.sum(eligible.to(dtype=torch.float32), dim=1, keepdim=True)
+            if bool(torch.any(eligible_count <= 0).item()):
                 raise self._anchor_sampling_error(
-                    "Anchor segment sampling requires at least one reset anchor for every motion clip."
+                    "Anchor segment sampling requires at least one eligible reset anchor for every motion clip."
                 )
-            target_bin_indices = torch.floor(torch.rand(motion_ids.shape, device=self.device) * num_anchor_bins).long()
-            target_bin_indices = torch.clamp(target_bin_indices, max=num_anchor_bins - 1)
+            probs = eligible.to(dtype=torch.float32) / eligible_count
+            target_bin_indices = torch.multinomial(probs, num_samples=1, replacement=True).squeeze(-1)
             times = self._bin_reset_times_padded[motion_ids, target_bin_indices]
             return times, target_bin_indices
 
         for motion_id in torch.unique(motion_ids, sorted=True).tolist():
             mask = motion_ids == motion_id
             num_samples = int(mask.sum().item())
-            num_anchor_bins = int(self.num_bins_per_motion[motion_id].item())
-            if num_anchor_bins == 0:
+            eligible_indices = torch.nonzero(self.bin_reset_eligible[motion_id], as_tuple=False).reshape(-1)
+            if eligible_indices.numel() == 0:
                 raise self._anchor_sampling_error(
-                    "Anchor segment sampling requires at least one reset anchor for every motion clip."
+                    "Anchor segment sampling requires at least one eligible reset anchor for every motion clip."
                 )
-            sampled_bin_indices = torch.randint(num_anchor_bins, (num_samples,), device=self.device)
+            sampled_offsets = torch.randint(eligible_indices.numel(), (num_samples,), device=self.device)
+            sampled_bin_indices = eligible_indices[sampled_offsets]
             target_bin_indices[mask] = sampled_bin_indices
             times[mask] = self.bin_reset_times[motion_id][sampled_bin_indices]
 
@@ -707,23 +717,63 @@ class MotionSampler:
                 torch.empty(0, dtype=torch.bool, device=self.device),
             )
 
-        start_times = anchor_times.clone()
-        start_times[0] = 0.0
-
-        end_times = torch.empty_like(anchor_times)
-        if anchor_times.numel() > 1:
-            end_times[:-1] = anchor_times[1:]
-        end_times[-1] = float(clip.duration)
-
         segment_end_times = clip.anchor_segment_end_times.to(device=self.device)
         segment_labels = clip.anchor_segment_labels.to(device=self.device)
         segment_indices = torch.searchsorted(segment_end_times, anchor_times, right=True)
         segment_indices = torch.clamp(segment_indices, max=max(int(segment_labels.numel()) - 1, 0))
         anchor_labels = segment_labels[segment_indices]
 
-        reset_times = anchor_times.clone()
-        eligible = torch.ones(anchor_times.shape, dtype=torch.bool, device=self.device)
-        return start_times, end_times, anchor_labels, reset_times, eligible
+        bin_size = self.bin_size if self.bin_size is not None else DEFAULT_ANCHOR_FAILURE_BIN_SIZE
+        start_time_values: list[float] = []
+        end_time_values: list[float] = []
+        label_values: list[int] = []
+        reset_time_values: list[float] = []
+        eligible_values: list[bool] = []
+        clip_duration = float(clip.duration)
+
+        for anchor_index in range(int(anchor_times.numel())):
+            span_start = 0.0 if anchor_index == 0 else float(anchor_times[anchor_index].item())
+            if anchor_index + 1 < int(anchor_times.numel()):
+                span_end = float(anchor_times[anchor_index + 1].item())
+            else:
+                span_end = clip_duration
+            span_start = max(0.0, min(span_start, clip_duration))
+            span_end = max(0.0, min(span_end, clip_duration))
+            if span_end <= span_start:
+                continue
+
+            num_sub_bins = max(int(math.ceil((span_end - span_start) / bin_size - 1.0e-6)), 1)
+            anchor_label = int(anchor_labels[anchor_index].item())
+            reset_time = float(anchor_times[anchor_index].item())
+            reset_eligible = anchor_label != int(ANCHOR_FRAME_LABEL_RED)
+            for sub_bin_index in range(num_sub_bins):
+                sub_start = span_start + float(sub_bin_index) * bin_size
+                sub_end = min(sub_start + bin_size, span_end)
+                if sub_end <= sub_start:
+                    continue
+                start_time_values.append(sub_start)
+                end_time_values.append(sub_end)
+                label_values.append(anchor_label)
+                reset_time_values.append(reset_time)
+                eligible_values.append(reset_eligible)
+
+        if not start_time_values:
+            empty = torch.empty(0, dtype=torch.float32, device=self.device)
+            return (
+                empty,
+                empty,
+                torch.empty(0, dtype=torch.long, device=self.device),
+                empty,
+                torch.empty(0, dtype=torch.bool, device=self.device),
+            )
+
+        return (
+            torch.as_tensor(start_time_values, dtype=torch.float32, device=self.device),
+            torch.as_tensor(end_time_values, dtype=torch.float32, device=self.device),
+            torch.as_tensor(label_values, dtype=torch.long, device=self.device),
+            torch.as_tensor(reset_time_values, dtype=torch.float32, device=self.device),
+            torch.as_tensor(eligible_values, dtype=torch.bool, device=self.device),
+        )
 
     def _build_padded_bin_tensors(self) -> None:
         if self.num_bins_per_motion is None:
