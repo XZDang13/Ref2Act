@@ -16,6 +16,7 @@ from ref2act.motion.segments import (
     build_anchor_selection_diagnostics,
     build_contact_segments,
     infer_ground_contact_from_foot_heights,
+    validate_segment_arrays,
 )
 from ref2act.motion.smoothing import DEFAULT_SMOOTHING_PROFILE, SMOOTHING_PROFILES, smooth_motion_trajectory
 
@@ -30,20 +31,13 @@ _FRAME_ALIGNED_KEYS = {
     "body_quat_w",
     "body_lin_vel_w",
     "body_ang_vel_w",
-    "anchor_frame_labels",
 }
 _SEGMENT_TIME_GROUPS = (
     ("segment_start_times", "segment_end_times", "segment_types"),
-    ("anchor_segment_start_times", "anchor_segment_end_times", "anchor_segment_labels"),
 )
 _ANCHOR_ALIGNED_KEYS = {
     "anchor_frame_indices",
     "anchor_times",
-    "anchor_scores",
-    "anchor_support_modes",
-    "anchor_energy_norm",
-    "anchor_pose_extreme",
-    "anchor_torso_tilt_deg",
     "anchor_joint_kinetic_energy",
 }
 
@@ -710,20 +704,44 @@ def _clip_time_segments(
     if starts.shape != ends.shape or starts.shape != values.shape:
         raise ValueError(f"{start_key}, {end_key}, and {value_key} must have matching shapes.")
 
+    chunk_duration = float(end_time - start_time)
+    if chunk_duration <= 0.0:
+        raise ValueError("Split chunk must have positive duration.")
+
     overlap_starts = np.maximum(starts, start_time)
     overlap_ends = np.minimum(ends, end_time)
     mask = overlap_ends > overlap_starts + 1.0e-7
     if not np.any(mask):
         raise ValueError(f"No {start_key}/{end_key} metadata overlaps the split chunk.")
 
-    shifted_starts = (overlap_starts[mask] - start_time).astype(np.float32)
-    shifted_ends = (overlap_ends[mask] - start_time).astype(np.float32)
+    shifted_starts = np.clip(overlap_starts[mask] - start_time, 0.0, chunk_duration).astype(np.float32)
+    shifted_ends = np.clip(overlap_ends[mask] - start_time, 0.0, chunk_duration).astype(np.float32)
+    shifted_values = values[mask].copy()
     shifted_starts[0] = np.float32(0.0)
-    shifted_ends[-1] = np.float32(end_time - start_time)
+    shifted_ends[-1] = np.float32(chunk_duration)
+
+    positive_duration_mask = shifted_ends > shifted_starts
+    if not np.all(positive_duration_mask):
+        shifted_starts = shifted_starts[positive_duration_mask]
+        shifted_ends = shifted_ends[positive_duration_mask]
+        shifted_values = shifted_values[positive_duration_mask]
+        if shifted_starts.size == 0:
+            raise ValueError(f"No positive-duration {start_key}/{end_key} metadata remains after clipping.")
+        shifted_starts[0] = np.float32(0.0)
+        shifted_ends[-1] = np.float32(chunk_duration)
+
+    if shifted_starts.size > 1:
+        shifted_starts[1:] = shifted_ends[:-1]
+    validate_segment_arrays(
+        shifted_starts,
+        shifted_ends,
+        duration=chunk_duration,
+        segment_types=shifted_values if value_key == "segment_types" else None,
+    )
     return {
         start_key: shifted_starts,
         end_key: shifted_ends,
-        value_key: values[mask].copy(),
+        value_key: shifted_values,
     }
 
 
@@ -877,10 +895,7 @@ def _finalize_motion_slot(
         print(
             "[INFO]: Anchor export selected "
             f"{anchor_diagnostics.metadata.frame_indices.shape[0]} anchor(s) "
-            f"(strict={anchor_diagnostics.strict_anchor_frame_indices.shape[0]}, "
-            f"fallback_promotion={'yes' if anchor_diagnostics.used_fallback_promotion else 'no'}, "
-            f"bootstrap_start={'yes' if anchor_diagnostics.bootstrap_start_anchor_inserted else 'no'}, "
-            f"tail_trimmed={anchor_diagnostics.num_tail_trimmed_anchors}) "
+            f"(lowest_energy_fallback={'yes' if anchor_diagnostics.used_lowest_energy_fallback else 'no'}) "
             f"for {slot.input_file}"
         )
 

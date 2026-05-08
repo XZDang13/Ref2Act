@@ -285,14 +285,9 @@ def test_reward_specs_keep_requested_terms_weights_and_stds() -> None:
         "com_support_reward",
     ]
     default_spec = rewards_mod.default_reward_spec(dt=1.0)
-    robust_spec = rewards_mod.robust_tracking_reward_spec(dt=1.0, include_com_terms=False)
-    robust_with_com_flag = rewards_mod.robust_tracking_reward_spec(dt=1.0, include_com_terms=True)
-
     assert [term.type for term in default_spec.terms] == expected_types
-    assert [term.type for term in robust_spec.terms] == expected_types
-    assert [term.type for term in robust_with_com_flag.terms] == expected_types
 
-    terms = {term.type: term for term in robust_spec.terms}
+    terms = {term.type: term for term in default_spec.terms}
     assert terms["anchor_position_reward"].weight == 0.5
     assert terms["anchor_position_reward"].std == 0.30**2
     assert terms["anchor_quaternion_reward"].weight == 0.5
@@ -319,7 +314,7 @@ def test_reward_specs_keep_requested_terms_weights_and_stds() -> None:
     assert terms["com_velocity_reward"].std == 1.0**2
     assert terms["com_support_reward"].weight == 0.30
     assert terms["com_support_reward"].std == 0.10**2
-    assert all("multi_scale" not in term.type for term in robust_spec.terms)
+    assert all("multi_scale" not in term.type for term in default_spec.terms)
 
 
 def test_legacy_multi_scale_tracking_kernel_uses_only_fine_term() -> None:
@@ -340,10 +335,10 @@ def test_legacy_multi_scale_tracking_kernel_uses_only_fine_term() -> None:
     assert torch.allclose(raw, torch.exp(-errors / 0.25))
 
 
-def test_robust_tracking_reward_terms_are_finite_and_report_metrics() -> None:
+def test_default_tracking_reward_terms_are_finite_and_report_metrics() -> None:
     rewards_mod = _load_rewards_module()
     spec = dataclasses.replace(
-        rewards_mod.robust_tracking_reward_spec(dt=1.0, include_com_terms=False),
+        rewards_mod.default_reward_spec(dt=1.0),
         output_mode="vector",
     )
     rewards = rewards_mod.Rewards(spec)
@@ -351,17 +346,12 @@ def test_robust_tracking_reward_terms_are_finite_and_report_metrics() -> None:
     robot.data.joint_pos = torch.tensor([[0.2, -0.1], [0.5, 0.25]], dtype=torch.float32)
     robot.data.joint_vel = torch.tensor([[0.5, -0.2], [1.0, 0.3]], dtype=torch.float32)
     reference_motion = _make_reference_motion(num_envs=2, num_bodies=3, num_joints=2)
-    tracking_quality = types.SimpleNamespace(
-        score=torch.tensor([1.5, 2.0], dtype=torch.float32),
-        previous_score=torch.tensor([2.0, 1.5], dtype=torch.float32),
-    )
 
     reward_vector = rewards.get_task_reward(
         robot,
         reference_motion,
         _make_contact_sensor(torch.zeros((2, 1, 3, 3), dtype=torch.float32)),
         _make_action_model(num_envs=2),
-        tracking_quality=tracking_quality,
     )
 
     assert reward_vector.shape == (2, len(spec.terms))
@@ -405,101 +395,6 @@ def test_robust_tracking_reward_terms_are_finite_and_report_metrics() -> None:
     assert expected_error_terms.issubset(rewards.last_result.components)
     for term_id in expected_error_terms:
         assert {"raw", "weighted", "error"}.issubset(rewards.last_result.metrics[term_id])
-
-
-def test_tracking_progress_reward_uses_score_delta_and_is_optional() -> None:
-    rewards_mod = _load_rewards_module()
-    rewards = rewards_mod.Rewards(
-        rewards_mod.RewardSpec(
-            dt=1.0,
-            output_mode="sum",
-            terms=(rewards_mod.TrackingProgressRewardTermCfg(weight=1.0),),
-        )
-    )
-    robot = _make_robot(torch.zeros((1, 3, 3), dtype=torch.float32))
-    reference_motion = _make_reference_motion()
-    contact_sensor = _make_contact_sensor(torch.zeros((1, 1, 3, 3), dtype=torch.float32))
-    action_model = _make_action_model()
-
-    no_quality = rewards.get_task_reward(robot, reference_motion, contact_sensor, action_model)
-    improved = rewards.get_task_reward(
-        robot,
-        reference_motion,
-        contact_sensor,
-        action_model,
-        tracking_quality=types.SimpleNamespace(
-            previous_score=torch.tensor([2.0], dtype=torch.float32),
-            score=torch.tensor([1.5], dtype=torch.float32),
-        ),
-    )
-    regressed = rewards.get_task_reward(
-        robot,
-        reference_motion,
-        contact_sensor,
-        action_model,
-        tracking_quality=types.SimpleNamespace(
-            previous_score=torch.tensor([1.5], dtype=torch.float32),
-            score=torch.tensor([2.0], dtype=torch.float32),
-        ),
-    )
-    gated_out = rewards.get_task_reward(
-        robot,
-        reference_motion,
-        contact_sensor,
-        action_model,
-        tracking_quality=types.SimpleNamespace(
-            previous_score=torch.tensor([2.0], dtype=torch.float32),
-            score=torch.tensor([0.5], dtype=torch.float32),
-        ),
-    )
-
-    assert torch.allclose(no_quality, torch.tensor([0.0], dtype=torch.float32))
-    assert improved.item() > 0.0
-    assert regressed.item() < 0.0
-    assert torch.allclose(gated_out, torch.tensor([0.0], dtype=torch.float32))
-
-
-def test_tracking_recovery_penalty_uses_score_gate_and_is_optional() -> None:
-    rewards_mod = _load_rewards_module()
-    rewards = rewards_mod.Rewards(
-        rewards_mod.RewardSpec(
-            dt=1.0,
-            output_mode="sum",
-            terms=(rewards_mod.TrackingRecoveryPenaltyTermCfg(weight=-1.0),),
-        )
-    )
-    robot = _make_robot(torch.zeros((1, 3, 3), dtype=torch.float32))
-    reference_motion = _make_reference_motion()
-    contact_sensor = _make_contact_sensor(torch.zeros((1, 1, 3, 3), dtype=torch.float32))
-    action_model = _make_action_model()
-
-    no_quality = rewards.get_task_reward(robot, reference_motion, contact_sensor, action_model)
-    below_gate = rewards.get_task_reward(
-        robot,
-        reference_motion,
-        contact_sensor,
-        action_model,
-        tracking_quality=types.SimpleNamespace(score=torch.tensor([0.5], dtype=torch.float32)),
-    )
-    in_gate = rewards.get_task_reward(
-        robot,
-        reference_motion,
-        contact_sensor,
-        action_model,
-        tracking_quality=types.SimpleNamespace(score=torch.tensor([1.5], dtype=torch.float32)),
-    )
-    full_gate = rewards.get_task_reward(
-        robot,
-        reference_motion,
-        contact_sensor,
-        action_model,
-        tracking_quality=types.SimpleNamespace(score=torch.tensor([1.8], dtype=torch.float32)),
-    )
-
-    assert torch.allclose(no_quality, torch.tensor([0.0], dtype=torch.float32))
-    assert torch.allclose(below_gate, torch.tensor([0.0], dtype=torch.float32))
-    assert in_gate.item() < 0.0
-    assert torch.allclose(full_gate, torch.tensor([-1.0], dtype=torch.float32))
 
 
 def test_com_position_reward_tracks_mass_weighted_xy_error() -> None:

@@ -9,8 +9,6 @@ import torch
 
 from ref2act.motion import MotionLib, SegmentSource
 from ref2act.motion.segments import (
-    ANCHOR_FRAME_LABEL_GREEN,
-    ANCHOR_FRAME_LABEL_RED,
     SEGMENT_TYPE_AIR_MERGE,
     SEGMENT_TYPE_TIME_BIN,
 )
@@ -24,11 +22,10 @@ def _write_motion_file(
     segment_start_times: np.ndarray | None = None,
     segment_end_times: np.ndarray | None = None,
     segment_types: np.ndarray | None = None,
-    anchor_segment_start_times: np.ndarray | None = None,
-    anchor_segment_end_times: np.ndarray | None = None,
-    anchor_segment_labels: np.ndarray | None = None,
+    anchor_selection_version: int | None = 3,
     anchor_frame_indices: np.ndarray | None = None,
     anchor_times: np.ndarray | None = None,
+    anchor_joint_kinetic_energy: np.ndarray | None = None,
 ) -> None:
     joint_pos = np.zeros((num_frames, 1), dtype=np.float32)
     joint_vel = np.zeros_like(joint_pos)
@@ -53,16 +50,19 @@ def _write_motion_file(
         payload["segment_start_times"] = np.asarray(segment_start_times, dtype=np.float32)
         payload["segment_end_times"] = np.asarray(segment_end_times, dtype=np.float32)
         payload["segment_types"] = np.asarray(segment_types, dtype=np.int64)
-    if anchor_segment_start_times is not None:
-        payload["anchor_segment_start_times"] = np.asarray(anchor_segment_start_times, dtype=np.float32)
-    if anchor_segment_end_times is not None:
-        payload["anchor_segment_end_times"] = np.asarray(anchor_segment_end_times, dtype=np.float32)
-    if anchor_segment_labels is not None:
-        payload["anchor_segment_labels"] = np.asarray(anchor_segment_labels, dtype=np.int64)
+    if anchor_frame_indices is not None and anchor_selection_version is not None:
+        payload["anchor_selection_version"] = np.asarray(anchor_selection_version, dtype=np.int64)
     if anchor_frame_indices is not None:
         payload["anchor_frame_indices"] = np.asarray(anchor_frame_indices, dtype=np.int64)
     if anchor_times is not None:
         payload["anchor_times"] = np.asarray(anchor_times, dtype=np.float32)
+    if anchor_joint_kinetic_energy is not None:
+        payload["anchor_joint_kinetic_energy"] = np.asarray(anchor_joint_kinetic_energy, dtype=np.float32)
+    elif anchor_frame_indices is not None:
+        payload["anchor_joint_kinetic_energy"] = np.zeros(
+            np.asarray(anchor_frame_indices).reshape(-1).shape,
+            dtype=np.float32,
+        )
 
     np.savez(path, **payload)
 
@@ -130,11 +130,18 @@ def _load_sampler_module():
 def _write_anchor_sampler_motion_file(path: Path) -> None:
     _write_motion_file(
         path,
-        anchor_segment_start_times=np.asarray([0.0], dtype=np.float32),
-        anchor_segment_end_times=np.asarray([1.0], dtype=np.float32),
-        anchor_segment_labels=np.asarray([ANCHOR_FRAME_LABEL_GREEN], dtype=np.int64),
         anchor_frame_indices=np.asarray([1, 5, 9], dtype=np.int64),
         anchor_times=np.asarray([0.1, 0.5, 0.9], dtype=np.float32),
+        anchor_joint_kinetic_energy=np.asarray([0.3, 0.1, 0.2], dtype=np.float32),
+    )
+
+
+def _write_empty_anchor_motion_file(path: Path) -> None:
+    _write_motion_file(
+        path,
+        anchor_frame_indices=np.asarray([], dtype=np.int64),
+        anchor_times=np.asarray([], dtype=np.float32),
+        anchor_joint_kinetic_energy=np.asarray([], dtype=np.float32),
     )
 
 
@@ -142,11 +149,9 @@ def _write_anchor_motion_file(path: Path, anchor_times: np.ndarray) -> None:
     _write_motion_file(
         path,
         num_frames=max(int(anchor_times.shape[0]) * 2, 10),
-        anchor_segment_start_times=np.asarray([0.0], dtype=np.float32),
-        anchor_segment_end_times=np.asarray([1.0], dtype=np.float32),
-        anchor_segment_labels=np.asarray([ANCHOR_FRAME_LABEL_GREEN], dtype=np.int64),
         anchor_frame_indices=np.arange(anchor_times.shape[0], dtype=np.int64),
         anchor_times=np.asarray(anchor_times, dtype=np.float32),
+        anchor_joint_kinetic_energy=np.zeros(anchor_times.shape[0], dtype=np.float32),
     )
 
 
@@ -198,9 +203,9 @@ def test_sampler_failure_weighted_sampling_stays_inside_segment_bounds(tmp_path:
         dt=0.05,
         anchor_body_index=0,
         bin_size=0.2,
-        failure_weight_uniform_mix=0.0,
-        failure_weight_max_uniform_ratio=None,
-        failure_weight_exploration_bonus=0.0,
+        weight_fail=1.0,
+        weight_novel=0.0,
+        adaptive_uniform_ratio=0.0,
         device=torch.device("cpu"),
     )
 
@@ -234,14 +239,14 @@ def test_failure_weighted_motion_selection_prefers_harder_motion(tmp_path: Path)
         motion_lib=motion_lib,
         dt=0.05,
         anchor_body_index=0,
-        failure_weight_uniform_mix=0.0,
+        weight_fail=1.0,
+        weight_novel=0.0,
+        adaptive_uniform_ratio=0.0,
         device=torch.device("cpu"),
     )
 
-    sampler.bin_fail_counts[0][:] = torch.tensor([8.0, 8.0])
-    sampler.bin_sample_counts[0][:] = torch.tensor([10.0, 10.0])
-    sampler.bin_fail_counts[1][:] = torch.tensor([2.0, 2.0])
-    sampler.bin_sample_counts[1][:] = torch.tensor([10.0, 10.0])
+    sampler.motion_fail_counts[:] = torch.tensor([16.0, 4.0])
+    sampler.motion_sample_counts[:] = torch.tensor([20.0, 20.0])
 
     torch.manual_seed(0)
     motion_ids = sampler._sample_failure_weighted_motion_ids(torch.arange(4096))
@@ -268,14 +273,14 @@ def test_failure_weighted_motion_selection_guard_keeps_all_motions_live(tmp_path
         motion_lib=motion_lib,
         dt=0.05,
         anchor_body_index=0,
-        failure_weight_uniform_mix=0.2,
+        weight_fail=0.8,
+        weight_novel=0.0,
+        adaptive_uniform_ratio=0.0,
         device=torch.device("cpu"),
     )
 
-    sampler.bin_fail_counts[0][:] = torch.tensor([10.0, 10.0])
-    sampler.bin_sample_counts[0][:] = torch.tensor([10.0, 10.0])
-    sampler.bin_fail_counts[1][:] = torch.zeros(2, dtype=torch.float32)
-    sampler.bin_sample_counts[1][:] = torch.tensor([10.0, 10.0])
+    sampler.motion_fail_counts[:] = torch.tensor([20.0, 0.0])
+    sampler.motion_sample_counts[:] = torch.tensor([20.0, 20.0])
 
     torch.manual_seed(0)
     motion_ids = sampler._sample_failure_weighted_motion_ids(torch.arange(4096))
@@ -303,13 +308,13 @@ def test_failure_weighted_motion_selection_explores_unvisited_motion(tmp_path: P
         motion_lib=motion_lib,
         dt=0.05,
         anchor_body_index=0,
-        failure_weight_uniform_mix=0.0,
-        failure_weight_max_uniform_ratio=None,
+        weight_fail=0.0,
+        weight_novel=1.0,
+        adaptive_uniform_ratio=0.0,
         device=torch.device("cpu"),
     )
 
-    sampler.bin_sample_counts[0][:] = torch.tensor([100.0])
-    sampler.bin_sample_counts[1][:] = torch.tensor([0.0])
+    sampler.motion_sample_counts[:] = torch.tensor([100.0, 0.0])
 
     torch.manual_seed(0)
     motion_ids = sampler._sample_failure_weighted_motion_ids(torch.arange(4096))
@@ -318,7 +323,7 @@ def test_failure_weighted_motion_selection_explores_unvisited_motion(tmp_path: P
     assert counts[1] > counts[0]
 
 
-def test_failure_weighted_motion_selection_probability_cap_limits_max_share(tmp_path: Path) -> None:
+def test_failure_weighted_motion_selection_cap_beta_limits_extreme_fail_rates(tmp_path: Path) -> None:
     motion_files = [tmp_path / f"motion_{motion_idx}.npz" for motion_idx in range(4)]
     for motion_file in motion_files:
         _write_motion_file(
@@ -335,23 +340,20 @@ def test_failure_weighted_motion_selection_probability_cap_limits_max_share(tmp_
         motion_lib=motion_lib,
         dt=0.05,
         anchor_body_index=0,
-        failure_weight_uniform_mix=0.0,
-        failure_weight_max_uniform_ratio=2.5,
+        weight_fail=1.0,
+        weight_novel=0.0,
+        adaptive_uniform_ratio=0.0,
+        cap_beta=1.0,
         device=torch.device("cpu"),
     )
 
-    motion_fail_counts = torch.tensor([100.0, 0.0, 0.0, 0.0], dtype=torch.float32)
-    motion_sample_counts = torch.ones(4, dtype=torch.float32)
-    motion_probs = sampler._build_guarded_sampling_probabilities(
-        motion_fail_counts,
-        motion_sample_counts,
-        temperature=1.0,
-    )
+    sampler.motion_fail_counts[:] = torch.tensor([100.0, 10.0, 10.0, 10.0], dtype=torch.float32)
+    sampler.motion_sample_counts[:] = torch.ones(4, dtype=torch.float32)
+    motion_probs = sampler._build_motion_sampling_probabilities()
 
-    max_allowed_prob = sampler.failure_weight_max_uniform_ratio / 4.0
     assert bool(torch.isclose(motion_probs.sum(), torch.tensor(1.0, dtype=torch.float32)).item())
     assert motion_probs[0] > motion_probs[1]
-    assert float(motion_probs.max().item()) <= max_allowed_prob + 1.0e-6
+    assert float(motion_probs[0].item()) <= 0.53
 
 
 def test_failure_weighted_exploration_prefers_unvisited_bins_over_sampled_non_failures(tmp_path: Path) -> None:
@@ -369,15 +371,15 @@ def test_failure_weighted_exploration_prefers_unvisited_bins_over_sampled_non_fa
         motion_lib=motion_lib,
         dt=0.05,
         anchor_body_index=0,
-        failure_weight_uniform_mix=0.0,
-        failure_weight_max_uniform_ratio=None,
+        weight_fail=0.0,
+        weight_novel=1.0,
+        adaptive_uniform_ratio=0.0,
         device=torch.device("cpu"),
     )
 
-    probs = sampler._build_guarded_sampling_probabilities(
+    probs = sampler._build_bin_sampling_probabilities(
         torch.tensor([0.0, 0.0], dtype=torch.float32),
         torch.tensor([0.0, 100.0], dtype=torch.float32),
-        temperature=1.0,
     )
 
     assert probs[0] > probs[1]
@@ -399,21 +401,61 @@ def test_failure_weighted_score_balances_failed_and_unvisited_bins(tmp_path: Pat
         motion_lib=motion_lib,
         dt=0.05,
         anchor_body_index=0,
-        failure_weight_uniform_mix=0.0,
-        failure_weight_max_uniform_ratio=None,
+        weight_fail=0.5,
+        weight_novel=0.5,
+        adaptive_uniform_ratio=0.0,
         device=torch.device("cpu"),
     )
 
-    probs = sampler._build_guarded_sampling_probabilities(
+    probs = sampler._build_bin_sampling_probabilities(
         torch.tensor([3.0, 0.0, 0.0], dtype=torch.float32),
         torch.tensor([3.0, 100.0, 0.0], dtype=torch.float32),
-        temperature=1.0,
     )
 
     assert probs[0] > 0.25
     assert probs[2] > 0.25
     assert probs[0] > probs[1]
     assert probs[2] > probs[1]
+
+
+def test_failure_weighted_warmup_ramp_returns_uniform_then_adaptive(tmp_path: Path) -> None:
+    motion_file = tmp_path / "segmented_motion.npz"
+    _write_motion_file(
+        motion_file,
+        segment_start_times=np.asarray([0.0, 0.5], dtype=np.float32),
+        segment_end_times=np.asarray([0.5, 1.0], dtype=np.float32),
+        segment_types=np.asarray([SEGMENT_TYPE_TIME_BIN, SEGMENT_TYPE_TIME_BIN], dtype=np.int64),
+    )
+    motion_lib = MotionLib([motion_file])
+    sampler_mod = _load_sampler_module()
+    sampler = sampler_mod.Sampler(
+        num_envs=1,
+        motion_lib=motion_lib,
+        dt=0.05,
+        anchor_body_index=0,
+        weight_fail=1.0,
+        weight_novel=0.0,
+        adaptive_uniform_ratio=0.0,
+        adaptive_alpha=1.0,
+        motion_sampling_warmup_s=0.2,
+        motion_sampling_ramp_s=0.2,
+        motion_sampling_schedule="linear",
+        device=torch.device("cpu"),
+    )
+
+    fail_counts = torch.tensor([10.0, 0.0], dtype=torch.float32)
+    sample_counts = torch.ones(2, dtype=torch.float32)
+    warmup_probs = sampler._build_bin_sampling_probabilities(fail_counts, sample_counts)
+    sampler.current_times[0] = 0.75
+    sampler.record_failures(torch.tensor([0]))
+
+    sampler._global_step = 8
+    adaptive_probs = sampler._build_bin_sampling_probabilities(fail_counts, sample_counts)
+
+    assert torch.allclose(warmup_probs, torch.tensor([0.5, 0.5], dtype=torch.float32))
+    assert torch.equal(sampler.bin_fail_counts[0], torch.zeros(2, dtype=torch.float32))
+    assert adaptive_probs[0] > 0.99
+    assert adaptive_probs[1] < 0.01
 
 
 def test_failure_weighted_bin_guard_keeps_all_bins_live(tmp_path: Path) -> None:
@@ -435,7 +477,9 @@ def test_failure_weighted_bin_guard_keeps_all_bins_live(tmp_path: Path) -> None:
         dt=0.05,
         anchor_body_index=0,
         bin_size=0.2,
-        failure_weight_uniform_mix=0.2,
+        weight_fail=0.8,
+        weight_novel=0.0,
+        adaptive_uniform_ratio=0.2,
         device=torch.device("cpu"),
     )
 
@@ -450,7 +494,7 @@ def test_failure_weighted_bin_guard_keeps_all_bins_live(tmp_path: Path) -> None:
     assert torch.all(counts > 0)
 
 
-def test_failure_weighted_bin_probability_cap_limits_max_share(tmp_path: Path) -> None:
+def test_failure_weighted_bin_kernel_smoothing_preserves_valid_mask(tmp_path: Path) -> None:
     motion_file = tmp_path / "jump_segmented.npz"
     _write_motion_file(
         motion_file,
@@ -465,21 +509,24 @@ def test_failure_weighted_bin_probability_cap_limits_max_share(tmp_path: Path) -
         motion_lib=motion_lib,
         dt=0.05,
         anchor_body_index=0,
-        failure_weight_uniform_mix=0.0,
-        failure_weight_max_uniform_ratio=2.5,
+        weight_fail=1.0,
+        weight_novel=0.0,
+        adaptive_uniform_ratio=0.0,
+        adaptive_kernel_size=3,
+        adaptive_lambda=0.5,
         device=torch.device("cpu"),
     )
 
-    bin_probs = sampler._build_guarded_sampling_probabilities(
-        torch.tensor([100.0, 0.0, 0.0, 0.0], dtype=torch.float32),
+    eligible_mask = torch.tensor([True, False, True, True], dtype=torch.bool)
+    bin_probs = sampler._build_bin_sampling_probabilities(
+        torch.tensor([100.0, 50.0, 0.0, 0.0], dtype=torch.float32),
         torch.ones(4, dtype=torch.float32),
-        temperature=1.0,
+        eligible_mask=eligible_mask,
     )
 
-    max_allowed_prob = sampler.failure_weight_max_uniform_ratio / 4.0
     assert bool(torch.isclose(bin_probs.sum(), torch.tensor(1.0, dtype=torch.float32)).item())
-    assert bin_probs[0] > bin_probs[1]
-    assert float(bin_probs.max().item()) <= max_allowed_prob + 1.0e-6
+    assert float(bin_probs[1].item()) == 0.0
+    assert torch.all(bin_probs[eligible_mask] >= 0.0)
 
 
 def test_random_strategy_keeps_uniform_motion_selection(tmp_path: Path) -> None:
@@ -500,7 +547,6 @@ def test_random_strategy_keeps_uniform_motion_selection(tmp_path: Path) -> None:
         motion_lib=motion_lib,
         dt=0.05,
         anchor_body_index=0,
-        failure_weight_uniform_mix=0.2,
         device=torch.device("cpu"),
     )
 
@@ -789,18 +835,16 @@ def test_anchor_random_sampling_uses_capped_bins_with_duplicate_reset_anchors(tm
     assert torch.allclose(times, sampler.bin_reset_times[0][target_bin_indices])
 
 
-def test_anchor_source_marks_unsafe_anchor_bins_ineligible_but_keeps_capped_attribution(
+def test_anchor_source_makes_all_v3_anchor_bins_reset_eligible(
     tmp_path: Path,
 ) -> None:
-    motion_file = tmp_path / "anchor_motion_with_unsafe_start.npz"
+    motion_file = tmp_path / "anchor_motion.npz"
     _write_motion_file(
         motion_file,
         num_frames=20,
-        anchor_segment_start_times=np.asarray([0.0, 0.6], dtype=np.float32),
-        anchor_segment_end_times=np.asarray([0.6, 2.0], dtype=np.float32),
-        anchor_segment_labels=np.asarray([ANCHOR_FRAME_LABEL_RED, ANCHOR_FRAME_LABEL_GREEN], dtype=np.int64),
         anchor_frame_indices=np.asarray([0, 6], dtype=np.int64),
         anchor_times=np.asarray([0.0, 0.6], dtype=np.float32),
+        anchor_joint_kinetic_energy=np.asarray([0.2, 0.1], dtype=np.float32),
     )
     motion_lib = MotionLib([motion_file])
     sampler_mod = _load_sampler_module()
@@ -814,16 +858,81 @@ def test_anchor_source_marks_unsafe_anchor_bins_ineligible_but_keeps_capped_attr
     )
 
     assert torch.all(sampler.bin_end_times[0] - sampler.bin_start_times[0] <= 0.3 + 1.0e-6)
-    assert torch.equal(
-        sampler.bin_reset_eligible[0],
-        torch.tensor([False, False, True, True, True, True, True], dtype=torch.bool),
-    )
+    assert torch.all(sampler.bin_reset_eligible[0])
 
     motion_ids = torch.zeros(256, dtype=torch.long)
     times, target_bin_indices = sampler._sample_rand_times_for_motion_ids(motion_ids)
 
-    assert torch.all(target_bin_indices >= 2)
-    assert torch.allclose(times, torch.full((256,), 0.6, dtype=torch.float32))
+    assert torch.all(target_bin_indices >= 0)
+    assert torch.allclose(times, sampler.bin_reset_times[0][target_bin_indices])
+    assert torch.all((times == 0.0) | (times == 0.6))
+
+
+def test_anchor_random_sampling_skips_motion_clips_without_reset_anchors(tmp_path: Path, capsys) -> None:
+    empty_motion = tmp_path / "empty_anchor.npz"
+    valid_motion = tmp_path / "valid_anchor.npz"
+    _write_empty_anchor_motion_file(empty_motion)
+    _write_anchor_sampler_motion_file(valid_motion)
+    motion_lib = MotionLib([empty_motion, valid_motion])
+    sampler_mod = _load_sampler_module()
+
+    sampler = sampler_mod.Sampler(
+        num_envs=512,
+        motion_lib=motion_lib,
+        dt=0.05,
+        anchor_body_index=0,
+        segment_source=sampler_mod.SegmentSource.Anchor,
+        device=torch.device("cpu"),
+    )
+
+    captured = capsys.readouterr()
+    assert "anchor reset sampling will skip clips without eligible reset anchors" in captured.out
+    assert torch.equal(sampler.motion_reset_eligible, torch.tensor([False, True], dtype=torch.bool))
+    assert torch.all(sampler.bin_reset_eligible[0] == torch.zeros_like(sampler.bin_reset_eligible[0]))
+    assert sampler.num_bins_per_motion[0].item() == 0
+
+    torch.manual_seed(0)
+    reset_sample = sampler.reset(torch.arange(512), strategy=sampler_mod.SamplingStrategy.Random)
+
+    assert torch.equal(torch.unique(reset_sample.motion_ids), torch.tensor([1], dtype=torch.long))
+    with pytest.raises(RuntimeError, match="without eligible reset anchors"):
+        sampler.sample_times_for_motion_ids(
+            torch.tensor([0], dtype=torch.long),
+            strategy=sampler_mod.SamplingStrategy.Random,
+        )
+
+
+def test_anchor_failure_weighted_sampling_skips_motion_clips_without_reset_anchors(tmp_path: Path) -> None:
+    empty_motion = tmp_path / "empty_anchor.npz"
+    valid_motion = tmp_path / "valid_anchor.npz"
+    _write_empty_anchor_motion_file(empty_motion)
+    _write_anchor_sampler_motion_file(valid_motion)
+    motion_lib = MotionLib([empty_motion, valid_motion])
+    sampler_mod = _load_sampler_module()
+    sampler = sampler_mod.Sampler(
+        num_envs=512,
+        motion_lib=motion_lib,
+        dt=0.05,
+        anchor_body_index=0,
+        weight_fail=1.0,
+        weight_novel=0.0,
+        adaptive_uniform_ratio=0.0,
+        segment_source=sampler_mod.SegmentSource.Anchor,
+        device=torch.device("cpu"),
+    )
+
+    sampler.motion_fail_counts[:] = torch.tensor([100.0, 1.0])
+    sampler.motion_sample_counts[:] = torch.ones(2, dtype=torch.float32)
+
+    torch.manual_seed(0)
+    reset_sample = sampler.reset(torch.arange(512), strategy=sampler_mod.SamplingStrategy.FailureWeighted)
+
+    assert torch.equal(torch.unique(reset_sample.motion_ids), torch.tensor([1], dtype=torch.long))
+    with pytest.raises(RuntimeError, match="without eligible reset anchors"):
+        sampler.sample_times_for_motion_ids(
+            torch.tensor([0], dtype=torch.long),
+            strategy=sampler_mod.SamplingStrategy.FailureWeighted,
+        )
 
 
 def test_anchor_failure_weighted_sampling_uses_anchor_weights_and_reset_time(tmp_path: Path) -> None:
@@ -836,9 +945,9 @@ def test_anchor_failure_weighted_sampling_uses_anchor_weights_and_reset_time(tmp
         motion_lib=motion_lib,
         dt=0.05,
         anchor_body_index=0,
-        failure_weight_uniform_mix=0.0,
-        failure_weight_max_uniform_ratio=None,
-        failure_weight_exploration_bonus=0.0,
+        weight_fail=1.0,
+        weight_novel=0.0,
+        adaptive_uniform_ratio=0.0,
         segment_source=sampler_mod.SegmentSource.Anchor,
         device=torch.device("cpu"),
     )
@@ -864,8 +973,9 @@ def test_anchor_failure_weighted_guard_keeps_all_anchors_live(tmp_path: Path) ->
         motion_lib=motion_lib,
         dt=0.05,
         anchor_body_index=0,
-        failure_weight_uniform_mix=0.0,
-        failure_weight_max_uniform_ratio=2.5,
+        weight_fail=0.8,
+        weight_novel=0.0,
+        adaptive_uniform_ratio=0.2,
         segment_source=sampler_mod.SegmentSource.Anchor,
         device=torch.device("cpu"),
     )
@@ -883,7 +993,7 @@ def test_anchor_failure_weighted_guard_keeps_all_anchors_live(tmp_path: Path) ->
     assert torch.all((times == 0.1) | (times == 0.5) | (times == 0.9))
 
 
-def test_anchor_failure_weighted_probability_cap_limits_anchor_mass(tmp_path: Path) -> None:
+def test_anchor_failure_weighted_kernel_smoothing_preserves_anchor_ineligibility(tmp_path: Path) -> None:
     motion_file = tmp_path / "anchor_motion.npz"
     _write_anchor_sampler_motion_file(motion_file)
     motion_lib = MotionLib([motion_file])
@@ -893,25 +1003,27 @@ def test_anchor_failure_weighted_probability_cap_limits_anchor_mass(tmp_path: Pa
         motion_lib=motion_lib,
         dt=0.05,
         anchor_body_index=0,
-        failure_weight_uniform_mix=0.0,
-        failure_weight_max_uniform_ratio=2.5,
+        weight_fail=1.0,
+        weight_novel=0.0,
+        adaptive_uniform_ratio=0.0,
+        adaptive_kernel_size=3,
+        adaptive_lambda=0.5,
         segment_source=sampler_mod.SegmentSource.Anchor,
         device=torch.device("cpu"),
     )
+    sampler.bin_reset_eligible[0][1] = False
+    sampler._bin_reset_eligible_padded[0, 1] = False
 
-    probs = sampler._build_guarded_sampling_probabilities(
+    probs = sampler._build_bin_sampling_probabilities(
         torch.tensor([500.0, 100.0, 0.0, 0.0, 0.0], dtype=torch.float32),
         torch.ones(5, dtype=torch.float32),
-        temperature=1.0,
         eligible_mask=sampler.bin_reset_eligible[0],
     )
 
     eligible_mask = sampler.bin_reset_eligible[0]
-    num_eligible = int(eligible_mask.sum().item())
-    max_allowed_prob = sampler.failure_weight_max_uniform_ratio / float(num_eligible)
-    assert torch.all(eligible_mask)
     assert bool(torch.isclose(probs.sum(), torch.tensor(1.0, dtype=torch.float32)).item())
-    assert float(probs[eligible_mask].max().item()) <= max_allowed_prob + 1.0e-6
+    assert float(probs[1].item()) == 0.0
+    assert torch.all(probs[eligible_mask] >= 0.0)
 
 
 def test_anchor_failure_counts_accumulate_on_nearest_previous_anchor_for_failure_weighted(
@@ -933,7 +1045,7 @@ def test_anchor_failure_counts_accumulate_on_nearest_previous_anchor_for_failure
     monkeypatch.setattr(
         sampler,
         "_sample_failure_weighted_times_for_motion_ids",
-        lambda motion_ids, temperature=1.0: (
+        lambda motion_ids: (
             torch.tensor([0.5], dtype=torch.float32, device=sampler.device),
             torch.tensor([2], dtype=torch.long, device=sampler.device),
         ),
@@ -946,10 +1058,10 @@ def test_anchor_failure_counts_accumulate_on_nearest_previous_anchor_for_failure
     assert torch.equal(reset_sample.target_bin_indices, torch.tensor([2], dtype=torch.long))
     assert torch.allclose(reset_sample.times, torch.tensor([0.5], dtype=torch.float32))
     assert torch.equal(sampler.bin_sample_counts[0], torch.tensor([0.0, 0.0, 1.0, 0.0, 0.0]))
-    assert torch.equal(sampler.bin_fail_counts[0], torch.tensor([0.0, 0.0, 0.0, 0.0, 1.0]))
+    assert torch.allclose(sampler.bin_fail_counts[0], torch.tensor([0.0, 0.0, 0.0, 0.0, 0.001]))
 
 
-def test_sampler_does_not_record_failures_for_non_failure_weighted_reset(tmp_path: Path, monkeypatch) -> None:
+def test_sampler_records_failures_for_non_failure_weighted_reset(tmp_path: Path, monkeypatch) -> None:
     motion_file = tmp_path / "anchor_motion.npz"
     _write_anchor_sampler_motion_file(motion_file)
     motion_lib = MotionLib([motion_file])
@@ -959,6 +1071,7 @@ def test_sampler_does_not_record_failures_for_non_failure_weighted_reset(tmp_pat
         motion_lib=motion_lib,
         dt=0.05,
         anchor_body_index=0,
+        adaptive_alpha=1.0,
         segment_source=sampler_mod.SegmentSource.Anchor,
         device=torch.device("cpu"),
     )
@@ -981,7 +1094,7 @@ def test_sampler_does_not_record_failures_for_non_failure_weighted_reset(tmp_pat
     sampler.record_failures(torch.tensor([0]))
 
     assert torch.equal(sampler.bin_sample_counts[0], torch.tensor([0.0, 0.0, 1.0, 0.0, 0.0]))
-    assert torch.equal(sampler.bin_fail_counts[0], torch.zeros(5, dtype=torch.float32))
+    assert torch.equal(sampler.bin_fail_counts[0], torch.tensor([0.0, 0.0, 0.0, 0.0, 1.0]))
 
 
 def test_anchor_source_requires_anchor_metadata(tmp_path: Path) -> None:
@@ -1001,20 +1114,13 @@ def test_anchor_source_requires_anchor_metadata(tmp_path: Path) -> None:
         )
 
 
-def test_anchor_source_requires_at_least_one_reset_anchor(tmp_path: Path) -> None:
-    motion_file = tmp_path / "anchor_without_reset_anchor.npz"
-    _write_motion_file(
-        motion_file,
-        anchor_segment_start_times=np.asarray([0.0], dtype=np.float32),
-        anchor_segment_end_times=np.asarray([1.0], dtype=np.float32),
-        anchor_segment_labels=np.asarray([ANCHOR_FRAME_LABEL_RED], dtype=np.int64),
-        anchor_frame_indices=np.asarray([], dtype=np.int64),
-        anchor_times=np.asarray([], dtype=np.float32),
-    )
+def test_anchor_source_requires_at_least_one_motion_with_reset_anchor(tmp_path: Path) -> None:
+    motion_file = tmp_path / "empty_anchor.npz"
+    _write_empty_anchor_motion_file(motion_file)
     motion_lib = MotionLib([motion_file])
     sampler_mod = _load_sampler_module()
 
-    with pytest.raises(RuntimeError, match="reset anchor"):
+    with pytest.raises(RuntimeError, match="at least one motion clip with an eligible reset anchor"):
         sampler_mod.Sampler(
             num_envs=1,
             motion_lib=motion_lib,
@@ -1048,33 +1154,24 @@ def test_sampling_strategy_start_is_unchanged_for_anchor_source(tmp_path: Path) 
     assert torch.equal(times, torch.zeros(8, dtype=torch.float32))
 
 
-@pytest.mark.parametrize("uniform_mix", [-0.1, 1.1])
-def test_sampler_rejects_invalid_failure_weight_uniform_mix(tmp_path: Path, uniform_mix: float) -> None:
-    motion_file = tmp_path / "segmented_motion.npz"
-    _write_motion_file(
-        motion_file,
-        segment_start_times=np.asarray([0.0, 0.5], dtype=np.float32),
-        segment_end_times=np.asarray([0.5, 1.0], dtype=np.float32),
-        segment_types=np.asarray([SEGMENT_TYPE_TIME_BIN, SEGMENT_TYPE_TIME_BIN], dtype=np.int64),
-    )
-    motion_lib = MotionLib([motion_file])
-    sampler_mod = _load_sampler_module()
-
-    with pytest.raises(ValueError, match="failure_weight_uniform_mix"):
-        sampler_mod.Sampler(
-            num_envs=1,
-            motion_lib=motion_lib,
-            dt=0.05,
-            anchor_body_index=0,
-            failure_weight_uniform_mix=uniform_mix,
-            device=torch.device("cpu"),
-        )
-
-
-@pytest.mark.parametrize("exploration_bonus", [-0.1, float("inf")])
-def test_sampler_rejects_invalid_failure_weight_exploration_bonus(
+@pytest.mark.parametrize(
+    ("kwarg_name", "invalid_value"),
+    [
+        ("weight_fail", -0.1),
+        ("weight_novel", float("inf")),
+        ("cap_beta", -0.1),
+        ("adaptive_uniform_ratio", -0.1),
+        ("adaptive_alpha", 1.1),
+        ("adaptive_kernel_size", 0),
+        ("adaptive_lambda", -0.1),
+        ("motion_sampling_warmup_s", -0.1),
+        ("motion_sampling_ramp_s", -0.1),
+    ],
+)
+def test_sampler_rejects_invalid_mosaic_sampler_knobs(
     tmp_path: Path,
-    exploration_bonus: float,
+    kwarg_name: str,
+    invalid_value: float,
 ) -> None:
     motion_file = tmp_path / "segmented_motion.npz"
     _write_motion_file(
@@ -1086,12 +1183,34 @@ def test_sampler_rejects_invalid_failure_weight_exploration_bonus(
     motion_lib = MotionLib([motion_file])
     sampler_mod = _load_sampler_module()
 
-    with pytest.raises(ValueError, match="failure_weight_exploration_bonus"):
+    with pytest.raises(ValueError, match=kwarg_name):
         sampler_mod.Sampler(
             num_envs=1,
             motion_lib=motion_lib,
             dt=0.05,
             anchor_body_index=0,
-            failure_weight_exploration_bonus=exploration_bonus,
+            **{kwarg_name: invalid_value},
+            device=torch.device("cpu"),
+        )
+
+
+def test_sampler_rejects_invalid_motion_sampling_schedule(tmp_path: Path) -> None:
+    motion_file = tmp_path / "segmented_motion.npz"
+    _write_motion_file(
+        motion_file,
+        segment_start_times=np.asarray([0.0, 0.5], dtype=np.float32),
+        segment_end_times=np.asarray([0.5, 1.0], dtype=np.float32),
+        segment_types=np.asarray([SEGMENT_TYPE_TIME_BIN, SEGMENT_TYPE_TIME_BIN], dtype=np.int64),
+    )
+    motion_lib = MotionLib([motion_file])
+    sampler_mod = _load_sampler_module()
+
+    with pytest.raises(ValueError, match="motion_sampling_schedule"):
+        sampler_mod.Sampler(
+            num_envs=1,
+            motion_lib=motion_lib,
+            dt=0.05,
+            anchor_body_index=0,
+            motion_sampling_schedule="step",
             device=torch.device("cpu"),
         )

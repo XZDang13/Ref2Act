@@ -48,14 +48,25 @@ cfg = G1MotionTrackingEnvCfg()
 cfg.expert_motion_file = "path/to/motion.npz"
 cfg.scene.num_envs = 32
 cfg.sampling_strategy = SamplingStrategy.FailureWeighted
-cfg.failure_weight_uniform_mix = 0.1
-cfg.failure_weight_max_uniform_ratio = 2.5
+cfg.weight_fail = 0.5
+cfg.weight_novel = 0.3
+cfg.cap_beta = 2.0
+cfg.adaptive_uniform_ratio = 0.1
+cfg.adaptive_alpha = 0.001
 
 env = MotionTrackingEnv(cfg)
 obs, info = env.reset()
 ```
 
-With `SamplingStrategy.FailureWeighted`, Ref2Act now biases both motion choice across clips and reset choice within the chosen clip. When `cfg.segment_source == SegmentSource.Time`, the within-clip distribution is learned over time bins. When `cfg.segment_source == SegmentSource.Anchor`, conversion selects safe reset anchors with a hybrid contact/low-joint-kinetic strategy, then the sampler learns over capped anchor-attribution bins. Long spans between reset anchors are split using `cfg.bin_size`, while each bin still resets from the nearest selected anchor. `cfg.failure_weight_uniform_mix` blends each learned failure distribution with uniform mass, and `cfg.failure_weight_max_uniform_ratio` caps each eligible motion/bin at a multiple of its uniform share so the sampler cannot collapse onto only a few motions or bins.
+With `SamplingStrategy.FailureWeighted`, Ref2Act biases both motion choice across clips and reset choice within the chosen clip using a MOSAIC-style mixture:
+
+```text
+p = weight_fail * p_fail + weight_novel * p_uct + weight_uniform * p_uniform
+```
+
+`p_uct` is the novelty term, computed from raw sample counts. `weight_fail` and `weight_novel` can be warm-started with `motion_sampling_warmup_s`, ramped with `motion_sampling_ramp_s`, and scheduled by `motion_sampling_schedule`; any remaining mass becomes uniform probability. Motion-level failure rates are capped by `cap_beta * mean_fail_rate` before normalization. Bin-level failure scores use an EMA controlled by `adaptive_alpha`, add a MOSAIC uniform floor through `adaptive_uniform_ratio`, and can be smoothed with `adaptive_kernel_size` and `adaptive_lambda`.
+
+When `cfg.segment_source == SegmentSource.Time`, the within-clip distribution is learned over time bins. When `cfg.segment_source == SegmentSource.Anchor`, conversion always includes frame `0` as a reset anchor and adds safe local minima of `sum(abs(joint_vel))`; the same MOSAIC/UCT mixer then runs over those anchor bins. Long spans between reset anchors are split using `cfg.bin_size`, while each bin still resets from the nearest selected anchor.
 
 The package registers these Gym environments when Isaac Lab is available:
 
@@ -142,16 +153,14 @@ ref2act-convert \
   --segment-bin-size 0.3
 ```
 
-Anchor mode still writes the normal `segment_*` arrays for compatibility, and also writes `anchor_*` arrays such as:
+Anchor mode still writes the normal `segment_*` arrays for compatibility, and also writes the v3 anchor metadata contract:
 
-- `anchor_frame_labels`
-- `anchor_segment_start_times`
-- `anchor_segment_end_times`
+- `anchor_selection_version`
 - `anchor_frame_indices`
 - `anchor_times`
 - `anchor_joint_kinetic_energy`
 
-Use this mode when you want the converted file to carry stable reset-anchor annotations alongside the current time-segment metadata. With `cfg.segment_source = SegmentSource.Anchor`, the sampler uses `anchor_times` as reset units and splits long anchor spans into `cfg.bin_size` failure-attribution bins.
+Use this mode when you want the converted file to carry stable reset-anchor annotations alongside the current time-segment metadata. Anchor selection treats frame `0` as a safe reset anchor, then uses local minima of `sum(abs(joint_vel))` that pass contact/support and torso-tilt safety checks. With `cfg.segment_source = SegmentSource.Anchor`, the sampler uses every exported `anchor_time` as a reset unit and splits long anchor spans into `cfg.bin_size` failure-attribution bins. Older anchor files must be reconverted because the v2 label and segment fields are no longer loaded in anchor mode.
 
 6. Adjust the vertical offset or airborne detection if the imported motion needs it:
 
@@ -186,8 +195,8 @@ ref2act-plot-anchor-diagnostics --input_file data/motions/jump_anchor.npz
 
 The tool writes two figures by default under `anchor_diagnostics/` next to the input file:
 
-- `<stem>_overview.png`: label timeline, foot-height traces, support mode, and soft metrics with anchors overlaid
-- `<stem>_reasons.png`: rejection-reason heatmap plus a per-anchor summary table
+- `<stem>_overview.png`: kinetic energy, selected anchors, contact/support state, and torso tilt
+- `<stem>_reasons.png`: safety mask and rejection reasons used by the v3 start-anchor plus local-minimum selector
 
 Example with explicit output settings:
 
@@ -207,7 +216,7 @@ Useful options:
 The CLI prints a short summary to stdout, including:
 
 - how many anchors were found
-- green interval ranges
-- frame, time, support mode, and score for each anchor
+- whether the lowest-energy safe fallback was used
+- frame, time, support mode, and raw joint-kinetic-energy proxy for each anchor
 
-If the `.npz` file already contains `anchor_*` arrays, the tool uses them for the anchor overlay and also checks whether they still match the current diagnostics implementation.
+If the `.npz` file already contains v3 `anchor_*` arrays, the tool uses them for the anchor overlay and checks whether they still match the current diagnostics implementation.

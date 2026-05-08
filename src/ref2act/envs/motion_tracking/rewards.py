@@ -427,26 +427,6 @@ class MultiScaleEndEffectorVelocityRewardTermCfg(RewardTermCfg):
 
 
 @dataclass(frozen=True)
-class TrackingProgressRewardTermCfg(RewardTermCfg):
-    id: str = "tracking_progress_reward"
-    type: str = "tracking_progress_reward"
-    weight: float = 0.50
-    soft_threshold: float = 1.0
-    recovery_enter_threshold: float = 1.8
-    clip: float = 0.20
-    potential: str = "log1p"
-
-
-@dataclass(frozen=True)
-class TrackingRecoveryPenaltyTermCfg(RewardTermCfg):
-    id: str = "tracking_recovery_penalty"
-    type: str = "tracking_recovery_penalty"
-    weight: float = -0.25
-    soft_threshold: float = 1.0
-    recovery_enter_threshold: float = 1.8
-
-
-@dataclass(frozen=True)
 class RewardSpec:
     terms: tuple[RewardTermCfg, ...]
     dt: float
@@ -483,7 +463,6 @@ class RewardContext:
     reference_motion: ReferenceMotions
     contact_sensor: ContactSensor
     action_model: ActionProcessor
-    tracking_quality: Any | None = None
     _cache: dict[tuple, tuple[torch.Tensor, ...] | torch.Tensor] = field(default_factory=dict, init=False, repr=False)
 
     def _zeros(self) -> torch.Tensor:
@@ -867,13 +846,6 @@ def _multi_scale_tracking_kernel(
     return torch.exp(-error / fine_std)
 
 
-def _smoothstep(lo: float, hi: float, x: torch.Tensor) -> torch.Tensor:
-    if hi <= lo:
-        return torch.zeros_like(x)
-    t = ((x - lo) / (hi - lo)).clamp(0.0, 1.0)
-    return t * t * (3.0 - 2.0 * t)
-
-
 def _multi_scale_result(error: torch.Tensor, spec: Any) -> RewardTermResult:
     raw = _multi_scale_tracking_kernel(
         error,
@@ -1245,50 +1217,6 @@ class MultiScaleEndEffectorVelocityRewardTerm:
         return _multi_scale_result(lin_vel_error, spec)
 
 
-class TrackingProgressRewardTerm:
-    type_name = "tracking_progress_reward"
-
-    def compute(self, context: RewardContext, spec: TrackingProgressRewardTermCfg) -> RewardTermResult:
-        if context.tracking_quality is None:
-            raw = context._zeros()
-            return _weighted_result(
-                raw,
-                spec.weight,
-                metrics={"progress": raw, "gate": raw, "score": raw, "previous_score": raw},
-            )
-
-        score = context.tracking_quality.score
-        previous_score = context.tracking_quality.previous_score
-        if spec.potential == "log1p":
-            progress = torch.log1p(previous_score) - torch.log1p(score)
-        elif spec.potential == "sqrt":
-            progress = torch.sqrt(previous_score + 1.0e-6) - torch.sqrt(score + 1.0e-6)
-        else:
-            raise ValueError(f"Unsupported tracking progress potential: {spec.potential}")
-
-        progress = progress.clamp(-spec.clip, spec.clip)
-        gate = _smoothstep(spec.soft_threshold, spec.recovery_enter_threshold, score)
-        raw = gate * progress
-        return _weighted_result(
-            raw,
-            spec.weight,
-            metrics={"progress": progress, "gate": gate, "score": score, "previous_score": previous_score},
-        )
-
-
-class TrackingRecoveryPenaltyTerm:
-    type_name = "tracking_recovery_penalty"
-
-    def compute(self, context: RewardContext, spec: TrackingRecoveryPenaltyTermCfg) -> RewardTermResult:
-        if context.tracking_quality is None:
-            raw = context._zeros()
-            return _weighted_result(raw, spec.weight, metrics={"gate": raw, "score": raw})
-
-        score = context.tracking_quality.score
-        raw = _smoothstep(spec.soft_threshold, spec.recovery_enter_threshold, score)
-        return _weighted_result(raw, spec.weight, metrics={"gate": raw, "score": score})
-
-
 REWARD_TERM_REGISTRY: dict[str, RewardTerm] = {
     term.type_name: term
     for term in (
@@ -1327,8 +1255,6 @@ REWARD_TERM_REGISTRY: dict[str, RewardTerm] = {
         MultiScaleEndEffectorPositionRewardTerm(),
         MultiScaleEndEffectorQuaternionRewardTerm(),
         MultiScaleEndEffectorVelocityRewardTerm(),
-        TrackingProgressRewardTerm(),
-        TrackingRecoveryPenaltyTerm(),
     )
 }
 
@@ -1363,32 +1289,6 @@ def default_reward_spec(*, dt: float, anchor_height_only: bool = False) -> Rewar
     )
 
 
-def robust_tracking_reward_spec(*, dt: float, include_com_terms: bool = False) -> RewardSpec:
-    return RewardSpec(
-        dt=dt,
-        terms=(
-            AnchorPositionRewardTermCfg(),
-            AnchorQuaternionRewardTermCfg(),
-            KeyPositionRewardTermCfg(),
-            KeyQuaternionRewardTermCfg(),
-            KeyLinearVelocityRewardTermCfg(weight=1.5),
-            KeyAngularVelocityRewardTermCfg(weight=1.5),
-            AnchorLinearVelocityRewardTermCfg(),
-            AnchorAngularVelocityRewardTermCfg(),
-            EndEffectorPositionRewardTermCfg(weight=1.0),
-            EndEffectorQuaternionRewardTermCfg(),
-            SelfCollisionPenaltyTermCfg(),
-            ActionRatePenaltyTermCfg(),
-            JointLimitPenaltyTermCfg(),
-            JointAccPenaltyTermCfg(),
-            JointTorquePenaltyTermCfg(),
-            CoMPositionRewardTermCfg(),
-            CoMVelocityRewardTermCfg(),
-            CoMSupportRewardTermCfg(),
-        ),
-    )
-
-
 class Rewards:
     def __init__(self, spec: RewardSpec):
         self.spec = spec
@@ -1401,14 +1301,12 @@ class Rewards:
         reference_motion: ReferenceMotions,
         contact_sensor: ContactSensor,
         action_model: ActionProcessor,
-        tracking_quality: Any | None = None,
     ) -> torch.Tensor:
         context = RewardContext(
             robot=robot,
             reference_motion=reference_motion,
             contact_sensor=contact_sensor,
             action_model=action_model,
-            tracking_quality=tracking_quality,
         )
         components: list[torch.Tensor] = []
         component_map: dict[str, torch.Tensor] = {}

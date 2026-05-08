@@ -7,7 +7,6 @@ import torch
 
 from ref2act.motion.library import MotionLib
 from ref2act.motion.sampling import MotionSampler, SamplingStrategy, SegmentSource
-from ref2act.motion.segments import ANCHOR_FRAME_LABEL_GREEN
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -41,34 +40,24 @@ def _write_anchor_motion_file(
         body_quat_w=body_quat_w,
         body_lin_vel_w=body_lin_vel_w,
         body_ang_vel_w=body_ang_vel_w,
-        anchor_segment_start_times=np.asarray([0.0], dtype=np.float32),
-        anchor_segment_end_times=np.asarray([duration], dtype=np.float32),
-        anchor_segment_labels=np.asarray([ANCHOR_FRAME_LABEL_GREEN], dtype=np.int64),
+        anchor_selection_version=np.asarray(3, dtype=np.int64),
         anchor_frame_indices=np.arange(num_anchors, dtype=np.int64),
         anchor_times=anchor_times,
+        anchor_joint_kinetic_energy=np.linspace(0.1, 1.0, num_anchors, dtype=np.float32),
     )
 
 
 def _snapshot_anchor_probabilities(
     sampler: MotionSampler,
-    *,
-    temperature: float = 1.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    motion_fail_counts = torch.stack([fail_counts.sum() for fail_counts in sampler.bin_fail_counts], dim=0)
-    motion_sample_counts = torch.stack([sample_counts.sum() for sample_counts in sampler.bin_sample_counts], dim=0)
-    motion_probs = sampler._build_guarded_sampling_probabilities(
-        motion_fail_counts,
-        motion_sample_counts,
-        temperature=temperature,
-    )
+    motion_probs = sampler._build_motion_sampling_probabilities()
 
     per_motion_anchor_probs: list[torch.Tensor] = []
     global_anchor_probs: list[torch.Tensor] = []
     for motion_id in range(sampler.motion_lib.num_motions):
-        anchor_probs = sampler._build_guarded_sampling_probabilities(
+        anchor_probs = sampler._build_bin_sampling_probabilities(
             sampler.bin_fail_counts[motion_id],
             sampler.bin_sample_counts[motion_id],
-            temperature=temperature,
             eligible_mask=sampler.bin_reset_eligible[motion_id],
         )
         per_motion_anchor_probs.append(anchor_probs)
@@ -121,7 +110,7 @@ def test_anchor_failure_weighted_sampling_plot_tracks_learning_dynamics(tmp_path
     easy_fail_prob = 0.05
     hard_fail_prob_before_learning = 0.45
     hard_fail_prob_after_learning = easy_fail_prob
-    failure_decay = 0.9
+    adaptive_alpha = 0.1
 
     motion_files = []
     for motion_index in range(num_motions):
@@ -134,9 +123,11 @@ def test_anchor_failure_weighted_sampling_plot_tracks_learning_dynamics(tmp_path
         num_envs=num_envs,
         motion_lib=motion_lib,
         dt=0.05,
-        failure_decay=failure_decay,
-        failure_weight_uniform_mix=0.1,
-        failure_weight_max_uniform_ratio=2.5,
+        weight_fail=0.5,
+        weight_novel=0.3,
+        cap_beta=2.5,
+        adaptive_uniform_ratio=0.1,
+        adaptive_alpha=adaptive_alpha,
         segment_source=SegmentSource.Anchor,
         device=torch.device("cpu"),
     )

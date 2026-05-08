@@ -16,25 +16,15 @@ from dataclasses import dataclass, field
 
 from ref2act.common.utils import compute_frame_blend_from_fps, interpolate, slerp
 
-from .segments import (
-    ANCHOR_FRAME_LABEL_GREEN,
-    ANCHOR_FRAME_LABEL_RED,
-    ANCHOR_FRAME_LABEL_YELLOW,
-    validate_segment_arrays,
-)
+from .segments import validate_segment_arrays
 
 
 MotionFileInput = str | PathLike[str] | Sequence[str | PathLike[str]]
-_ANCHOR_SEGMENT_LABELS = (
-    int(ANCHOR_FRAME_LABEL_RED),
-    int(ANCHOR_FRAME_LABEL_YELLOW),
-    int(ANCHOR_FRAME_LABEL_GREEN),
-)
 _MOTION_LOAD_PROGRESS_STEPS = 10
 _MOTION_LOAD_PROGRESS_FILES = int(os.getenv("REF2ACT_MOTION_LOAD_PROGRESS_FILES", "100"))
 _MOTION_LOAD_PROGRESS_SECONDS = float(os.getenv("REF2ACT_MOTION_LOAD_PROGRESS_SECONDS", "5.0"))
 _MOTION_SLOW_CLIP_SECONDS = float(os.getenv("REF2ACT_MOTION_SLOW_CLIP_SECONDS", "2.0"))
-_MOTION_PACK_CACHE_VERSION = 1
+_MOTION_PACK_CACHE_VERSION = 2
 
 
 def _progress_interval(total: int) -> int:
@@ -54,54 +44,6 @@ def _motion_file_group(motion_file: str | PathLike[str]) -> str:
             return parts[mocap_index + 1]
     parent_name = path.parent.name
     return parent_name or "."
-
-
-def _validate_anchor_segment_arrays(
-    start_times: np.ndarray,
-    end_times: np.ndarray,
-    labels: np.ndarray,
-    *,
-    duration: float,
-) -> None:
-    validate_segment_arrays(start_times, end_times, duration=duration)
-    resolved_labels = np.asarray(labels, dtype=np.int64).reshape(-1)
-    if resolved_labels.shape != np.asarray(start_times).reshape(-1).shape:
-        raise ValueError("anchor_segment_labels must have the same shape as anchor_segment_start_times.")
-    if np.any(~np.isin(resolved_labels, _ANCHOR_SEGMENT_LABELS)):
-        raise ValueError("anchor_segment_labels contains unknown anchor label ids.")
-
-
-def _drop_zero_duration_anchor_segments(
-    start_times: np.ndarray,
-    end_times: np.ndarray,
-    labels: np.ndarray,
-    *,
-    motion_file: str,
-    atol: float = 1.0e-5,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    starts = np.asarray(start_times, dtype=np.float32).reshape(-1)
-    ends = np.asarray(end_times, dtype=np.float32).reshape(-1)
-    resolved_labels = np.asarray(labels, dtype=np.int64).reshape(-1)
-
-    non_positive_mask = ends <= starts
-    if not np.any(non_positive_mask):
-        return starts, ends, resolved_labels
-
-    zero_duration_mask = non_positive_mask & np.isclose(ends, starts, atol=atol)
-    if not np.all(non_positive_mask == zero_duration_mask):
-        return starts, ends, resolved_labels
-
-    keep_mask = ~zero_duration_mask
-    if not np.any(keep_mask):
-        return starts, ends, resolved_labels
-
-    dropped_count = int(np.count_nonzero(zero_duration_mask))
-    print(
-        "dropping zero-duration anchor segment(s): "
-        f"count={dropped_count}, path={motion_file}",
-        flush=True,
-    )
-    return starts[keep_mask], ends[keep_mask], resolved_labels[keep_mask]
 
 
 def _validate_anchor_selection_arrays(
@@ -155,9 +97,6 @@ class MotionClip:
     segment_start_times: torch.Tensor | None = None
     segment_end_times: torch.Tensor | None = None
     segment_types: torch.Tensor | None = None
-    anchor_segment_start_times: torch.Tensor | None = None
-    anchor_segment_end_times: torch.Tensor | None = None
-    anchor_segment_labels: torch.Tensor | None = None
     anchor_frame_indices: torch.Tensor | None = None
     anchor_times: torch.Tensor | None = None
     joint_names: list[str] = field(default_factory=list)
@@ -188,13 +127,15 @@ class MotionClip:
 
     @property
     def has_anchor_segments(self) -> bool:
-        return self.anchor_segment_start_times is not None
+        if self.anchor_frame_indices is None or self.anchor_times is None:
+            return False
+        return int(self.anchor_frame_indices.numel()) > 0
 
     @property
     def num_anchor_segments(self) -> int:
-        if self.anchor_segment_start_times is None:
+        if self.anchor_frame_indices is None:
             return 0
-        return int(self.anchor_segment_start_times.shape[0])
+        return int(self.anchor_frame_indices.shape[0])
 
 
 class MotionLib:
@@ -385,9 +326,6 @@ class MotionLib:
         self.motion_num_anchor_segments = torch.tensor(
             [clip.num_anchor_segments for clip in self.clips], dtype=torch.long, device=self.device
         )
-        self.motion_anchor_segment_start_times = [clip.anchor_segment_start_times for clip in self.clips]
-        self.motion_anchor_segment_end_times = [clip.anchor_segment_end_times for clip in self.clips]
-        self.motion_anchor_segment_labels = [clip.anchor_segment_labels for clip in self.clips]
         self.motion_anchor_frame_indices = [clip.anchor_frame_indices for clip in self.clips]
         self.motion_anchor_times = [clip.anchor_times for clip in self.clips]
         self.all_clips_have_segments = bool(torch.all(self.motion_has_segments).item())
@@ -445,9 +383,6 @@ class MotionLib:
             "segment_start_times": self._optional_tensor_to_cpu(clip.segment_start_times),
             "segment_end_times": self._optional_tensor_to_cpu(clip.segment_end_times),
             "segment_types": self._optional_tensor_to_cpu(clip.segment_types),
-            "anchor_segment_start_times": self._optional_tensor_to_cpu(clip.anchor_segment_start_times),
-            "anchor_segment_end_times": self._optional_tensor_to_cpu(clip.anchor_segment_end_times),
-            "anchor_segment_labels": self._optional_tensor_to_cpu(clip.anchor_segment_labels),
             "anchor_frame_indices": self._optional_tensor_to_cpu(clip.anchor_frame_indices),
             "anchor_times": self._optional_tensor_to_cpu(clip.anchor_times),
         }
@@ -470,9 +405,6 @@ class MotionLib:
             segment_start_times=self._optional_tensor_to_device(payload["segment_start_times"]),
             segment_end_times=self._optional_tensor_to_device(payload["segment_end_times"]),
             segment_types=self._optional_tensor_to_device(payload["segment_types"]),
-            anchor_segment_start_times=self._optional_tensor_to_device(payload["anchor_segment_start_times"]),
-            anchor_segment_end_times=self._optional_tensor_to_device(payload["anchor_segment_end_times"]),
-            anchor_segment_labels=self._optional_tensor_to_device(payload["anchor_segment_labels"]),
             anchor_frame_indices=self._optional_tensor_to_device(payload["anchor_frame_indices"]),
             anchor_times=self._optional_tensor_to_device(payload["anchor_times"]),
             joint_names=list(payload["joint_names"]),
@@ -591,9 +523,6 @@ class MotionLib:
             segment_start_times = None
             segment_end_times = None
             segment_types = None
-            anchor_segment_start_times = None
-            anchor_segment_end_times = None
-            anchor_segment_labels = None
             anchor_frame_indices = None
             anchor_times = None
 
@@ -621,60 +550,48 @@ class MotionLib:
                 )
                 segment_types = torch.as_tensor(segment_types_np, dtype=torch.long, device=self.device)
 
-            anchor_keys = (
+            anchor_keys = ("anchor_selection_version", "anchor_frame_indices", "anchor_times", "anchor_joint_kinetic_energy")
+            legacy_anchor_keys = (
+                "anchor_frame_labels",
                 "anchor_segment_start_times",
                 "anchor_segment_end_times",
                 "anchor_segment_labels",
-                "anchor_frame_indices",
-                "anchor_times",
+                "anchor_scores",
+                "anchor_support_modes",
+                "anchor_energy_norm",
+                "anchor_pose_extreme",
+                "anchor_torso_tilt_deg",
             )
             has_anchor_keys = [key in motion_data for key in anchor_keys]
-            if any(has_anchor_keys):
+            has_legacy_anchor_keys = [key in motion_data for key in legacy_anchor_keys]
+            if any(has_anchor_keys) or any(has_legacy_anchor_keys):
+                if any(has_legacy_anchor_keys):
+                    raise ValueError(
+                        f"Motion clip {motion_file} uses legacy anchor metadata. "
+                        "Reconvert the motion file with the v3 low-kinetic anchor exporter."
+                    )
                 if not all(has_anchor_keys):
                     raise ValueError(
                         f"Motion clip {motion_file} is missing part of the anchor metadata: {anchor_keys}"
                     )
-                anchor_segment_start_times_np = np.asarray(
-                    motion_data["anchor_segment_start_times"], dtype=np.float32
-                ).reshape(-1)
-                anchor_segment_end_times_np = np.asarray(
-                    motion_data["anchor_segment_end_times"], dtype=np.float32
-                ).reshape(-1)
-                anchor_segment_labels_np = np.asarray(
-                    motion_data["anchor_segment_labels"], dtype=np.int64
-                ).reshape(-1)
+                anchor_selection_version = int(np.asarray(motion_data["anchor_selection_version"]).item())
+                if anchor_selection_version != 3:
+                    raise ValueError(
+                        f"Motion clip {motion_file} has unsupported anchor_selection_version="
+                        f"{anchor_selection_version}. Reconvert the motion file with the v3 low-kinetic anchor exporter."
+                    )
                 anchor_frame_indices_np = np.asarray(motion_data["anchor_frame_indices"], dtype=np.int64).reshape(-1)
                 anchor_times_np = np.asarray(motion_data["anchor_times"], dtype=np.float32).reshape(-1)
-                (
-                    anchor_segment_start_times_np,
-                    anchor_segment_end_times_np,
-                    anchor_segment_labels_np,
-                ) = _drop_zero_duration_anchor_segments(
-                    anchor_segment_start_times_np,
-                    anchor_segment_end_times_np,
-                    anchor_segment_labels_np,
-                    motion_file=motion_file,
-                )
-                _validate_anchor_segment_arrays(
-                    anchor_segment_start_times_np,
-                    anchor_segment_end_times_np,
-                    anchor_segment_labels_np,
-                    duration=duration,
-                )
+                anchor_joint_kinetic_energy_np = np.asarray(
+                    motion_data["anchor_joint_kinetic_energy"], dtype=np.float32
+                ).reshape(-1)
+                if anchor_joint_kinetic_energy_np.shape != anchor_frame_indices_np.shape:
+                    raise ValueError("anchor_joint_kinetic_energy must have one entry per selected anchor.")
                 _validate_anchor_selection_arrays(
                     anchor_frame_indices_np,
                     anchor_times_np,
                     num_frames=num_frames,
                     duration=duration,
-                )
-                anchor_segment_start_times = torch.as_tensor(
-                    anchor_segment_start_times_np, dtype=torch.float32, device=self.device
-                )
-                anchor_segment_end_times = torch.as_tensor(
-                    anchor_segment_end_times_np, dtype=torch.float32, device=self.device
-                )
-                anchor_segment_labels = torch.as_tensor(
-                    anchor_segment_labels_np, dtype=torch.long, device=self.device
                 )
                 anchor_frame_indices = torch.as_tensor(anchor_frame_indices_np, dtype=torch.long, device=self.device)
                 anchor_times = torch.as_tensor(anchor_times_np, dtype=torch.float32, device=self.device)
@@ -706,9 +623,6 @@ class MotionLib:
                 segment_start_times=segment_start_times,
                 segment_end_times=segment_end_times,
                 segment_types=segment_types,
-                anchor_segment_start_times=anchor_segment_start_times,
-                anchor_segment_end_times=anchor_segment_end_times,
-                anchor_segment_labels=anchor_segment_labels,
                 anchor_frame_indices=anchor_frame_indices,
                 anchor_times=anchor_times,
             )

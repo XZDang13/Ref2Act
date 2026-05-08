@@ -22,9 +22,8 @@ from ref2act.envs.motion_tracking.randomization import (
     randomize_rigid_body_collider_offsets_by_body,
     randomize_rigid_body_com_from_default,
 )
-from ref2act.envs.motion_tracking.rewards import default_reward_spec, robust_tracking_reward_spec
+from ref2act.envs.motion_tracking.rewards import default_reward_spec
 from ref2act.envs.motion_tracking.termination import default_termination_spec
-from ref2act.envs.motion_tracking.tracking_quality import RobustTrackingCfg, TrackingQualityGateCfg
 from ref2act.motion.sampling import SamplerMod, SamplingStrategy, SegmentSource
 from ref2act.robots._articulation_shared import G1_CFG
 
@@ -258,11 +257,16 @@ class G1MotionTrackingEnvCfg(DirectRLEnvCfg):
     expert_motion_file = None
 
     bin_size = 0.3
-    failure_decay = 0.99
-    failure_weight_uniform_mix = 0.1
-    failure_weight_max_uniform_ratio = 2.5
-    failure_weight_exploration_bonus = 0.5
-    failure_temperature = 1.0
+    weight_fail = 0.5
+    weight_novel = 0.3
+    cap_beta = 2.0
+    adaptive_uniform_ratio = 0.1
+    adaptive_alpha = 0.001
+    adaptive_kernel_size = 1
+    adaptive_lambda = 0.8
+    motion_sampling_warmup_s = 0.0
+    motion_sampling_ramp_s = 0.0
+    motion_sampling_schedule = "cosine"
     segment_source: SegmentSource = SegmentSource.Time
     sampling_strategy: SamplingStrategy | None = None
     sampler_mod:SamplerMod = SamplerMod.Clamp
@@ -273,7 +277,6 @@ class G1MotionTrackingEnvCfg(DirectRLEnvCfg):
     anchor_body_name = "pelvis"
 
     key_body_names = [
-        "pelvis",
         "torso_link",
         "left_shoulder_roll_link",
         "right_shoulder_roll_link",
@@ -308,15 +311,14 @@ class G1MotionTrackingEnvCfg(DirectRLEnvCfg):
         "right_ankle_roll_link",
     ]
 
-    rewards = robust_tracking_reward_spec(dt=0.0, include_com_terms=True)
+    rewards = _g1_reward_spec()
     termination = default_termination_spec(
         anchor_height_only=True,
-        end_effector_height_only=True,
+        end_effector_height_only=False,
         probabilistic_error_termination=True,
         error_termination_ramp_multiplier=2.0,
         error_termination_sigmoid_steepness=8.0,
     )
-    robust_tracking = RobustTrackingCfg(enabled=True, quality_gate=TrackingQualityGateCfg(enabled=True))
     termination_curriculum: TerminationCurriculumCfg | None = None
 
     training = True

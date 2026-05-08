@@ -104,18 +104,9 @@ def _build_split_motion_log(
         "segment_start_times": np.asarray([0.0], dtype=np.float32),
         "segment_end_times": np.asarray([duration], dtype=np.float32),
         "segment_types": np.asarray([0], dtype=np.int64),
-        "anchor_selection_version": np.asarray(1, dtype=np.int64),
-        "anchor_frame_labels": np.full(num_frames, 2, dtype=np.int8),
-        "anchor_segment_start_times": np.asarray([0.0], dtype=np.float32),
-        "anchor_segment_end_times": np.asarray([duration], dtype=np.float32),
-        "anchor_segment_labels": np.asarray([2], dtype=np.int8),
+        "anchor_selection_version": np.asarray(3, dtype=np.int64),
         "anchor_frame_indices": anchor_frame_indices,
         "anchor_times": (anchor_frame_indices.astype(np.float32) / np.float32(fps)).astype(np.float32),
-        "anchor_scores": np.ones(num_anchors, dtype=np.float32),
-        "anchor_support_modes": np.full(num_anchors, 3, dtype=np.int8),
-        "anchor_energy_norm": np.zeros(num_anchors, dtype=np.float32),
-        "anchor_pose_extreme": np.zeros(num_anchors, dtype=np.float32),
-        "anchor_torso_tilt_deg": np.zeros(num_anchors, dtype=np.float32),
         "anchor_joint_kinetic_energy": np.zeros(num_anchors, dtype=np.float32),
     }
 
@@ -170,21 +161,34 @@ def test_finalize_motion_slot_anchor_mode_exports_anchor_metadata(tmp_path: Path
 
     with np.load(output_file) as motion_data:
         assert {"segment_start_times", "segment_end_times", "segment_types"} <= set(motion_data.files)
-        assert {"anchor_frame_labels", "anchor_segment_start_times", "anchor_segment_end_times"} <= set(motion_data.files)
+        assert {
+            "anchor_selection_version",
+            "anchor_frame_indices",
+            "anchor_times",
+            "anchor_joint_kinetic_energy",
+        } <= set(motion_data.files)
+        assert not {
+            "anchor_frame_labels",
+            "anchor_segment_start_times",
+            "anchor_segment_end_times",
+            "anchor_segment_labels",
+            "anchor_scores",
+            "anchor_support_modes",
+            "anchor_energy_norm",
+            "anchor_pose_extreme",
+            "anchor_torso_tilt_deg",
+        } & set(motion_data.files)
         assert motion_data["anchor_selection_version"].dtype == np.int64
-        assert motion_data["anchor_frame_labels"].dtype == np.int8
-        assert motion_data["anchor_segment_labels"].dtype == np.int8
+        assert int(np.asarray(motion_data["anchor_selection_version"]).item()) == 3
         assert motion_data["anchor_frame_indices"].dtype == np.int64
         assert motion_data["anchor_times"].dtype == np.float32
-        assert motion_data["anchor_scores"].dtype == np.float32
-        assert motion_data["anchor_support_modes"].dtype == np.int8
         assert motion_data["anchor_joint_kinetic_energy"].dtype == np.float32
         assert motion_data["anchor_frame_indices"].shape[0] > 0
         if motion_data["anchor_times"].shape[0] > 1:
             assert float(motion_data["anchor_times"][1] - motion_data["anchor_times"][0]) >= 0.35 - 1.0e-6
 
 
-def test_finalize_motion_slot_anchor_mode_inserts_bootstrap_and_trims_tail_anchor(tmp_path: Path, capsys) -> None:
+def test_finalize_motion_slot_anchor_mode_forces_start_anchor(tmp_path: Path, capsys) -> None:
     torso_x = np.zeros(30, dtype=np.float32)
     torso_x[:4] = 1.0
     output_file = _build_conversion_slot(
@@ -196,23 +200,18 @@ def test_finalize_motion_slot_anchor_mode_inserts_bootstrap_and_trims_tail_ancho
     captured = capsys.readouterr()
     with np.load(output_file) as motion_data:
         anchor_frame_indices = motion_data["anchor_frame_indices"]
-        anchor_times = motion_data["anchor_times"]
-        frame_labels = motion_data["anchor_frame_labels"]
-        segment_labels = motion_data["anchor_segment_labels"]
-        duration = float(motion_data["joint_pos"].shape[0]) / float(np.asarray(motion_data["fps"]).item())
 
         assert anchor_frame_indices[0] == 0
         assert np.all(np.diff(anchor_frame_indices) > 0)
         assert anchor_frame_indices.dtype == np.int64
-        assert frame_labels[0] != 2
-        assert segment_labels[0] != 2
-        assert np.all(anchor_times[1:] <= np.float32(duration - 0.30))
 
-    assert "bootstrap_start=yes" in captured.out
-    assert "tail_trimmed=1" in captured.out
+    assert "Anchor export selected" in captured.out
+    assert "lowest_energy_fallback=" in captured.out
+    assert "bootstrap_start" not in captured.out
+    assert "tail_trimmed" not in captured.out
 
 
-def test_finalize_motion_slot_anchor_mode_logs_hybrid_low_kinetic_anchor(tmp_path: Path, capsys) -> None:
+def test_finalize_motion_slot_anchor_mode_logs_lowest_energy_safe_fallback(tmp_path: Path, capsys) -> None:
     torso_x = np.full(10, 0.8, dtype=np.float32)
     torso_x[4] = 0.0
     output_file = _build_conversion_slot(
@@ -224,12 +223,10 @@ def test_finalize_motion_slot_anchor_mode_logs_hybrid_low_kinetic_anchor(tmp_pat
     captured = capsys.readouterr()
     with np.load(output_file) as motion_data:
         assert np.array_equal(motion_data["anchor_frame_indices"], np.asarray([0, 4], dtype=np.int64))
-        assert motion_data["anchor_frame_labels"][4] == 1
         assert motion_data["anchor_joint_kinetic_energy"].shape == motion_data["anchor_times"].shape
-    assert "strict=0" in captured.out
-    assert "fallback_promotion=no" in captured.out
-    assert "bootstrap_start=yes" in captured.out
-    assert "tail_trimmed=0" in captured.out
+    assert "Anchor export selected 2 anchor(s)" in captured.out
+    assert "lowest_energy_fallback=yes" in captured.out
+    assert "fallback_promotion" not in captured.out
 
 
 def test_finalize_motion_slot_time_mode_omits_anchor_metadata(tmp_path: Path) -> None:
@@ -273,8 +270,8 @@ def test_split_motion_log_by_anchors_writes_numbered_parts_and_rebases_metadata(
             assert duration >= 2.0
             assert motion_data["segment_start_times"][0] == np.float32(0.0)
             assert motion_data["segment_end_times"][-1] == np.float32(duration)
-            assert motion_data["anchor_segment_start_times"][0] == np.float32(0.0)
-            assert motion_data["anchor_segment_end_times"][-1] == np.float32(duration)
+            assert int(np.asarray(motion_data["anchor_selection_version"]).item()) == 3
+            assert motion_data["anchor_joint_kinetic_energy"].shape == motion_data["anchor_times"].shape
 
     assert durations == [10.0, 10.0, 6.0]
     with np.load(written_files[1]) as second_part:
@@ -284,6 +281,30 @@ def test_split_motion_log_by_anchors_writes_numbered_parts_and_rebases_metadata(
     motion_lib = MotionLib(written_files)
     assert motion_lib.num_motions == 3
     assert motion_lib.all_clips_have_anchor_segments
+
+
+def test_split_motion_log_by_anchors_drops_float32_zero_duration_segment_slivers(tmp_path: Path) -> None:
+    log = _build_split_motion_log(num_frames=200, anchor_frames=(0, 100))
+    log["segment_start_times"] = np.asarray([0.0, 10.0 - 2.0e-7, 10.0], dtype=np.float64)
+    log["segment_end_times"] = np.asarray([10.0 - 2.0e-7, 10.0, 20.0], dtype=np.float64)
+    log["segment_types"] = np.asarray([0, 0, 0], dtype=np.int64)
+
+    written_files = split_motion_log_by_anchors(
+        log,
+        tmp_path / "motion.npz",
+        max_duration=10.0,
+        min_duration=2.0,
+    )
+
+    assert written_files == [tmp_path / "motion_000.npz", tmp_path / "motion_001.npz"]
+    for path in written_files:
+        with np.load(path) as motion_data:
+            assert np.all(motion_data["segment_end_times"] > motion_data["segment_start_times"])
+            assert motion_data["segment_start_times"][0] == np.float32(0.0)
+            assert motion_data["segment_end_times"][-1] == np.float32(10.0)
+
+    motion_lib = MotionLib(written_files)
+    assert motion_lib.num_motions == 2
 
 
 def test_split_motion_log_by_anchors_uses_next_anchor_when_no_anchor_is_below_max(tmp_path: Path) -> None:
