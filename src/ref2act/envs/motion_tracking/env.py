@@ -147,8 +147,8 @@ class MotionTrackingEnv(DirectRLEnv):
                     "Reconvert the motion .npz files with `ref2act-convert --segment-method anchor`."
                 )
             raise ValueError(
-                "Failure-weighted sampling requires motion clips with segment metadata. "
-                "Reconvert the motion .npz files with `ref2act-convert --segment-bin-size ...`."
+                "Failure-weighted sampling requires initialized time bins. "
+                "Set cfg.bin_size or reconvert the motion .npz files with segment metadata."
             )
 
         observation_layout = ObservationLayout(

@@ -67,7 +67,7 @@ class EndEffectorPositionFailureRuleCfg(TerminationRuleCfg):
     id: str = "end_effector_position_failure"
     type: str = "end_effector_position_failure"
     end_effector_body_indices: tuple[int, ...] = ()
-    threshold: float = 0.15
+    threshold: float = 0.25
     height_only: bool = False
     reduction: str = "any"
     policy: ThresholdPolicyCfg = ThresholdPolicyCfg()

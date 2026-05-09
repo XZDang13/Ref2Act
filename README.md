@@ -58,15 +58,15 @@ env = MotionTrackingEnv(cfg)
 obs, info = env.reset()
 ```
 
-With `SamplingStrategy.FailureWeighted`, Ref2Act biases both motion choice across clips and reset choice within the chosen clip using a MOSAIC-style mixture:
+With `SamplingStrategy.FailureWeighted`, Ref2Act follows MOSAIC's two-level sampler. Motion choice across clips uses a failure/novelty/uniform mixture:
 
 ```text
-p = weight_fail * p_fail + weight_novel * p_uct + weight_uniform * p_uniform
+p_motion = weight_fail * p_fail + weight_novel * p_novel + weight_uniform * p_uniform
 ```
 
-`p_uct` is the novelty term, computed from raw sample counts. `weight_fail` and `weight_novel` can be warm-started with `motion_sampling_warmup_s`, ramped with `motion_sampling_ramp_s`, and scheduled by `motion_sampling_schedule`; any remaining mass becomes uniform probability. Motion-level failure rates are capped by `cap_beta * mean_fail_rate` before normalization. Bin-level failure scores use an EMA controlled by `adaptive_alpha`, add a MOSAIC uniform floor through `adaptive_uniform_ratio`, and can be smoothed with `adaptive_kernel_size` and `adaptive_lambda`.
+`p_novel` is proportional to `1 / sqrt(assigned_count + 1)`. `weight_fail` and `weight_novel` can be warm-started with `motion_sampling_warmup_s`, ramped with `motion_sampling_ramp_s`, and scheduled by `motion_sampling_schedule`; any remaining mass becomes uniform probability. Motion-level failure rates are capped by `cap_beta * mean_fail_rate` before normalization.
 
-When `cfg.segment_source == SegmentSource.Time`, the within-clip distribution is learned over time bins. When `cfg.segment_source == SegmentSource.Anchor`, conversion always includes frame `0` as a reset anchor and adds safe local minima of `sum(abs(joint_vel))`; the same MOSAIC/UCT mixer then runs over those anchor bins. Long spans between reset anchors are split using `cfg.bin_size`, while each bin still resets from the nearest selected anchor.
+Within each selected motion, reset bins use MOSAIC's adaptive failure distribution: `bin_failed_count + adaptive_uniform_ratio / num_eligible_bins`, optionally smoothed by `adaptive_kernel_size` and `adaptive_lambda`, then normalized. The bin failure counts are an EMA controlled by `adaptive_alpha`; failure recording is skipped during the motion-level warmup window. When `cfg.segment_source == SegmentSource.Time`, the sampler can use exported segment metadata or generate fixed time bins from `cfg.bin_size`. When `cfg.segment_source == SegmentSource.Anchor`, conversion always includes frame `0` as a reset anchor and adds safe local minima of `sum(abs(joint_vel))`; long spans between reset anchors are split using `cfg.bin_size`, while each bin still resets from the nearest selected anchor.
 
 The package registers these Gym environments when Isaac Lab is available:
 
@@ -93,7 +93,7 @@ Useful options:
 
 - `--target-fps`: resample the exported clip
 - `--smooth-motion`: smooth root and joint trajectories before export
-- `--segment-bin-size`: emit segment metadata for failure-weighted sampling
+- `--segment-bin-size`: emit segment metadata for merged or custom failure-weighted bins
 - `--segment-method anchor`: keep legacy `segment_*` output and also export anchor metadata
 
 The converter emits `.npz` clips compatible with `ref2act.motion.MotionLib` and the motion-tracking env configs.

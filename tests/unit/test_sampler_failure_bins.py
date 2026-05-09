@@ -247,6 +247,7 @@ def test_failure_weighted_motion_selection_prefers_harder_motion(tmp_path: Path)
 
     sampler.motion_fail_counts[:] = torch.tensor([16.0, 4.0])
     sampler.motion_sample_counts[:] = torch.tensor([20.0, 20.0])
+    sampler._global_step = 1
 
     torch.manual_seed(0)
     motion_ids = sampler._sample_failure_weighted_motion_ids(torch.arange(4096))
@@ -281,6 +282,7 @@ def test_failure_weighted_motion_selection_guard_keeps_all_motions_live(tmp_path
 
     sampler.motion_fail_counts[:] = torch.tensor([20.0, 0.0])
     sampler.motion_sample_counts[:] = torch.tensor([20.0, 20.0])
+    sampler._global_step = 1
 
     torch.manual_seed(0)
     motion_ids = sampler._sample_failure_weighted_motion_ids(torch.arange(4096))
@@ -314,7 +316,8 @@ def test_failure_weighted_motion_selection_explores_unvisited_motion(tmp_path: P
         device=torch.device("cpu"),
     )
 
-    sampler.motion_sample_counts[:] = torch.tensor([100.0, 0.0])
+    sampler.motion_assigned_counts[:] = torch.tensor([100.0, 0.0])
+    sampler._global_step = 1
 
     torch.manual_seed(0)
     motion_ids = sampler._sample_failure_weighted_motion_ids(torch.arange(4096))
@@ -349,6 +352,7 @@ def test_failure_weighted_motion_selection_cap_beta_limits_extreme_fail_rates(tm
 
     sampler.motion_fail_counts[:] = torch.tensor([100.0, 10.0, 10.0, 10.0], dtype=torch.float32)
     sampler.motion_sample_counts[:] = torch.ones(4, dtype=torch.float32)
+    sampler._global_step = 1
     motion_probs = sampler._build_motion_sampling_probabilities()
 
     assert bool(torch.isclose(motion_probs.sum(), torch.tensor(1.0, dtype=torch.float32)).item())
@@ -356,7 +360,7 @@ def test_failure_weighted_motion_selection_cap_beta_limits_extreme_fail_rates(tm
     assert float(motion_probs[0].item()) <= 0.53
 
 
-def test_failure_weighted_exploration_prefers_unvisited_bins_over_sampled_non_failures(tmp_path: Path) -> None:
+def test_mosaic_bin_sampling_ignores_sample_counts_without_failures(tmp_path: Path) -> None:
     motion_file = tmp_path / "segmented_motion.npz"
     _write_motion_file(
         motion_file,
@@ -371,8 +375,6 @@ def test_failure_weighted_exploration_prefers_unvisited_bins_over_sampled_non_fa
         motion_lib=motion_lib,
         dt=0.05,
         anchor_body_index=0,
-        weight_fail=0.0,
-        weight_novel=1.0,
         adaptive_uniform_ratio=0.0,
         device=torch.device("cpu"),
     )
@@ -382,11 +384,10 @@ def test_failure_weighted_exploration_prefers_unvisited_bins_over_sampled_non_fa
         torch.tensor([0.0, 100.0], dtype=torch.float32),
     )
 
-    assert probs[0] > probs[1]
-    assert probs[0] > 0.75
+    assert torch.allclose(probs, torch.tensor([0.5, 0.5], dtype=torch.float32))
 
 
-def test_failure_weighted_score_balances_failed_and_unvisited_bins(tmp_path: Path) -> None:
+def test_mosaic_bin_sampling_uses_failure_counts_not_bin_novelty(tmp_path: Path) -> None:
     motion_file = tmp_path / "segmented_motion.npz"
     _write_motion_file(
         motion_file,
@@ -401,8 +402,6 @@ def test_failure_weighted_score_balances_failed_and_unvisited_bins(tmp_path: Pat
         motion_lib=motion_lib,
         dt=0.05,
         anchor_body_index=0,
-        weight_fail=0.5,
-        weight_novel=0.5,
         adaptive_uniform_ratio=0.0,
         device=torch.device("cpu"),
     )
@@ -412,21 +411,20 @@ def test_failure_weighted_score_balances_failed_and_unvisited_bins(tmp_path: Pat
         torch.tensor([3.0, 100.0, 0.0], dtype=torch.float32),
     )
 
-    assert probs[0] > 0.25
-    assert probs[2] > 0.25
-    assert probs[0] > probs[1]
-    assert probs[2] > probs[1]
+    assert torch.allclose(probs, torch.tensor([1.0, 0.0, 0.0], dtype=torch.float32))
 
 
-def test_failure_weighted_warmup_ramp_returns_uniform_then_adaptive(tmp_path: Path) -> None:
-    motion_file = tmp_path / "segmented_motion.npz"
-    _write_motion_file(
-        motion_file,
-        segment_start_times=np.asarray([0.0, 0.5], dtype=np.float32),
-        segment_end_times=np.asarray([0.5, 1.0], dtype=np.float32),
-        segment_types=np.asarray([SEGMENT_TYPE_TIME_BIN, SEGMENT_TYPE_TIME_BIN], dtype=np.int64),
-    )
-    motion_lib = MotionLib([motion_file])
+def test_mosaic_motion_warmup_ramp_returns_uniform_then_adaptive(tmp_path: Path) -> None:
+    motion_a = tmp_path / "motion_a.npz"
+    motion_b = tmp_path / "motion_b.npz"
+    for motion_file in (motion_a, motion_b):
+        _write_motion_file(
+            motion_file,
+            segment_start_times=np.asarray([0.0, 0.5], dtype=np.float32),
+            segment_end_times=np.asarray([0.5, 1.0], dtype=np.float32),
+            segment_types=np.asarray([SEGMENT_TYPE_TIME_BIN, SEGMENT_TYPE_TIME_BIN], dtype=np.int64),
+        )
+    motion_lib = MotionLib([motion_a, motion_b])
     sampler_mod = _load_sampler_module()
     sampler = sampler_mod.Sampler(
         num_envs=1,
@@ -443,14 +441,14 @@ def test_failure_weighted_warmup_ramp_returns_uniform_then_adaptive(tmp_path: Pa
         device=torch.device("cpu"),
     )
 
-    fail_counts = torch.tensor([10.0, 0.0], dtype=torch.float32)
-    sample_counts = torch.ones(2, dtype=torch.float32)
-    warmup_probs = sampler._build_bin_sampling_probabilities(fail_counts, sample_counts)
+    sampler.motion_fail_counts[:] = torch.tensor([10.0, 0.0], dtype=torch.float32)
+    sampler.motion_sample_counts[:] = torch.ones(2, dtype=torch.float32)
+    warmup_probs = sampler._build_motion_sampling_probabilities()
     sampler.current_times[0] = 0.75
     sampler.record_failures(torch.tensor([0]))
 
     sampler._global_step = 8
-    adaptive_probs = sampler._build_bin_sampling_probabilities(fail_counts, sample_counts)
+    adaptive_probs = sampler._build_motion_sampling_probabilities()
 
     assert torch.allclose(warmup_probs, torch.tensor([0.5, 0.5], dtype=torch.float32))
     assert torch.equal(sampler.bin_fail_counts[0], torch.zeros(2, dtype=torch.float32))
@@ -596,7 +594,7 @@ def test_sampler_random_sampling_uses_segment_start_times(tmp_path: Path) -> Non
     assert torch.equal(unique_times, expected_start_times)
 
 
-def test_sampler_failure_weighted_sampling_requires_segment_metadata(tmp_path: Path) -> None:
+def test_sampler_failure_weighted_sampling_uses_generated_time_bins_without_segment_metadata(tmp_path: Path) -> None:
     motion_file = tmp_path / "legacy_motion.npz"
     _write_motion_file(motion_file)
     motion_lib = MotionLib([motion_file])
@@ -612,7 +610,8 @@ def test_sampler_failure_weighted_sampling_requires_segment_metadata(tmp_path: P
 
     motion_ids = torch.zeros(4, dtype=torch.long)
 
-    assert not sampler.supports_failure_weighted_sampling
+    assert sampler.supports_failure_weighted_sampling
+    assert sampler.num_bins_per_motion[0].item() == 5
     assert torch.equal(
         sampler.sample_times_for_motion_ids(motion_ids, strategy=sampler_mod.SamplingStrategy.Start),
         torch.zeros(4, dtype=torch.float32),
@@ -621,11 +620,13 @@ def test_sampler_failure_weighted_sampling_requires_segment_metadata(tmp_path: P
         motion_ids,
         strategy=sampler_mod.SamplingStrategy.Random,
     ).shape == motion_ids.shape
-    with pytest.raises(RuntimeError, match="segment metadata"):
-        sampler.sample_times_for_motion_ids(
-            motion_ids,
-            strategy=sampler_mod.SamplingStrategy.FailureWeighted,
-        )
+    times = sampler.sample_times_for_motion_ids(
+        motion_ids,
+        strategy=sampler_mod.SamplingStrategy.FailureWeighted,
+    )
+    assert times.shape == motion_ids.shape
+    assert torch.all(times >= 0.0)
+    assert torch.all(times <= motion_lib.motion_durations[0])
 
 
 def test_sampler_can_skip_failure_bin_initialization(tmp_path: Path) -> None:
@@ -1053,6 +1054,7 @@ def test_anchor_failure_counts_accumulate_on_nearest_previous_anchor_for_failure
 
     reset_sample = sampler.reset(torch.tensor([0]), strategy=sampler_mod.SamplingStrategy.FailureWeighted)
     sampler.current_times[0] = 0.95
+    sampler._global_step = 1
     sampler.record_failures(torch.tensor([0]))
 
     assert torch.equal(reset_sample.target_bin_indices, torch.tensor([2], dtype=torch.long))
@@ -1091,6 +1093,7 @@ def test_sampler_records_failures_for_non_failure_weighted_reset(tmp_path: Path,
 
     sampler.reset(torch.tensor([0]), strategy=sampler_mod.SamplingStrategy.Random)
     sampler.current_times[0] = 0.95
+    sampler._global_step = 1
     sampler.record_failures(torch.tensor([0]))
 
     assert torch.equal(sampler.bin_sample_counts[0], torch.tensor([0.0, 0.0, 1.0, 0.0, 0.0]))

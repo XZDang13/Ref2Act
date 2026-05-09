@@ -116,6 +116,7 @@ class MotionSampler:
             device=self.device,
         )
         self.motion_sample_counts = torch.zeros(self.motion_lib.num_motions, dtype=torch.float32, device=self.device)
+        self.motion_assigned_counts = torch.zeros(self.motion_lib.num_motions, dtype=torch.float32, device=self.device)
         self.motion_fail_counts = torch.zeros(self.motion_lib.num_motions, dtype=torch.float32, device=self.device)
 
         self.bin_size: float | None = float(bin_size) if bin_size is not None else None
@@ -193,7 +194,7 @@ class MotionSampler:
 
     def _motion_sampling_progress(self) -> float:
         elapsed_s = float(self._global_step) * float(self.dt)
-        if elapsed_s < self.motion_sampling_warmup_s:
+        if elapsed_s <= self.motion_sampling_warmup_s:
             return 0.0
         if self.motion_sampling_ramp_s <= 0.0:
             return 1.0
@@ -206,12 +207,12 @@ class MotionSampler:
 
     def _in_motion_sampling_warmup(self) -> bool:
         elapsed_s = float(self._global_step) * float(self.dt)
-        return elapsed_s < self.motion_sampling_warmup_s
+        return elapsed_s <= self.motion_sampling_warmup_s
 
     def _mix_sampling_terms(
         self,
         fail_probs: torch.Tensor,
-        uct_probs: torch.Tensor,
+        novel_probs: torch.Tensor,
         uniform_probs: torch.Tensor,
     ) -> torch.Tensor:
         progress = self._motion_sampling_progress()
@@ -225,7 +226,7 @@ class MotionSampler:
         else:
             w_uniform = max(0.0, 1.0 - w_fail - w_novel)
 
-        probs = w_fail * fail_probs + w_novel * uct_probs + w_uniform * uniform_probs
+        probs = w_fail * fail_probs + w_novel * novel_probs + w_uniform * uniform_probs
         eps = torch.finfo(probs.dtype).eps
         if probs.ndim == 1:
             probs_sum = torch.sum(probs)
@@ -250,27 +251,17 @@ class MotionSampler:
             raise ValueError("eligible_mask must include at least one entry in every row.")
         return eligible_float / torch.clamp(eligible_count, min=torch.finfo(eligible_float.dtype).eps)
 
-    def _uct_probabilities(self, sample_counts: torch.Tensor, eligible: torch.Tensor) -> torch.Tensor:
-        sample_counts = torch.clamp(sample_counts.to(dtype=torch.float32), min=0.0)
-        eligible_sample_counts = torch.where(eligible, sample_counts, torch.zeros_like(sample_counts))
-        eligible_float = eligible.to(dtype=torch.float32)
+    def _novel_probabilities(self, assigned_counts: torch.Tensor, eligible: torch.Tensor) -> torch.Tensor:
+        assigned_counts = torch.clamp(assigned_counts.to(dtype=torch.float32), min=0.0)
+        scores = 1.0 / torch.sqrt(assigned_counts + 1.0)
+        scores = torch.where(eligible, scores, torch.zeros_like(scores))
 
-        if sample_counts.ndim == 1:
-            eligible_count = torch.sum(eligible_float)
-            total_samples = torch.sum(eligible_sample_counts)
-            exploration_scale = torch.log(total_samples + eligible_count + 1.0)
-            scores = torch.sqrt(exploration_scale / (eligible_sample_counts + 1.0))
-            scores = torch.where(eligible, scores, torch.zeros_like(scores))
+        if assigned_counts.ndim == 1:
             score_sum = torch.sum(scores)
             if float(score_sum.item()) <= 0.0 or not bool(torch.isfinite(score_sum).item()):
                 return self._uniform_probabilities(eligible)
             return scores / score_sum
 
-        eligible_count = torch.sum(eligible_float, dim=1, keepdim=True)
-        total_samples = torch.sum(eligible_sample_counts, dim=1, keepdim=True)
-        exploration_scale = torch.log(total_samples + eligible_count + 1.0)
-        scores = torch.sqrt(exploration_scale / (eligible_sample_counts + 1.0))
-        scores = torch.where(eligible, scores, torch.zeros_like(scores))
         score_sum = torch.sum(scores, dim=1, keepdim=True)
         uniform_probs = self._uniform_probabilities(eligible)
         valid = (score_sum > 0.0) & torch.isfinite(score_sum)
@@ -282,6 +273,7 @@ class MotionSampler:
     ) -> torch.Tensor:
         fail_counts = self.motion_fail_counts.to(dtype=torch.float32)
         sample_counts = self.motion_sample_counts.to(dtype=torch.float32)
+        assigned_counts = self.motion_assigned_counts.to(dtype=torch.float32)
         if eligible_mask is None:
             eligible = torch.ones_like(fail_counts, dtype=torch.bool, device=self.device)
         else:
@@ -308,8 +300,8 @@ class MotionSampler:
         else:
             fail_probs = torch.zeros_like(capped_rates)
 
-        uct_probs = self._uct_probabilities(sample_counts, eligible)
-        return self._mix_sampling_terms(fail_probs, uct_probs, uniform_probs)
+        novel_probs = self._novel_probabilities(assigned_counts, eligible)
+        return self._mix_sampling_terms(fail_probs, novel_probs, uniform_probs)
 
     def _smooth_bin_weights(self, weights: torch.Tensor) -> torch.Tensor:
         if self.adaptive_kernel_size <= 1:
@@ -343,6 +335,8 @@ class MotionSampler:
             if eligible.shape != fail_counts.shape:
                 raise ValueError("eligible_mask must have the same shape as fail_counts.")
 
+        # Match MOSAIC: bin-level sampling ignores sample counts and uses failure counts plus a uniform floor.
+        del sample_counts
         uniform_probs = self._uniform_probabilities(eligible)
         eligible_float = eligible.to(dtype=torch.float32)
         if fail_counts.ndim == 1:
@@ -366,18 +360,17 @@ class MotionSampler:
             if float(fail_sum.item()) > 0.0 and bool(torch.isfinite(fail_sum).item()):
                 fail_probs = fail_weights / fail_sum
             else:
-                fail_probs = torch.zeros_like(fail_weights)
+                fail_probs = uniform_probs
         else:
             fail_sum = torch.sum(fail_weights, dim=1, keepdim=True)
             valid = (fail_sum > 0.0) & torch.isfinite(fail_sum)
             fail_probs = torch.where(
                 valid,
                 fail_weights / torch.clamp(fail_sum, min=torch.finfo(fail_weights.dtype).eps),
-                torch.zeros_like(fail_weights),
+                uniform_probs,
             )
 
-        uct_probs = self._uct_probabilities(sample_counts, eligible)
-        return self._mix_sampling_terms(fail_probs, uct_probs, uniform_probs)
+        return fail_probs
 
     def _sample_failure_weighted_motion_ids(
         self,
@@ -621,6 +614,7 @@ class MotionSampler:
         self.episode_start_times[resolved_env_ids] = times
         self.episode_start_bin_indices[resolved_env_ids] = target_bin_indices
         self.episode_start_sampling_strategy_values[resolved_env_ids] = strategy.value
+        self._record_motion_assignments(motion_ids)
         self._record_sample_bins(motion_ids, times, target_bin_indices=target_bin_indices)
         return ResetSample(
             env_ids=resolved_env_ids,
@@ -896,7 +890,7 @@ class MotionSampler:
             f"total_elapsed={perf_counter() - init_start_time:.1f}s",
             flush=True,
         )
-        self.supports_failure_weighted_sampling = all(self.bin_uses_segment_metadata)
+        self.supports_failure_weighted_sampling = True
 
         if self.segment_source == SegmentSource.Anchor:
             motion_reset_eligible_values = [
@@ -934,6 +928,7 @@ class MotionSampler:
     def reset_failure_stats(self) -> None:
         self._check_failure_bins()
         self.motion_sample_counts.zero_()
+        self.motion_assigned_counts.zero_()
         self.motion_fail_counts.zero_()
         for fail_counts, sample_counts in zip(self.bin_fail_counts, self.bin_sample_counts, strict=False):
             fail_counts.zero_()
@@ -1038,8 +1033,8 @@ class MotionSampler:
                     "Failure-weighted anchor sampling requires motion clips with anchor metadata."
                 )
             raise RuntimeError(
-                "Failure-weighted sampling requires motion clips with segment metadata. "
-                "Reconvert the motion .npz files with `ref2act-convert --segment-bin-size ...`."
+                "Failure-weighted sampling requires initialized time bins. "
+                "Set sampler bin_size or reconvert the motion .npz files with segment metadata."
             )
 
     def _times_to_bins(self, motion_ids: torch.Tensor, times: torch.Tensor) -> torch.Tensor:
@@ -1123,6 +1118,17 @@ class MotionSampler:
             minlength=self.motion_lib.num_motions * int(self.max_bins_per_motion),
         ).to(device=self.device, dtype=torch.float32)
         return counts.view(self.motion_lib.num_motions, int(self.max_bins_per_motion))
+
+    def _record_motion_assignments(self, motion_ids: torch.Tensor) -> None:
+        motion_ids = torch.as_tensor(motion_ids, dtype=torch.long, device=self.device).reshape(-1)
+        if motion_ids.numel() == 0:
+            return
+
+        self.motion_assigned_counts.index_add_(
+            0,
+            motion_ids,
+            torch.ones(motion_ids.shape, dtype=self.motion_assigned_counts.dtype, device=self.device),
+        )
 
     def _record_sample_bins(
         self,

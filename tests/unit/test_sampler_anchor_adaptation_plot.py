@@ -142,6 +142,7 @@ def test_anchor_failure_weighted_sampling_plot_tracks_learning_dynamics(tmp_path
     global_hard_anchor_mass.append(float(global_anchor_probs[:, hard_anchor_index].sum().item()))
 
     for step in range(num_steps):
+        sampler._global_step = step + 1
         reset_sample = sampler.reset(env_ids, strategy=SamplingStrategy.FailureWeighted)
 
         sampled_is_hard = reset_sample.target_bin_indices == hard_anchor_index
