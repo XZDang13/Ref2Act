@@ -1,5 +1,3 @@
-import torch
-
 import isaaclab.sim as sim_utils
 from isaaclab.markers import VisualizationMarkers
 from isaaclab.markers.config import DEFORMABLE_TARGET_MARKER_CFG
@@ -8,8 +6,9 @@ from ref2act.common.utils import IndexLike
 
 from .types import ReferenceMotions
 
+
 class ReferenceMotionViewer:
-    def __init__(self, body_indices:IndexLike):
+    def __init__(self, body_indices: IndexLike):
         marker_cfg = DEFORMABLE_TARGET_MARKER_CFG.copy()
         marker_cfg.markers["target"].radius = 0.05
         marker_cfg.markers["target"].visual_material = sim_utils.PreviewSurfaceCfg(

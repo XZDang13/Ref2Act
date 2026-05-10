@@ -945,7 +945,8 @@ class MotionLib:
             times=times,
             position_offsets=position_offsets,
         )
-    
+
+
 class MotionViewer:
     """
     Helper class to visualize motion data from NumPy-file format.

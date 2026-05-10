@@ -10,8 +10,6 @@ from isaaclab.assets import ArticulationCfg, AssetBaseCfg
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.sensors import ContactSensorCfg
-from isaaclab.markers import VisualizationMarkersCfg
-from isaaclab.markers.config import FRAME_MARKER_CFG
 from ref2act.envs.motion_tracking.action import ActionSpec
 from ref2act.envs.motion_tracking.curriculum import TerminationCurriculumCfg
 from ref2act.envs.motion_tracking.observation import default_training_observation_spec
@@ -231,6 +229,7 @@ class G1TrainingEventCfg(G1DomainRandCfg):
         params={"velocity_range": G1_PUSH_VELOCITY_RANGE},
     )
 
+
 @configclass
 class G1MotionTrackingEnvCfg(DirectRLEnvCfg):
     expert_motion_file = None
@@ -254,8 +253,6 @@ class G1MotionTrackingEnvCfg(DirectRLEnvCfg):
         noise_scale=0.025,
     )
 
-    expert_motion_file = None
-
     bin_size = 0.3
     weight_fail = 0.5
     weight_novel = 0.3
@@ -269,7 +266,7 @@ class G1MotionTrackingEnvCfg(DirectRLEnvCfg):
     motion_sampling_schedule = "cosine"
     segment_source: SegmentSource = SegmentSource.Time
     sampling_strategy: SamplingStrategy | None = None
-    sampler_mod:SamplerMod = SamplerMod.Clamp
+    sampler_mod: SamplerMod = SamplerMod.Clamp
     init_failure_bins: bool | None = None
     compact_motion_storage: bool = True
 
@@ -291,7 +288,7 @@ class G1MotionTrackingEnvCfg(DirectRLEnvCfg):
         "left_ankle_roll_link",
         "right_ankle_roll_link",
     ]
-    
+
     collision_track_body_names = [
         "left_ankle_roll_link",
         "right_ankle_roll_link",
@@ -345,22 +342,23 @@ class G1MotionTrackingEnvCfg(DirectRLEnvCfg):
             friction_combine_mode="multiply",
             restitution_combine_mode="multiply",
             static_friction=1.0,
-            dynamic_friction=1.0
+            dynamic_friction=1.0,
         ),
         debug_vis=False,
     )
 
-    scene:InteractiveSceneCfg = InteractiveSceneCfg(
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(
         num_envs=4096, env_spacing=4.0, replicate_physics=True
     )
 
     events: G1TrainingEventCfg = G1TrainingEventCfg()
 
-    robot:ArticulationCfg = G1_CFG.replace(prim_path="/World/envs/env_.*/Robot")
+    robot: ArticulationCfg = G1_CFG.replace(prim_path="/World/envs/env_.*/Robot")
 
     contact_sensor = ContactSensorCfg(
         prim_path="/World/envs/env_.*/Robot/.*", history_length=3, track_air_time=True, force_threshold=10.0,
     )
+
 
 @configclass
 class G1MotionTrackingRoughEnvCfg(G1MotionTrackingEnvCfg):
@@ -376,6 +374,7 @@ class MotionViewerCfg(InteractiveSceneCfg):
     )
 
     robot = G1_CFG.replace(prim_path="/World/Robot")
+
 
 JOINT_ORDER = [
     "left_hip_pitch_joint",

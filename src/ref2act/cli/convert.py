@@ -380,7 +380,7 @@ class GMRMotionData:
 
     def _so3_derivative(self, rotations: torch.Tensor, dt: float) -> torch.Tensor:
         return _so3_derivative(rotations, dt)
-    
+
     def get_init_state(self):
         motion = (
             self.root_pos[0 : 0 + 1],
@@ -392,13 +392,13 @@ class GMRMotionData:
         )
 
         return motion
-    
-    def set_root_height(self, height_offset:float):
+
+    def set_root_height(self, height_offset: float):
         offset = torch.zeros(3).to(self.device)
         offset[-1] += height_offset
 
         self.root_pos += offset
-    
+
     def get_next_state(self):
         motion = (
             self.root_pos[self.current_step : self.current_step + 1],

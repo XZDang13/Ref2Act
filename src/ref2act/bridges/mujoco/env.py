@@ -76,14 +76,24 @@ def normalize_quat_np(q: np.ndarray) -> np.ndarray:
 
 
 class MujocoEnv:
-    def __init__(self, simulation_dt:float, decimation:float,
-                 kp:torch.Tensor, kd:torch.Tensor, effort_limits: torch.Tensor, joint_pos_limits: torch.Tensor,
-                 action_offset: torch.Tensor, action_scale: torch.Tensor,  expert_motion_file:str,
-                 root_link_name:str="torso_link", anchor_body_name:str="torso_link",
-                 render:bool=False, action_mode: str = "absolute",
-                 observation_builder: MujocoObservationBuilder | None = None,
-                 action_builder: MujocoActionBuilder | None = None):
-        
+    def __init__(
+        self,
+        simulation_dt: float,
+        decimation: float,
+        kp: torch.Tensor,
+        kd: torch.Tensor,
+        effort_limits: torch.Tensor,
+        joint_pos_limits: torch.Tensor,
+        action_offset: torch.Tensor,
+        action_scale: torch.Tensor,
+        expert_motion_file: str,
+        root_link_name: str = "torso_link",
+        anchor_body_name: str = "torso_link",
+        render: bool = False,
+        action_mode: str = "absolute",
+        observation_builder: MujocoObservationBuilder | None = None,
+        action_builder: MujocoActionBuilder | None = None,
+    ):
         self.mj_model = mujoco.MjModel.from_xml_path(mujoco_env_xml)
         self.mj_data = mujoco.MjData(self.mj_model)
         self.mj_model.opt.timestep = simulation_dt
@@ -91,12 +101,12 @@ class MujocoEnv:
         self.render = render
         if self.render:
             self.mj_viewer = mjv.MujocoViewer(
-                                self.mj_model,
-                                self.mj_data,
-                                width=1400,
-                                height=1200,
-                                hide_menus=True,
-                            )
+                self.mj_model,
+                self.mj_data,
+                width=1400,
+                height=1200,
+                hide_menus=True,
+            )
 
         self.motion_lib = MotionLib(expert_motion_file)
         (
@@ -133,16 +143,6 @@ class MujocoEnv:
         self.policy_dt = simulation_dt * decimation
 
         self.n_steps = 0
-
-        #print("KP:")
-        #print(self.kp)
-        #print("KD")
-        #print(self.kd)
-        #print("Action Offset")
-        #print(self.action_offset)
-        #print("Action Scale")
-        #print(self.action_scale)
-        #print("------------")
 
     def _resolve_motion_body_index(self, body_name: str, *, role: str) -> int:
         try:
@@ -244,16 +244,16 @@ class MujocoEnv:
         ).float()
         anchor_ang_vel_w = torch.from_numpy(self._get_body_world_twist(self.anchor_body_id)[0]).float()
         return quat_rotate_inverse(anchor_quat_w, anchor_ang_vel_w).float()
-    
+
     def get_joint_pos(self):
         joint_pos = torch.from_numpy(self.mj_data.qpos[7:]).float()[self.mujoco2isaac]
         return joint_pos
-    
+
     def get_joint_vel(self):
         joint_vel = torch.from_numpy(self.mj_data.qvel[6:]).float()[self.mujoco2isaac]
 
         return joint_vel
-    
+
     def get_motion_command(self, times):
         motion_ids = torch.full(times.shape, int(self.motion_id.item()), dtype=torch.long)
         reference_motion = self.motion_lib.sample_motion(motion_ids=motion_ids, times=times)
@@ -380,7 +380,7 @@ class MujocoEnv:
         self.previous_action[:] = 0.0
         self.motion_id.zero_()
         self.times = torch.zeros(1)
-        
+
         reference_motion = self.motion_lib.sample_motion(motion_ids=self.motion_id, times=self.times)
 
         joint_positions = reference_motion["joint_pos"].squeeze(0).numpy()[self.isaac2mujoco]
@@ -430,23 +430,18 @@ class MujocoEnv:
         self.target_pos = reference_motion["joint_pos"].squeeze(0).clone()
 
         return obs
-    
+
     def _apply_actions(self):
-        
         joint_pos = self.get_joint_pos()
         joint_vel = self.get_joint_vel()
 
         # PD control
         tau = self.kp * (self.target_pos - joint_pos) - self.kd * joint_vel
 
-        #print(tau)
-
-        #print(tau)
         tau_clipped = torch.clip(tau, -self.effort_limits, self.effort_limits)
         tau_clipped = tau_clipped[self.isaac2mujoco]
 
         self.mj_data.ctrl[:] = tau_clipped.numpy()
-        #print(tau_clipped)
 
     def _build_action_context(self, actions: torch.Tensor) -> MujocoActionContext:
         normalized_action = torch.as_tensor(actions, dtype=torch.float32, device="cpu")
@@ -473,7 +468,7 @@ class MujocoEnv:
         action_output = self.process_action(actions)
         self.previous_action.copy_(action_output.applied_action)
         self.target_pos = action_output.target_joint_pos
-        
+
         for _ in range(self.decimation):
             self._apply_actions()
             mujoco.mj_step(self.mj_model, self.mj_data)
@@ -493,7 +488,7 @@ class MujocoEnv:
         self.n_steps += 1
 
         return obs
-    
+
     def close(self):
         if self.mj_viewer is not None:
             try:
