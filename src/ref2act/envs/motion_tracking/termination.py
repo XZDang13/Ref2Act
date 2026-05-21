@@ -12,19 +12,6 @@ from .types import ReferenceMotions
 
 
 @dataclass(frozen=True)
-class ThresholdPolicyCfg:
-    probabilistic: bool = False
-    ramp_multiplier: float = 2.0
-    sigmoid_steepness: float = 8.0
-
-    def __post_init__(self) -> None:
-        if self.ramp_multiplier <= 1.0:
-            raise ValueError("error_termination_ramp_multiplier must be greater than 1.0.")
-        if self.sigmoid_steepness <= 0.0:
-            raise ValueError("error_termination_sigmoid_steepness must be positive.")
-
-
-@dataclass(frozen=True)
 class TerminationRuleCfg:
     id: str
     type: str
@@ -50,7 +37,6 @@ class AnchorPositionFailureRuleCfg(TerminationRuleCfg):
     anchor_body_index: int = -1
     threshold: float = 0.25
     height_only: bool = True
-    policy: ThresholdPolicyCfg = ThresholdPolicyCfg()
 
 
 @dataclass(frozen=True)
@@ -59,7 +45,6 @@ class AnchorOrientationFailureRuleCfg(TerminationRuleCfg):
     type: str = "anchor_orientation_failure"
     anchor_body_index: int = -1
     threshold: float = 0.8
-    policy: ThresholdPolicyCfg = ThresholdPolicyCfg()
 
 
 @dataclass(frozen=True)
@@ -70,7 +55,6 @@ class EndEffectorPositionFailureRuleCfg(TerminationRuleCfg):
     threshold: float = 0.25
     height_only: bool = False
     reduction: str = "any"
-    policy: ThresholdPolicyCfg = ThresholdPolicyCfg()
 
 
 @dataclass(frozen=True)
@@ -141,35 +125,6 @@ class TerminationContext:
         return result
 
 
-class ThresholdPolicy:
-    def __init__(self, cfg: ThresholdPolicyCfg) -> None:
-        self.cfg = cfg
-
-    def _error_to_termination_probability(self, error: torch.Tensor, threshold: float) -> torch.Tensor:
-        threshold_tensor = error.new_tensor(threshold)
-        over_threshold = error > threshold_tensor
-        if not torch.any(over_threshold):
-            return torch.zeros_like(error)
-
-        ramp_span = threshold_tensor * (self.cfg.ramp_multiplier - 1.0)
-        normalized_error = torch.clamp((error - threshold_tensor) / ramp_span, min=0.0, max=1.0)
-
-        steepness = error.new_tensor(self.cfg.sigmoid_steepness)
-        sigmoid_values = torch.sigmoid(steepness * (normalized_error - 0.5))
-        sigmoid_start = torch.sigmoid(-0.5 * steepness)
-        sigmoid_end = torch.sigmoid(0.5 * steepness)
-        normalized_sigmoid = (sigmoid_values - sigmoid_start) / (sigmoid_end - sigmoid_start)
-
-        probabilities = torch.where(over_threshold, normalized_sigmoid, torch.zeros_like(error))
-        return probabilities.clamp_(0.0, 1.0)
-
-    def evaluate(self, error: torch.Tensor, threshold: float) -> torch.Tensor:
-        if not self.cfg.probabilistic:
-            return error > threshold
-        probabilities = self._error_to_termination_probability(error, threshold)
-        return torch.rand_like(probabilities) < probabilities
-
-
 class TimeoutRule(Protocol):
     id: str
 
@@ -210,14 +165,13 @@ class AnchorPositionFailureRule:
         self.anchor_body_index = cfg.anchor_body_index
         self.height_only = cfg.height_only
         self.threshold = cfg.threshold
-        self.policy = ThresholdPolicy(cfg.policy)
 
     def error(self, context: TerminationContext) -> torch.Tensor:
         return context.anchor_pos_error(self.anchor_body_index, height_only=self.height_only)
 
     def evaluate(self, context: TerminationContext) -> torch.Tensor:
         error = self.error(context)
-        return self.policy.evaluate(error, self.threshold)
+        return error > self.threshold
 
 
 class AnchorOrientationFailureRule:
@@ -225,14 +179,13 @@ class AnchorOrientationFailureRule:
         self.id = cfg.id
         self.anchor_body_index = cfg.anchor_body_index
         self.threshold = cfg.threshold
-        self.policy = ThresholdPolicy(cfg.policy)
 
     def error(self, context: TerminationContext) -> torch.Tensor:
         return context.anchor_ori_error(self.anchor_body_index)
 
     def evaluate(self, context: TerminationContext) -> torch.Tensor:
         error = self.error(context)
-        return self.policy.evaluate(error, self.threshold)
+        return error > self.threshold
 
 
 class EndEffectorPositionFailureRule:
@@ -242,14 +195,13 @@ class EndEffectorPositionFailureRule:
         self.height_only = cfg.height_only
         self.reduction = cfg.reduction
         self.threshold = cfg.threshold
-        self.policy = ThresholdPolicy(cfg.policy)
 
     def error(self, context: TerminationContext) -> torch.Tensor:
         return context.end_effector_pos_error(self.end_effector_body_indices, height_only=self.height_only)
 
     def evaluate(self, context: TerminationContext) -> torch.Tensor:
         error = self.error(context)
-        hits = self.policy.evaluate(error, self.threshold)
+        hits = error > self.threshold
         if self.reduction == "any":
             return hits.any(dim=1)
         if self.reduction == "all":
@@ -273,24 +225,16 @@ def default_termination_spec(
     *,
     anchor_height_only: bool = True,
     end_effector_height_only: bool = False,
-    probabilistic_error_termination: bool = False,
-    error_termination_ramp_multiplier: float = 2.0,
-    error_termination_sigmoid_steepness: float = 8.0,
 ) -> TerminationSpec:
-    policy = ThresholdPolicyCfg(
-        probabilistic=probabilistic_error_termination,
-        ramp_multiplier=error_termination_ramp_multiplier,
-        sigmoid_steepness=error_termination_sigmoid_steepness,
-    )
     return TerminationSpec(
         timeout_rules=(
             EpisodeLengthTimeoutRuleCfg(),
             EndOfMotionTimeoutRuleCfg(),
         ),
         failure_rules=(
-            AnchorPositionFailureRuleCfg(height_only=anchor_height_only, policy=policy),
-            AnchorOrientationFailureRuleCfg(policy=policy),
-            EndEffectorPositionFailureRuleCfg(height_only=end_effector_height_only, policy=policy),
+            AnchorPositionFailureRuleCfg(height_only=anchor_height_only),
+            AnchorOrientationFailureRuleCfg(),
+            EndEffectorPositionFailureRuleCfg(height_only=end_effector_height_only),
         ),
     )
 

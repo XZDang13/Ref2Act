@@ -119,22 +119,6 @@ def test_anchor_orientation_failure_rule_uses_body_quat_world() -> None:
     assert torch.equal(time_out, torch.tensor([False]))
 
 
-def test_probabilistic_threshold_policy_probability_is_monotonic_before_ramp_limit() -> None:
-    termination_mod = _load_termination_module()
-    policy = termination_mod.ThresholdPolicy(
-        termination_mod.ThresholdPolicyCfg(probabilistic=True, ramp_multiplier=2.0, sigmoid_steepness=8.0)
-    )
-
-    probabilities = policy._error_to_termination_probability(
-        torch.tensor([0.3, 0.375, 0.45], dtype=torch.float32),
-        0.25,
-    )
-
-    assert torch.all(probabilities > 0.0)
-    assert torch.all(probabilities < 1.0)
-    assert torch.all(probabilities[1:] > probabilities[:-1])
-
-
 def test_end_effector_position_rule_supports_full_3d_and_height_only_modes() -> None:
     termination_mod = _load_termination_module()
     robot = types.SimpleNamespace(
@@ -301,83 +285,3 @@ def test_failure_rules_expose_continuous_errors() -> None:
 
     assert torch.allclose(anchor_error, torch.tensor([0.3]))
     assert torch.allclose(ee_error, torch.tensor([[0.1, 0.4]]))
-
-
-def test_probabilistic_get_dones_samples_each_branch_independently(monkeypatch) -> None:
-    termination_mod = _load_termination_module()
-    policy = termination_mod.ThresholdPolicyCfg(probabilistic=True)
-    termination = termination_mod.Termination(
-        termination_mod.TerminationSpec(
-            timeout_rules=(),
-            failure_rules=(
-                termination_mod.AnchorPositionFailureRuleCfg(
-                    anchor_body_index=0,
-                    threshold=0.25,
-                    height_only=True,
-                    policy=policy,
-                ),
-                termination_mod.AnchorOrientationFailureRuleCfg(
-                    anchor_body_index=0,
-                    threshold=0.75,
-                    policy=policy,
-                ),
-                termination_mod.EndEffectorPositionFailureRuleCfg(
-                    end_effector_body_indices=(1, 2),
-                    threshold=0.25,
-                    height_only=True,
-                    policy=policy,
-                ),
-            ),
-        )
-    )
-
-    robot = types.SimpleNamespace(
-        data=types.SimpleNamespace(
-            body_pos_w=torch.tensor(
-                [[[0.0, 0.0, 0.375], [0.0, 0.0, 0.375], [0.0, 0.0, 0.375]]],
-                dtype=torch.float32,
-            ),
-            body_quat_w=torch.tensor(
-                [[[0.70710677, 0.70710677, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]]],
-                dtype=torch.float32,
-            ),
-            GRAVITY_VEC_W=torch.tensor([[0.0, 0.0, -1.0]], dtype=torch.float32),
-        )
-    )
-    reference_motion = types.SimpleNamespace(
-        body_positions=torch.zeros((1, 3, 3), dtype=torch.float32),
-        body_quaternions=torch.tensor(
-            [[[1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]]],
-            dtype=torch.float32,
-        ),
-        body_pos_relative=torch.zeros((1, 3, 3), dtype=torch.float32),
-    )
-
-    rand_shapes: list[tuple[int, ...]] = []
-    draws = [
-        torch.tensor([0.6], dtype=torch.float32),
-        torch.tensor([0.1], dtype=torch.float32),
-        torch.tensor([[0.6, 0.4]], dtype=torch.float32),
-    ]
-
-    def fake_rand_like(tensor: torch.Tensor) -> torch.Tensor:
-        draw = draws[len(rand_shapes)].to(device=tensor.device, dtype=tensor.dtype)
-        rand_shapes.append(tuple(tensor.shape))
-        assert draw.shape == tensor.shape
-        return draw
-
-    monkeypatch.setattr(termination_mod.torch, "rand_like", fake_rand_like)
-
-    episode_length_buf, max_episode_length, sampler = _make_context_inputs()
-    terminate, time_out = termination.get_dones(
-        episode_length_buf,
-        max_episode_length,
-        robot,
-        reference_motion,
-        sampler,
-    )
-
-    assert torch.equal(terminate, torch.tensor([True]))
-    assert torch.equal(time_out, torch.tensor([False]))
-    assert rand_shapes == [(1,), (1,), (1, 2)]
-    assert torch.equal(termination.terminated_env_ids, torch.tensor([0]))

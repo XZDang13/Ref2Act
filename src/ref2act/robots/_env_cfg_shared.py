@@ -14,7 +14,6 @@ from ref2act.envs.motion_tracking.action import ActionSpec
 from ref2act.envs.motion_tracking.curriculum import TerminationCurriculumCfg
 from ref2act.envs.motion_tracking.observation import default_training_observation_spec
 from ref2act.envs.motion_tracking.randomization import (
-    randomize_action_latency,
     randomize_group_actuator_gains,
     randomize_group_body_masses,
     randomize_rigid_body_collider_offsets_by_body,
@@ -25,7 +24,7 @@ from ref2act.envs.motion_tracking.termination import default_termination_spec
 from ref2act.motion.sampling import SamplerMod, SamplingStrategy, SegmentSource
 from ref2act.robots._articulation_shared import G1_CFG
 
-G1_ACTION_LATENCY_RANGE = (0, 2)
+G1_ACTION_LATENCY_RANGE = (0, 0)
 
 G1_PUSH_VELOCITY_RANGE = {
     "x": (-0.3, 0.3),
@@ -80,7 +79,7 @@ def _rough_terrain_importer_cfg() -> TerrainImporterCfg:
 
 
 def _g1_reward_spec():
-    return default_reward_spec(dt=0.0, anchor_height_only=True)
+    return default_reward_spec(dt=0.0, anchor_height_only=False)
 
 
 @configclass
@@ -211,12 +210,6 @@ class G1DomainRandCfg:
         },
     )
 
-    rand_action_latency = EventTerm(
-        func=randomize_action_latency,
-        mode="reset",
-        params={"latency_range": G1_ACTION_LATENCY_RANGE},
-    )
-
 
 @configclass
 class G1TrainingEventCfg(G1DomainRandCfg):
@@ -248,8 +241,8 @@ class G1MotionTrackingEnvCfg(DirectRLEnvCfg):
     observation = default_training_observation_spec(add_noise=True)
     action = ActionSpec(
         mode="median",
-        buffer_length=G1_ACTION_LATENCY_RANGE[1] + 1,
-        latency_range=G1_ACTION_LATENCY_RANGE,
+        buffer_length=1,
+        latency_range=None,
         noise_scale=0.025,
     )
 
@@ -312,9 +305,6 @@ class G1MotionTrackingEnvCfg(DirectRLEnvCfg):
     termination = default_termination_spec(
         anchor_height_only=True,
         end_effector_height_only=False,
-        probabilistic_error_termination=True,
-        error_termination_ramp_multiplier=2.0,
-        error_termination_sigmoid_steepness=8.0,
     )
     termination_curriculum: TerminationCurriculumCfg | None = None
 
