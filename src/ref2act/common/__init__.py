@@ -9,6 +9,7 @@ from .math import (
     quat_from_euler_xyz,
     quat_inv,
     quat_mul,
+    quaternion_to_rotation_6d,
     quaternion_to_tangent_and_normal,
     relative_transform,
     subtract_frame_transforms,
@@ -31,10 +32,10 @@ __all__ = [
     "quat_from_euler_xyz",
     "quat_inv",
     "quat_mul",
+    "quaternion_to_rotation_6d",
     "quaternion_to_tangent_and_normal",
     "relative_transform",
     "slerp",
     "subtract_frame_transforms",
     "yaw_quat",
 ]
-

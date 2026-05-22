@@ -121,6 +121,17 @@ def quaternion_to_tangent_and_normal(q: torch.Tensor) -> torch.Tensor:
     return torch.cat([tangent, normal], dim=tangent.ndim - 1)
 
 
+def quaternion_to_rotation_6d(q: torch.Tensor) -> torch.Tensor:
+    w, x, y, z = q.unbind(dim=-1)
+    rot_00 = 1.0 - 2.0 * (y * y + z * z)
+    rot_01 = 2.0 * (x * y - z * w)
+    rot_10 = 2.0 * (x * y + z * w)
+    rot_11 = 1.0 - 2.0 * (x * x + z * z)
+    rot_20 = 2.0 * (x * z - y * w)
+    rot_21 = 2.0 * (y * z + x * w)
+    return torch.stack((rot_00, rot_01, rot_10, rot_11, rot_20, rot_21), dim=-1)
+
+
 def quat_diff(q1: torch.Tensor, q2: torch.Tensor) -> torch.Tensor:
     return quat_mul(q1, quat_conjugate(q2))
 

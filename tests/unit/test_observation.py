@@ -40,9 +40,14 @@ def _quaternion_to_tangent_and_normal(q: torch.Tensor) -> torch.Tensor:
 
 
 def _load_modules():
-    import isaaclab
-
     sentinel = object()
+    previous_root = sys.modules.get("isaaclab", sentinel)
+    if previous_root is sentinel:
+        isaaclab = types.ModuleType("isaaclab")
+        sys.modules["isaaclab"] = isaaclab
+    else:
+        import isaaclab
+
     previous_modules = {
         "isaaclab.assets": sys.modules.get("isaaclab.assets"),
         "isaaclab.scene": sys.modules.get("isaaclab.scene"),
@@ -90,6 +95,10 @@ def _load_modules():
                 sys.modules.pop(module_name, None)
             else:
                 sys.modules[module_name] = previous_module
+        if previous_root is sentinel:
+            sys.modules.pop("isaaclab", None)
+        else:
+            sys.modules["isaaclab"] = previous_root
         for attr_name, previous_attr in previous_attrs.items():
             if previous_attr is sentinel:
                 if hasattr(isaaclab, attr_name):
@@ -184,28 +193,43 @@ def test_default_observation_keeps_privileged_observation_clean() -> None:
 
     robot_obs = obs["robot"]
     privilege_obs = obs["privilege"]
-    assert not torch.allclose(robot_obs[0, 3:6], anchor_ang_vel[0])
-    assert not torch.allclose(robot_obs[0, 6:8], joint_pos[0])
-    assert not torch.allclose(robot_obs[0, 8:10], joint_vel[0])
+    identity_6d = torch.tensor([1.0, 0.0, 0.0, 1.0, 0.0, 0.0], dtype=torch.float32)
+    assert not torch.allclose(robot_obs[0, 0:6], identity_6d)
+    assert not torch.allclose(robot_obs[0, 6:9], anchor_ang_vel[0])
+    assert not torch.allclose(robot_obs[0, 9:11], joint_pos[0])
+    assert not torch.allclose(robot_obs[0, 11:13], joint_vel[0])
 
     num_joints = joint_pos.shape[1]
     num_keys = 2
-    target_anchor_lin_start = 2 * num_joints
-    target_anchor_ang_start = target_anchor_lin_start + 3
-    anchor_lin_start = target_anchor_ang_start + 3 + 3 + 6 + num_keys * 3 + num_keys * 6
+    motion_anchor_pos_start = 2 * num_joints
+    motion_anchor_ori_start = motion_anchor_pos_start + 3
+    body_pos_start = motion_anchor_ori_start + 6
+    body_ori_start = body_pos_start + num_keys * 3
+    anchor_lin_start = body_ori_start + num_keys * 6
     anchor_ang_start = anchor_lin_start + 3
     joint_pos_start = anchor_ang_start + 3
     joint_vel_start = joint_pos_start + num_joints
     last_action_start = joint_vel_start + num_joints
 
+    assert torch.allclose(privilege_obs[0, :num_joints], torch.zeros(num_joints))
+    assert torch.allclose(privilege_obs[0, num_joints:2 * num_joints], torch.zeros(num_joints))
     assert torch.allclose(
-        privilege_obs[0, target_anchor_lin_start:target_anchor_lin_start + 3],
-        target_anchor_lin_vel[0],
+        privilege_obs[0, motion_anchor_pos_start:motion_anchor_pos_start + 3],
+        torch.zeros(3),
     )
     assert torch.allclose(
-        privilege_obs[0, target_anchor_ang_start:target_anchor_ang_start + 3],
-        target_anchor_ang_vel[0],
+        privilege_obs[0, motion_anchor_ori_start:motion_anchor_ori_start + 6],
+        identity_6d,
     )
+    assert torch.allclose(
+        privilege_obs[0, body_pos_start:body_pos_start + num_keys * 3],
+        torch.tensor([0.0, 0.0, 0.0, 0.2, 0.3, 0.4], dtype=torch.float32),
+    )
+    assert torch.allclose(
+        privilege_obs[0, body_ori_start:body_ori_start + num_keys * 6],
+        identity_6d.repeat(num_keys),
+    )
+    assert torch.allclose(privilege_obs[0, anchor_lin_start:anchor_lin_start + 3], robot.data.body_lin_vel_w[0, 0])
     assert torch.allclose(privilege_obs[0, anchor_ang_start:anchor_ang_start + 3], anchor_ang_vel[0])
     assert torch.allclose(privilege_obs[0, joint_pos_start:joint_pos_start + num_joints], joint_pos[0])
     assert torch.allclose(privilege_obs[0, joint_vel_start:joint_vel_start + num_joints], joint_vel[0])

@@ -6,6 +6,7 @@ import types
 import torch
 
 from ref2act.common.utils import slerp
+from ref2act.common.math import quaternion_to_rotation_6d
 
 
 def _quat_mul(q1: torch.Tensor, q2: torch.Tensor) -> torch.Tensor:
@@ -135,6 +136,22 @@ def test_slerp_is_stable_for_identical_quaternions() -> None:
 
     assert torch.isfinite(result).all()
     assert torch.allclose(result, q0)
+
+
+def test_quaternion_to_rotation_6d_uses_first_two_rotation_columns() -> None:
+    quat = _quat_from_euler_xyz(
+        torch.tensor([0.0], dtype=torch.float32),
+        torch.tensor([0.0], dtype=torch.float32),
+        torch.tensor([math.pi / 2.0], dtype=torch.float32),
+    )
+
+    result = quaternion_to_rotation_6d(quat)
+
+    assert torch.allclose(
+        result,
+        torch.tensor([[0.0, -1.0, 1.0, 0.0, 0.0, 0.0]], dtype=torch.float32),
+        atol=1.0e-6,
+    )
 
 
 def test_get_relative_reference_motion_pose_uses_reference_anchor_orientation() -> None:

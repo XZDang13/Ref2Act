@@ -7,7 +7,11 @@ from isaaclab.assets import Articulation
 from isaaclab.scene import InteractiveScene
 from isaaclab.utils.math import quat_apply_inverse
 
-from ref2act.common.math import relative_transform, quaternion_to_tangent_and_normal
+from ref2act.common.math import (
+    quaternion_to_rotation_6d,
+    quaternion_to_tangent_and_normal,
+    relative_transform,
+)
 from ref2act.common.observation_spec import (
     ObservationComposer,
     ObservationContext,
@@ -26,17 +30,21 @@ def _anchor_ang_vel_b(anchor_quat_w: torch.Tensor, anchor_ang_vel_w: torch.Tenso
     return quat_apply_inverse(anchor_quat_w, anchor_ang_vel_w)
 
 
+def _anchor_lin_vel_b(anchor_quat_w: torch.Tensor, anchor_lin_vel_w: torch.Tensor) -> torch.Tensor:
+    return quat_apply_inverse(anchor_quat_w, anchor_lin_vel_w)
+
+
 def default_training_observation_spec(add_noise: bool = True) -> ObservationSpec:
     robot_terms = (
         ObservationTermSpec(
-            id="projected_gravity",
-            type="projected_gravity",
+            id="anchor_ori_6d",
+            type="anchor_ori_6d",
             noise=ObservationNoiseSpec(-0.05, 0.05) if add_noise else None,
         ),
         ObservationTermSpec(
             id="anchor_ang_vel_b",
             type="anchor_ang_vel_b",
-            noise=ObservationNoiseSpec(-0.3, 0.3) if add_noise else None,
+            noise=ObservationNoiseSpec(-0.2, 0.2) if add_noise else None,
         ),
         ObservationTermSpec(
             id="joint_pos",
@@ -55,9 +63,13 @@ def default_training_observation_spec(add_noise: bool = True) -> ObservationSpec
             ObservationGroupSpec(
                 name="motion",
                 terms=(
-                    ObservationTermSpec(id="target_projected_gravity", type="target_projected_gravity"),
                     ObservationTermSpec(id="target_joint_pos", type="target_joint_pos"),
-                    ObservationTermSpec(id="target_joint_vel", type="target_joint_vel"),
+                    #ObservationTermSpec(id="target_joint_vel", type="target_joint_vel"),
+                    ObservationTermSpec(
+                        id="motion_ori_b",
+                        type="motion_ori_b",
+                        noise=ObservationNoiseSpec(-0.05, 0.05) if add_noise else None,
+                    ),
                 ),
             ),
             ObservationGroupSpec(name="robot", terms=robot_terms),
@@ -66,22 +78,14 @@ def default_training_observation_spec(add_noise: bool = True) -> ObservationSpec
                 terms=(
                     ObservationTermSpec(id="priv_target_joint_pos", type="target_joint_pos"),
                     ObservationTermSpec(id="priv_target_joint_vel", type="target_joint_vel"),
-                    ObservationTermSpec(id="target_anchor_lin_vel", type="target_anchor_lin_vel"),
-                    ObservationTermSpec(id="target_priv_anchor_ang_vel_b", type="target_anchor_ang_vel_b"),
-                    ObservationTermSpec(id="relative_anchor_pos", type="relative_anchor_pos"),
-                    ObservationTermSpec(
-                        id="relative_anchor_tangent_and_normal",
-                        type="relative_anchor_tangent_and_normal",
-                    ),
-                    ObservationTermSpec(id="relative_key_pos", type="relative_key_pos"),
-                    ObservationTermSpec(
-                        id="relative_key_tangent_and_normal",
-                        type="relative_key_tangent_and_normal",
-                    ),
-                    ObservationTermSpec(id="anchor_lin_vel", type="anchor_lin_vel"),
-                    ObservationTermSpec(id="priv_anchor_ang_vel_b", type="anchor_ang_vel_b"),
                     ObservationTermSpec(id="priv_joint_pos", type="joint_pos"),
                     ObservationTermSpec(id="priv_joint_vel", type="joint_vel"),
+                    ObservationTermSpec(id="priv_motion_anchor_pos_b", type="motion_anchor_pos_b"),
+                    ObservationTermSpec(id="priv_motion_anchor_ori_b", type="motion_anchor_ori_b"),
+                    ObservationTermSpec(id="body_pos", type="body_pos"),
+                    ObservationTermSpec(id="body_ori", type="body_ori"),
+                    ObservationTermSpec(id="priv_anchor_lin_vel_b", type="anchor_lin_vel_b"),
+                    ObservationTermSpec(id="priv_anchor_ang_vel_b", type="anchor_ang_vel_b"),
                     ObservationTermSpec(id="priv_previous_action", type="previous_action"),
                 ),
             ),
@@ -196,37 +200,49 @@ class Observation:
 
         target_projected_gravity_b = quat_apply_inverse(reference_state.anchor_quat, gravity_vector)
         robot_projected_gravity_b = quat_apply_inverse(robot_state.anchor_quat, gravity_vector)
+        target_anchor_ori_6d = quaternion_to_rotation_6d(reference_state.anchor_quat)
+        robot_anchor_ori_6d = quaternion_to_rotation_6d(robot_state.anchor_quat)
+        robot_anchor_lin_vel_b = _anchor_lin_vel_b(robot_state.anchor_quat, robot_state.anchor_lin_vel)
         target_anchor_ang_vel_b = _anchor_ang_vel_b(reference_state.anchor_quat, reference_state.anchor_ang_vel)
         robot_anchor_ang_vel_b = _anchor_ang_vel_b(robot_state.anchor_quat, robot_state.anchor_ang_vel)
 
-        relative_anchor_pos, relative_anchor_quat = relative_transform(
+        motion_anchor_pos_b, motion_quat_b = relative_transform(
             robot_state.anchor_pos,
             robot_state.anchor_quat,
             reference_state.anchor_pos,
             reference_state.anchor_quat,
         )
-        relative_key_pos, relative_key_quat = relative_transform(
+        body_pos_b, body_quat_b = relative_transform(
             robot_state.anchor_pos,
             robot_state.anchor_quat,
             robot_state.key_pos,
             robot_state.key_quat,
         )
+        motion_ori_b = quaternion_to_rotation_6d(motion_quat_b)
 
         return ObservationContext(
             target_projected_gravity=target_projected_gravity_b,
+            target_anchor_ori_6d=target_anchor_ori_6d,
             target_joint_pos=reference_state.joint_pos,
             target_joint_vel=reference_state.joint_vel,
             target_anchor_lin_vel=reference_state.anchor_lin_vel,
             target_anchor_ang_vel_b=target_anchor_ang_vel_b,
             projected_gravity=robot_projected_gravity_b,
+            anchor_ori_6d=robot_anchor_ori_6d,
+            anchor_lin_vel_b=robot_anchor_lin_vel_b,
             anchor_ang_vel_b=robot_anchor_ang_vel_b,
             joint_pos=robot_state.joint_pos,
             joint_vel=robot_state.joint_vel,
             previous_action=last_applied_actions.clone(),
-            relative_anchor_pos=relative_anchor_pos,
-            relative_anchor_tangent_and_normal=quaternion_to_tangent_and_normal(relative_anchor_quat),
-            relative_key_pos=relative_key_pos.flatten(1),
-            relative_key_tangent_and_normal=quaternion_to_tangent_and_normal(relative_key_quat).flatten(1),
+            motion_anchor_pos_b=motion_anchor_pos_b,
+            motion_ori_b=motion_ori_b,
+            motion_anchor_ori_b=motion_ori_b,
+            relative_anchor_pos=motion_anchor_pos_b,
+            relative_anchor_tangent_and_normal=quaternion_to_tangent_and_normal(motion_quat_b),
+            relative_key_pos=body_pos_b.flatten(1),
+            relative_key_tangent_and_normal=quaternion_to_tangent_and_normal(body_quat_b).flatten(1),
+            body_pos_b=body_pos_b.flatten(1),
+            body_ori_b=quaternion_to_rotation_6d(body_quat_b).flatten(1),
             anchor_lin_vel=robot_state.anchor_lin_vel,
         )
 

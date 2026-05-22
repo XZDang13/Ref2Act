@@ -104,19 +104,27 @@ class ObservationLayout:
 @dataclass(frozen=True)
 class ObservationContext:
     target_projected_gravity: torch.Tensor | None = None
+    target_anchor_ori_6d: torch.Tensor | None = None
     target_joint_pos: torch.Tensor | None = None
     target_joint_vel: torch.Tensor | None = None
     target_anchor_lin_vel: torch.Tensor | None = None
     target_anchor_ang_vel_b: torch.Tensor | None = None
     projected_gravity: torch.Tensor | None = None
+    anchor_ori_6d: torch.Tensor | None = None
+    anchor_lin_vel_b: torch.Tensor | None = None
     anchor_ang_vel_b: torch.Tensor | None = None
     joint_pos: torch.Tensor | None = None
     joint_vel: torch.Tensor | None = None
     previous_action: torch.Tensor | None = None
+    motion_anchor_pos_b: torch.Tensor | None = None
+    motion_ori_b: torch.Tensor | None = None
+    motion_anchor_ori_b: torch.Tensor | None = None
     relative_anchor_pos: torch.Tensor | None = None
     relative_anchor_tangent_and_normal: torch.Tensor | None = None
     relative_key_pos: torch.Tensor | None = None
     relative_key_tangent_and_normal: torch.Tensor | None = None
+    body_pos_b: torch.Tensor | None = None
+    body_ori_b: torch.Tensor | None = None
     anchor_lin_vel: torch.Tensor | None = None
     extras: Mapping[str, torch.Tensor] = field(default_factory=dict)
 
@@ -155,6 +163,11 @@ DEFAULT_OBSERVATION_TERM_REGISTRY: dict[str, ObservationTerm] = {
         "target_projected_gravity",
         lambda layout: 3,
     ),
+    "target_anchor_ori_6d": ContextFieldObservationTerm(
+        "target_anchor_ori_6d",
+        "target_anchor_ori_6d",
+        lambda layout: 6,
+    ),
     "target_joint_pos": ContextFieldObservationTerm(
         "target_joint_pos",
         "target_joint_pos",
@@ -185,6 +198,16 @@ DEFAULT_OBSERVATION_TERM_REGISTRY: dict[str, ObservationTerm] = {
         "projected_gravity",
         lambda layout: 3,
     ),
+    "anchor_ori_6d": ContextFieldObservationTerm(
+        "anchor_ori_6d",
+        "anchor_ori_6d",
+        lambda layout: 6,
+    ),
+    "anchor_lin_vel_b": ContextFieldObservationTerm(
+        "anchor_lin_vel_b",
+        "anchor_lin_vel_b",
+        lambda layout: 3,
+    ),
     "anchor_ang_vel_b": ContextFieldObservationTerm(
         "anchor_ang_vel_b",
         "anchor_ang_vel_b",
@@ -205,6 +228,21 @@ DEFAULT_OBSERVATION_TERM_REGISTRY: dict[str, ObservationTerm] = {
         "previous_action",
         lambda layout: layout.action_dim,
     ),
+    "motion_anchor_pos_b": ContextFieldObservationTerm(
+        "motion_anchor_pos_b",
+        "motion_anchor_pos_b",
+        lambda layout: 3,
+    ),
+    "motion_ori_b": ContextFieldObservationTerm(
+        "motion_ori_b",
+        "motion_ori_b",
+        lambda layout: 6,
+    ),
+    "motion_anchor_ori_b": ContextFieldObservationTerm(
+        "motion_anchor_ori_b",
+        "motion_anchor_ori_b",
+        lambda layout: 6,
+    ),
     "relative_anchor_pos": ContextFieldObservationTerm(
         "relative_anchor_pos",
         "relative_anchor_pos",
@@ -223,6 +261,26 @@ DEFAULT_OBSERVATION_TERM_REGISTRY: dict[str, ObservationTerm] = {
     "relative_key_tangent_and_normal": ContextFieldObservationTerm(
         "relative_key_tangent_and_normal",
         "relative_key_tangent_and_normal",
+        lambda layout: layout.key_body_count * 6,
+    ),
+    "body_pos": ContextFieldObservationTerm(
+        "body_pos",
+        "body_pos_b",
+        lambda layout: layout.key_body_count * 3,
+    ),
+    "body_pos_b": ContextFieldObservationTerm(
+        "body_pos_b",
+        "body_pos_b",
+        lambda layout: layout.key_body_count * 3,
+    ),
+    "body_ori": ContextFieldObservationTerm(
+        "body_ori",
+        "body_ori_b",
+        lambda layout: layout.key_body_count * 6,
+    ),
+    "body_ori_b": ContextFieldObservationTerm(
+        "body_ori_b",
+        "body_ori_b",
         lambda layout: layout.key_body_count * 6,
     ),
     "anchor_lin_vel": ContextFieldObservationTerm(
