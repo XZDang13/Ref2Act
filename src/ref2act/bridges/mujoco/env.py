@@ -3,9 +3,9 @@ import numpy as np
 import torch
 
 import mujoco
-import mujoco_viewer.mujoco_viewer as mjv
 
 from ref2act.assets import scene_asset_path
+from ref2act.common.math import quat_apply_inverse
 from ref2act.bridges.mujoco.action import (
     IsaacLabMujocoAction,
     MujocoActionBuilder,
@@ -18,44 +18,36 @@ from ref2act.bridges.mujoco.observation import (
     MujocoObservationBuilder,
     MujocoObservationContext,
 )
+from ref2act.envs.motion_tracking.observation import build_observation_context
+from ref2act.envs.motion_tracking.types import MotionState
 
 mujoco_env_xml = str(scene_asset_path("g1", "scene.xml"))
 
 
-def quat_rotate_inverse(q: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
-    """Rotate a vector by the inverse of a quaternion.
+def wxyz_to_xyzw_np(q: np.ndarray) -> np.ndarray:
+    return np.asarray(q)[[1, 2, 3, 0]]
 
-    Args:
-        q (torch.Tensor): Quaternion [w, x, y, z]
-        v (torch.Tensor): Vector to rotate
 
-    Returns:
-        torch.Tensor: Rotated vector
-    """
-    q_w = q[0]
-    q_vec = q[1:4]
-    a = v * (2.0 * q_w ** 2 - 1.0)
-    b = torch.cross(q_vec, v, dim=-1) * q_w * 2.0
-    c = q_vec * (torch.dot(q_vec, v)) * 2.0
-    return a - b + c
+def xyzw_to_wxyz_np(q: np.ndarray) -> np.ndarray:
+    return np.asarray(q)[[3, 0, 1, 2]]
 
 
 def quat_mul_np(q1: np.ndarray, q2: np.ndarray) -> np.ndarray:
-    w1, x1, y1, z1 = q1
-    w2, x2, y2, z2 = q2
+    x1, y1, z1, w1 = q1
+    x2, y2, z2, w2 = q2
     return np.array(
         [
-            w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
             w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
             w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
             w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
+            w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
         ],
         dtype=np.float64,
     )
 
 
 def quat_conjugate_np(q: np.ndarray) -> np.ndarray:
-    return np.array([q[0], -q[1], -q[2], -q[3]], dtype=np.float64)
+    return np.array([-q[0], -q[1], -q[2], q[3]], dtype=np.float64)
 
 
 def quat_inv_np(q: np.ndarray) -> np.ndarray:
@@ -63,9 +55,9 @@ def quat_inv_np(q: np.ndarray) -> np.ndarray:
 
 
 def quat_apply_np(q: np.ndarray, v: np.ndarray) -> np.ndarray:
-    q_xyz = q[1:]
+    q_xyz = q[:3]
     t = 2.0 * np.cross(q_xyz, v)
-    return v + q[0] * t + np.cross(q_xyz, t)
+    return v + q[3] * t + np.cross(q_xyz, t)
 
 
 def normalize_quat_np(q: np.ndarray) -> np.ndarray:
@@ -100,6 +92,8 @@ class MujocoEnv:
         self.mj_viewer = None
         self.render = render
         if self.render:
+            import mujoco_viewer.mujoco_viewer as mjv
+
             self.mj_viewer = mjv.MujocoViewer(
                 self.mj_model,
                 self.mj_data,
@@ -217,11 +211,11 @@ class MujocoEnv:
     def _get_body_world_pose(self, body_id: int) -> tuple[np.ndarray, np.ndarray]:
         return (
             np.asarray(self.mj_data.xpos[body_id], dtype=np.float64).copy(),
-            np.asarray(self.mj_data.xquat[body_id], dtype=np.float64).copy(),
+            wxyz_to_xyzw_np(np.asarray(self.mj_data.xquat[body_id], dtype=np.float64)).copy(),
         )
 
     def _get_body_world_quat(self, body_id: int) -> np.ndarray:
-        return np.asarray(self.mj_data.xquat[body_id], dtype=np.float64).copy()
+        return wxyz_to_xyzw_np(np.asarray(self.mj_data.xquat[body_id], dtype=np.float64)).copy()
 
     def _get_body_world_twist(self, body_id: int) -> tuple[np.ndarray, np.ndarray]:
         velocity = np.zeros(6, dtype=np.float64)
@@ -234,7 +228,7 @@ class MujocoEnv:
         anchor_quat_w = torch.from_numpy(
             self._get_body_world_quat(self.anchor_body_id).astype(np.float32, copy=False)
         ).float()
-        projected_gravity = quat_rotate_inverse(anchor_quat_w, self.gravity_vector).float()
+        projected_gravity = quat_apply_inverse(anchor_quat_w, self.gravity_vector).float()
 
         return projected_gravity
 
@@ -243,7 +237,7 @@ class MujocoEnv:
             self._get_body_world_quat(self.anchor_body_id).astype(np.float32, copy=False)
         ).float()
         anchor_ang_vel_w = torch.from_numpy(self._get_body_world_twist(self.anchor_body_id)[0]).float()
-        return quat_rotate_inverse(anchor_quat_w, anchor_ang_vel_w).float()
+        return quat_apply_inverse(anchor_quat_w, anchor_ang_vel_w).float()
 
     def get_joint_pos(self):
         joint_pos = torch.from_numpy(self.mj_data.qpos[7:]).float()[self.mujoco2isaac]
@@ -265,9 +259,9 @@ class MujocoEnv:
         body_angular_velocities = reference_motion["body_angular_velocities"].squeeze(0)
         anchor_quat = body_quat[self.anchor_body_index]
         anchor_lin_vel = body_linear_velocities[self.anchor_body_index]
-        anchor_ang_vel_b = quat_rotate_inverse(anchor_quat, body_angular_velocities[self.anchor_body_index]).float()
+        anchor_ang_vel_b = quat_apply_inverse(anchor_quat, body_angular_velocities[self.anchor_body_index]).float()
 
-        projected_gravity = quat_rotate_inverse(anchor_quat, self.gravity_vector).float()
+        projected_gravity = quat_apply_inverse(anchor_quat, self.gravity_vector).float()
 
         return joint_pos, joint_vel, projected_gravity, anchor_lin_vel.float(), anchor_ang_vel_b
 
@@ -294,25 +288,40 @@ class MujocoEnv:
             self.times = torch.zeros(1)
             self.previous_action[:] = 0.0
 
-        (
-            target_joint_pos,
-            target_joint_vel,
-            target_projected_gravity,
-            target_anchor_lin_vel,
-            target_anchor_ang_vel_b,
-        ) = self.get_motion_command(self.times)
-
-        return MujocoObservationContext(
-            target_projected_gravity=target_projected_gravity,
-            target_joint_pos=target_joint_pos,
-            target_joint_vel=target_joint_vel,
-            target_anchor_lin_vel=target_anchor_lin_vel,
-            target_anchor_ang_vel_b=target_anchor_ang_vel_b,
-            projected_gravity=self.get_projected_gravity(),
-            anchor_ang_vel_b=self.get_anchor_ang_vel_b(),
-            joint_pos=self.get_joint_pos(),
-            joint_vel=self.get_joint_vel(),
-            previous_action=self.previous_action.clone(),
+        reference = self.motion_lib.sample_motion(motion_ids=self.motion_id, times=self.times)
+        anchor_pos_np, anchor_quat_np = self._get_body_world_pose(self.anchor_body_id)
+        anchor_ang_vel_np, anchor_lin_vel_np = self._get_body_world_twist(self.anchor_body_id)
+        empty_pos = torch.empty((1, 0, 3), dtype=torch.float32)
+        empty_quat = torch.empty((1, 0, 4), dtype=torch.float32)
+        robot_state = MotionState(
+            joint_pos=self.get_joint_pos().unsqueeze(0),
+            joint_vel=self.get_joint_vel().unsqueeze(0),
+            anchor_pos=torch.from_numpy(anchor_pos_np.astype(np.float32)).unsqueeze(0),
+            anchor_quat=torch.from_numpy(anchor_quat_np.astype(np.float32)).unsqueeze(0),
+            anchor_lin_vel=torch.from_numpy(anchor_lin_vel_np).unsqueeze(0),
+            anchor_ang_vel=torch.from_numpy(anchor_ang_vel_np).unsqueeze(0),
+            key_pos=empty_pos,
+            key_quat=empty_quat,
+            key_lin_vel=empty_pos,
+            key_ang_vel=empty_pos,
+        )
+        reference_state = MotionState(
+            joint_pos=reference["joint_pos"],
+            joint_vel=reference["joint_vel"],
+            anchor_pos=reference["body_positions"][:, self.anchor_body_index],
+            anchor_quat=reference["body_quaternions"][:, self.anchor_body_index],
+            anchor_lin_vel=reference["body_linear_velocities"][:, self.anchor_body_index],
+            anchor_ang_vel=reference["body_angular_velocities"][:, self.anchor_body_index],
+            key_pos=empty_pos,
+            key_quat=empty_quat,
+            key_lin_vel=empty_pos,
+            key_ang_vel=empty_pos,
+        )
+        return build_observation_context(
+            robot_state,
+            reference_state,
+            self.gravity_vector.unsqueeze(0),
+            self.previous_action.unsqueeze(0),
         )
 
     def get_obs_dict(self, advance_time: bool = True) -> dict[str, torch.Tensor]:
@@ -348,7 +357,7 @@ class MujocoEnv:
         solved_free_pos = root_pos - quat_apply_np(solved_free_quat, free_to_root_pos)
 
         self.mj_data.qpos[:3] = solved_free_pos
-        self.mj_data.qpos[3:7] = solved_free_quat
+        self.mj_data.qpos[3:7] = xyzw_to_wxyz_np(solved_free_quat)
         self.mj_data.qvel[:6] = 0.0
         self.mj_data.qvel[6:] = joint_velocities
         mujoco.mj_forward(self.mj_model, self.mj_data)
@@ -367,7 +376,9 @@ class MujocoEnv:
             dtype=np.float64,
         ) - np.cross(solved_free_ang_vel, root_offset_world)
 
-        free_joint_pose = np.concatenate([solved_free_pos, solved_free_quat]).astype(np.float32, copy=False)
+        free_joint_pose = np.concatenate([solved_free_pos, xyzw_to_wxyz_np(solved_free_quat)]).astype(
+            np.float32, copy=False
+        )
         free_joint_velocity = np.concatenate([solved_free_lin_vel, solved_free_ang_vel]).astype(
             np.float32,
             copy=False,

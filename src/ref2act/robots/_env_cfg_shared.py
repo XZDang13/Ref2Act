@@ -5,7 +5,7 @@ from isaaclab.envs import DirectRLEnvCfg
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.sim import SimulationCfg
-from isaaclab.utils import configclass
+from isaaclab.utils.configclass import configclass
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import SceneEntityCfg
@@ -32,7 +32,9 @@ G1_PUSH_VELOCITY_RANGE = {
     "yaw": (-0.4, 0.4),
 }
 
-G1_CONTACT_BODIES = "left_ankle_roll_link|right_ankle_roll_link|left_rubber_hand|right_rubber_hand"
+G1_CONTACT_BODIES = (
+    "left_ankle_roll_link|right_ankle_roll_link|left_rubber_hand_link|right_rubber_hand_link"
+)
 
 G1_LEG_JOINTS = ".*_hip_.*_joint|.*_knee_joint|.*_ankle_.*_joint"
 G1_TORSO_JOINTS = "waist_yaw_joint"
@@ -68,7 +70,7 @@ def _rough_terrain_importer_cfg() -> TerrainImporterCfg:
         terrain_generator=terrain_generator_cfg,
         max_init_terrain_level=terrain_generator_cfg.num_rows - 1,
         collision_group=-1,
-        physics_material=sim_utils.RigidBodyMaterialCfg(
+        physics_material=sim_utils.PhysxRigidBodyMaterialCfg(
             friction_combine_mode="multiply",
             restitution_combine_mode="multiply",
             static_friction=1.0,
@@ -274,8 +276,8 @@ class G1MotionTrackingEnvCfg(DirectRLEnvCfg):
         "right_elbow_link",
         "left_hip_roll_link",
         "right_hip_roll_link",
-        "left_rubber_hand",
-        "right_rubber_hand",
+        "left_rubber_hand_link",
+        "right_rubber_hand_link",
         "left_knee_link",
         "right_knee_link",
         "left_ankle_roll_link",
@@ -285,15 +287,13 @@ class G1MotionTrackingEnvCfg(DirectRLEnvCfg):
     collision_track_body_names = [
         "left_ankle_roll_link",
         "right_ankle_roll_link",
-        "left_rubber_hand",
-        "right_rubber_hand",
     ]
 
     end_effector_body_names = [
         "left_ankle_roll_link",
         "right_ankle_roll_link",
-        "left_rubber_hand",
-        "right_rubber_hand",
+        "left_rubber_hand_link",
+        "right_rubber_hand_link",
     ]
 
     foot_body_names = [
@@ -315,7 +315,7 @@ class G1MotionTrackingEnvCfg(DirectRLEnvCfg):
     sim: SimulationCfg = SimulationCfg(
         dt=1 / 200,
         render_interval=decimation,
-        physics_material=sim_utils.RigidBodyMaterialCfg(
+        physics_material=sim_utils.PhysxRigidBodyMaterialCfg(
             friction_combine_mode="multiply",
             restitution_combine_mode="multiply",
             static_friction=1.0,
@@ -328,7 +328,7 @@ class G1MotionTrackingEnvCfg(DirectRLEnvCfg):
         prim_path="/World/ground",
         terrain_type="plane",
         collision_group=-1,
-        physics_material=sim_utils.RigidBodyMaterialCfg(
+        physics_material=sim_utils.PhysxRigidBodyMaterialCfg(
             friction_combine_mode="multiply",
             restitution_combine_mode="multiply",
             static_friction=1.0,
@@ -346,7 +346,11 @@ class G1MotionTrackingEnvCfg(DirectRLEnvCfg):
     robot: ArticulationCfg = G1_CFG.replace(prim_path="/World/envs/env_.*/Robot")
 
     contact_sensor = ContactSensorCfg(
-        prim_path="/World/envs/env_.*/Robot/.*", history_length=3, track_air_time=True, force_threshold=10.0,
+        class_type="ref2act.nested_contact_sensor:NestedContactSensor",
+        prim_path="/World/envs/env_.*/Robot/.*_ankle_roll_link",
+        history_length=3,
+        track_air_time=True,
+        force_threshold=10.0,
     )
 
 

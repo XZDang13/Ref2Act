@@ -1,6 +1,7 @@
 from collections.abc import Sequence
 import gc
 import hashlib
+import json
 from math import ceil
 import os
 from os import PathLike
@@ -16,15 +17,12 @@ from dataclasses import dataclass, field
 
 from ref2act.common.utils import compute_frame_blend_from_fps, interpolate, slerp
 
-from .segments import validate_segment_arrays
-
-
 MotionFileInput = str | PathLike[str] | Sequence[str | PathLike[str]]
 _MOTION_LOAD_PROGRESS_STEPS = 10
 _MOTION_LOAD_PROGRESS_FILES = int(os.getenv("REF2ACT_MOTION_LOAD_PROGRESS_FILES", "100"))
 _MOTION_LOAD_PROGRESS_SECONDS = float(os.getenv("REF2ACT_MOTION_LOAD_PROGRESS_SECONDS", "5.0"))
 _MOTION_SLOW_CLIP_SECONDS = float(os.getenv("REF2ACT_MOTION_SLOW_CLIP_SECONDS", "2.0"))
-_MOTION_PACK_CACHE_VERSION = 2
+_MOTION_PACK_CACHE_VERSION = 3
 
 
 def _progress_interval(total: int) -> int:
@@ -94,9 +92,6 @@ class MotionClip:
     body_quaternions: torch.Tensor | None
     body_linear_velocities: torch.Tensor | None
     body_angular_velocities: torch.Tensor | None
-    segment_start_times: torch.Tensor | None = None
-    segment_end_times: torch.Tensor | None = None
-    segment_types: torch.Tensor | None = None
     anchor_frame_indices: torch.Tensor | None = None
     anchor_times: torch.Tensor | None = None
     joint_names: list[str] = field(default_factory=list)
@@ -114,16 +109,6 @@ class MotionClip:
     def clear_frame_tensors(self) -> None:
         for field_name in self._FRAME_TENSOR_FIELDS:
             object.__setattr__(self, field_name, None)
-
-    @property
-    def has_segments(self) -> bool:
-        return self.segment_start_times is not None
-
-    @property
-    def num_segments(self) -> int:
-        if self.segment_start_times is None:
-            return 0
-        return int(self.segment_start_times.shape[0])
 
     @property
     def has_anchor_segments(self) -> bool:
@@ -311,15 +296,6 @@ class MotionLib:
         self.motion_fps = torch.tensor(
             [clip.fps for clip in self.clips], dtype=torch.float32, device=self.device
         )
-        self.motion_has_segments = torch.tensor(
-            [clip.has_segments for clip in self.clips], dtype=torch.bool, device=self.device
-        )
-        self.motion_num_segments = torch.tensor(
-            [clip.num_segments for clip in self.clips], dtype=torch.long, device=self.device
-        )
-        self.motion_segment_start_times = [clip.segment_start_times for clip in self.clips]
-        self.motion_segment_end_times = [clip.segment_end_times for clip in self.clips]
-        self.motion_segment_types = [clip.segment_types for clip in self.clips]
         self.motion_has_anchor_segments = torch.tensor(
             [clip.has_anchor_segments for clip in self.clips], dtype=torch.bool, device=self.device
         )
@@ -328,7 +304,6 @@ class MotionLib:
         )
         self.motion_anchor_frame_indices = [clip.anchor_frame_indices for clip in self.clips]
         self.motion_anchor_times = [clip.anchor_times for clip in self.clips]
-        self.all_clips_have_segments = bool(torch.all(self.motion_has_segments).item())
         self.all_clips_have_anchor_segments = bool(torch.all(self.motion_has_anchor_segments).item())
 
     @staticmethod
@@ -348,6 +323,12 @@ class MotionLib:
             path = Path(motion_file).expanduser().resolve()
             stat = path.stat()
             stats.append((str(path), int(stat.st_size), int(stat.st_mtime_ns)))
+            anchor_path = path.with_name("reset_anchors.json")
+            if anchor_path.exists():
+                anchor_stat = anchor_path.stat()
+                stats.append((str(anchor_path), int(anchor_stat.st_size), int(anchor_stat.st_mtime_ns)))
+            else:
+                stats.append((str(anchor_path), -1, -1))
         return stats
 
     def _packed_cache_path(self) -> Path | None:
@@ -380,9 +361,6 @@ class MotionLib:
             "duration": float(clip.duration),
             "joint_names": list(clip.joint_names),
             "body_names": list(clip.body_names),
-            "segment_start_times": self._optional_tensor_to_cpu(clip.segment_start_times),
-            "segment_end_times": self._optional_tensor_to_cpu(clip.segment_end_times),
-            "segment_types": self._optional_tensor_to_cpu(clip.segment_types),
             "anchor_frame_indices": self._optional_tensor_to_cpu(clip.anchor_frame_indices),
             "anchor_times": self._optional_tensor_to_cpu(clip.anchor_times),
         }
@@ -402,9 +380,6 @@ class MotionLib:
             body_quaternions=None,
             body_linear_velocities=None,
             body_angular_velocities=None,
-            segment_start_times=self._optional_tensor_to_device(payload["segment_start_times"]),
-            segment_end_times=self._optional_tensor_to_device(payload["segment_end_times"]),
-            segment_types=self._optional_tensor_to_device(payload["segment_types"]),
             anchor_frame_indices=self._optional_tensor_to_device(payload["anchor_frame_indices"]),
             anchor_times=self._optional_tensor_to_device(payload["anchor_times"]),
             joint_names=list(payload["joint_names"]),
@@ -499,7 +474,20 @@ class MotionLib:
             paths = list(motion_files)
         if not paths:
             raise ValueError("motion_files must contain at least one motion clip path.")
-        return [str(Path(path)) for path in paths]
+        resolved_paths: list[str] = []
+        for raw_path in paths:
+            path = Path(raw_path).expanduser()
+            if path.is_dir():
+                path = path / "final_motion.npz"
+            elif path.name != "final_motion.npz":
+                raise ValueError(
+                    f"Motion input must be a directory containing final_motion.npz or a direct "
+                    f"final_motion.npz path, got: {path}"
+                )
+            if not path.is_file():
+                raise FileNotFoundError(f"Retargeter motion file was not found: {path}")
+            resolved_paths.append(str(path.resolve()))
+        return resolved_paths
 
     def _load_joint_names(self, motion_file: str) -> list[str]:
         with np.load(motion_file) as motion_data:
@@ -511,94 +499,130 @@ class MotionLib:
 
     def _load_clip(self, motion_id: int, motion_file: str) -> MotionClip:
         with np.load(motion_file) as motion_data:
+            required_keys = {
+                "fps",
+                "robot",
+                "joint_names",
+                "body_names",
+                "joint_pos",
+                "joint_vel",
+                "body_pos_w",
+                "body_quat_xyzw",
+                "body_lin_vel_w",
+                "body_ang_vel_w",
+            }
+            missing_keys = sorted(required_keys.difference(motion_data.files))
+            if missing_keys:
+                raise ValueError(
+                    f"Retargeter motion {motion_file} is missing required fields: {missing_keys}. "
+                    "Legacy Ref2Act NPZ files are not supported."
+                )
+            legacy_keys = {
+                "body_quat_w",
+                "anchor_selection_version",
+                "anchor_frame_indices",
+                "anchor_times",
+                "segment_start_times",
+                "segment_end_times",
+                "segment_types",
+            }
+            present_legacy_keys = sorted(legacy_keys.intersection(motion_data.files))
+            if present_legacy_keys:
+                raise ValueError(
+                    f"Retargeter motion {motion_file} contains unsupported legacy fields: {present_legacy_keys}"
+                )
             fps = float(np.asarray(motion_data["fps"]).item())
-            if fps <= 0.0:
+            if not np.isfinite(fps) or fps <= 0.0:
                 raise ValueError(f"Motion clip {motion_file} has a non-positive fps: {fps}")
             dt = 1.0 / fps
             joint_names = np.asarray(motion_data["joint_names"]).tolist()
             body_names = np.asarray(motion_data["body_names"]).tolist()
-            joint_pos = torch.as_tensor(motion_data["joint_pos"], dtype=torch.float32, device=self._frame_load_device)
-            num_frames = int(joint_pos.shape[0])
+            robot_name = str(np.asarray(motion_data["robot"]).item())
+            if not robot_name:
+                raise ValueError(f"Retargeter motion {motion_file} has an empty robot field.")
+            for field_name, names in (("joint_names", joint_names), ("body_names", body_names)):
+                if not names or not all(isinstance(name, str) and name for name in names):
+                    raise ValueError(f"Retargeter motion {motion_file} field {field_name} must contain names.")
+                if len(set(names)) != len(names):
+                    raise ValueError(f"Retargeter motion {motion_file} field {field_name} contains duplicates.")
+            arrays = {
+                "joint_pos": np.asarray(motion_data["joint_pos"]),
+                "joint_vel": np.asarray(motion_data["joint_vel"]),
+                "body_pos_w": np.asarray(motion_data["body_pos_w"]),
+                "body_quat_xyzw": np.asarray(motion_data["body_quat_xyzw"]),
+                "body_lin_vel_w": np.asarray(motion_data["body_lin_vel_w"]),
+                "body_ang_vel_w": np.asarray(motion_data["body_ang_vel_w"]),
+            }
+            for key, array in arrays.items():
+                if not np.all(np.isfinite(array)):
+                    raise ValueError(f"Retargeter motion {motion_file} field {key} contains NaN or inf values.")
+            joint_pos_np = arrays["joint_pos"]
+            if joint_pos_np.ndim != 2 or joint_pos_np.shape[1] != len(joint_names):
+                raise ValueError("joint_pos must have shape [T, len(joint_names)].")
+            num_frames = int(joint_pos_np.shape[0])
+            if num_frames < 1:
+                raise ValueError(f"Retargeter motion {motion_file} must contain at least one frame.")
+            expected_shapes = {
+                "joint_vel": (num_frames, len(joint_names)),
+                "body_pos_w": (num_frames, len(body_names), 3),
+                "body_quat_xyzw": (num_frames, len(body_names), 4),
+                "body_lin_vel_w": (num_frames, len(body_names), 3),
+                "body_ang_vel_w": (num_frames, len(body_names), 3),
+            }
+            for key, expected_shape in expected_shapes.items():
+                if arrays[key].shape != expected_shape:
+                    raise ValueError(
+                        f"Retargeter motion {motion_file} field {key} must have shape {expected_shape}, "
+                        f"got {arrays[key].shape}."
+                    )
+            quat_norms = np.linalg.norm(arrays["body_quat_xyzw"], axis=-1)
+            if not np.allclose(quat_norms, 1.0, atol=1.0e-3):
+                raise ValueError(f"Retargeter motion {motion_file} contains non-unit body_quat_xyzw values.")
+
+            joint_pos = torch.as_tensor(joint_pos_np, dtype=torch.float32, device=self._frame_load_device)
             duration = dt * num_frames
-            segment_start_times = None
-            segment_end_times = None
-            segment_types = None
             anchor_frame_indices = None
             anchor_times = None
 
-            segment_keys = ("segment_start_times", "segment_end_times", "segment_types")
-            has_segment_keys = [key in motion_data for key in segment_keys]
-            if any(has_segment_keys):
-                if not all(has_segment_keys):
-                    raise ValueError(
-                        f"Motion clip {motion_file} is missing part of the segment metadata: {segment_keys}"
+            anchor_path = Path(motion_file).with_name("reset_anchors.json")
+            if anchor_path.exists():
+                try:
+                    anchor_payload = json.loads(anchor_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError) as exc:
+                    raise ValueError(f"Failed to read Retargeter anchor file {anchor_path}: {exc}") from exc
+                if not isinstance(anchor_payload, dict):
+                    raise ValueError(f"Retargeter anchor file {anchor_path} must contain a JSON object.")
+                enabled = anchor_payload.get("enabled", False)
+                if not isinstance(enabled, bool):
+                    raise ValueError(f"Retargeter anchor file {anchor_path} field enabled must be boolean.")
+                if enabled:
+                    anchors = anchor_payload.get("anchors")
+                    if not isinstance(anchors, list) or not anchors:
+                        raise ValueError(f"Enabled Retargeter anchor file {anchor_path} must contain anchors.")
+                    try:
+                        anchor_frame_indices_np = np.asarray([item["frame"] for item in anchors], dtype=np.int64)
+                        anchor_times_np = np.asarray([item["time_s"] for item in anchors], dtype=np.float32)
+                    except (KeyError, TypeError, ValueError) as exc:
+                        raise ValueError(f"Invalid anchor entry in {anchor_path}: {exc}") from exc
+                    _validate_anchor_selection_arrays(
+                        anchor_frame_indices_np,
+                        anchor_times_np,
+                        num_frames=num_frames,
+                        duration=duration,
                     )
-                segment_start_times_np = np.asarray(motion_data["segment_start_times"], dtype=np.float32).reshape(-1)
-                segment_end_times_np = np.asarray(motion_data["segment_end_times"], dtype=np.float32).reshape(-1)
-                segment_types_np = np.asarray(motion_data["segment_types"], dtype=np.int64).reshape(-1)
-                validate_segment_arrays(
-                    segment_start_times_np,
-                    segment_end_times_np,
-                    duration=duration,
-                    segment_types=segment_types_np,
-                )
-                segment_start_times = torch.as_tensor(
-                    segment_start_times_np, dtype=torch.float32, device=self.device
-                )
-                segment_end_times = torch.as_tensor(
-                    segment_end_times_np, dtype=torch.float32, device=self.device
-                )
-                segment_types = torch.as_tensor(segment_types_np, dtype=torch.long, device=self.device)
-
-            anchor_keys = ("anchor_selection_version", "anchor_frame_indices", "anchor_times", "anchor_joint_kinetic_energy")
-            legacy_anchor_keys = (
-                "anchor_frame_labels",
-                "anchor_segment_start_times",
-                "anchor_segment_end_times",
-                "anchor_segment_labels",
-                "anchor_scores",
-                "anchor_support_modes",
-                "anchor_energy_norm",
-                "anchor_pose_extreme",
-                "anchor_torso_tilt_deg",
-            )
-            has_anchor_keys = [key in motion_data for key in anchor_keys]
-            has_legacy_anchor_keys = [key in motion_data for key in legacy_anchor_keys]
-            if any(has_anchor_keys) or any(has_legacy_anchor_keys):
-                if any(has_legacy_anchor_keys):
-                    raise ValueError(
-                        f"Motion clip {motion_file} uses legacy anchor metadata. "
-                        "Reconvert the motion file with the v3 low-kinetic anchor exporter."
+                    if np.any(anchor_frame_indices_np[1:] <= anchor_frame_indices_np[:-1]):
+                        raise ValueError(f"Anchor frames in {anchor_path} must be strictly increasing and unique.")
+                    expected_times = anchor_frame_indices_np.astype(np.float64) / fps
+                    if not np.allclose(anchor_times_np, expected_times, atol=1.0e-5):
+                        raise ValueError(f"Anchor frame/time values in {anchor_path} are inconsistent with fps={fps}.")
+                    anchor_frame_indices = torch.as_tensor(
+                        anchor_frame_indices_np, dtype=torch.long, device=self.device
                     )
-                if not all(has_anchor_keys):
-                    raise ValueError(
-                        f"Motion clip {motion_file} is missing part of the anchor metadata: {anchor_keys}"
-                    )
-                anchor_selection_version = int(np.asarray(motion_data["anchor_selection_version"]).item())
-                if anchor_selection_version != 3:
-                    raise ValueError(
-                        f"Motion clip {motion_file} has unsupported anchor_selection_version="
-                        f"{anchor_selection_version}. Reconvert the motion file with the v3 low-kinetic anchor exporter."
-                    )
-                anchor_frame_indices_np = np.asarray(motion_data["anchor_frame_indices"], dtype=np.int64).reshape(-1)
-                anchor_times_np = np.asarray(motion_data["anchor_times"], dtype=np.float32).reshape(-1)
-                anchor_joint_kinetic_energy_np = np.asarray(
-                    motion_data["anchor_joint_kinetic_energy"], dtype=np.float32
-                ).reshape(-1)
-                if anchor_joint_kinetic_energy_np.shape != anchor_frame_indices_np.shape:
-                    raise ValueError("anchor_joint_kinetic_energy must have one entry per selected anchor.")
-                _validate_anchor_selection_arrays(
-                    anchor_frame_indices_np,
-                    anchor_times_np,
-                    num_frames=num_frames,
-                    duration=duration,
-                )
-                anchor_frame_indices = torch.as_tensor(anchor_frame_indices_np, dtype=torch.long, device=self.device)
-                anchor_times = torch.as_tensor(anchor_times_np, dtype=torch.float32, device=self.device)
+                    anchor_times = torch.as_tensor(anchor_times_np, dtype=torch.float32, device=self.device)
 
             return MotionClip(
                 motion_id=motion_id,
-                name=str(motion_data["name"].item()) if "name" in motion_data else Path(motion_file).stem,
+                name=Path(motion_file).parent.name,
                 source=motion_file,
                 joint_names=joint_names,
                 body_names=body_names,
@@ -607,22 +631,19 @@ class MotionLib:
                 num_frames=num_frames,
                 duration=duration,
                 joint_pos=joint_pos,
-                joint_vel=torch.as_tensor(motion_data["joint_vel"], dtype=torch.float32, device=self._frame_load_device),
+                joint_vel=torch.as_tensor(arrays["joint_vel"], dtype=torch.float32, device=self._frame_load_device),
                 body_positions=torch.as_tensor(
-                    motion_data["body_pos_w"], dtype=torch.float32, device=self._frame_load_device
+                    arrays["body_pos_w"], dtype=torch.float32, device=self._frame_load_device
                 ),
                 body_quaternions=torch.as_tensor(
-                    motion_data["body_quat_w"], dtype=torch.float32, device=self._frame_load_device
+                    arrays["body_quat_xyzw"], dtype=torch.float32, device=self._frame_load_device
                 ),
                 body_linear_velocities=torch.as_tensor(
-                    motion_data["body_lin_vel_w"], dtype=torch.float32, device=self._frame_load_device
+                    arrays["body_lin_vel_w"], dtype=torch.float32, device=self._frame_load_device
                 ),
                 body_angular_velocities=torch.as_tensor(
-                    motion_data["body_ang_vel_w"], dtype=torch.float32, device=self._frame_load_device
+                    arrays["body_ang_vel_w"], dtype=torch.float32, device=self._frame_load_device
                 ),
-                segment_start_times=segment_start_times,
-                segment_end_times=segment_end_times,
-                segment_types=segment_types,
                 anchor_frame_indices=anchor_frame_indices,
                 anchor_times=anchor_times,
             )

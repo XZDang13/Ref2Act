@@ -1,3 +1,5 @@
+import json
+import os
 from pathlib import Path
 
 import numpy as np
@@ -7,287 +9,122 @@ import torch
 from ref2act.motion import MotionLib
 
 
-TEST_DATA_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "motions"
-
-
-def _write_motion_file(
-    path: Path,
+def _write_motion(
+    directory: Path,
     *,
-    fps: float,
-    joint_pos: np.ndarray,
-    name: str | None = None,
-    include_segments: bool = False,
-) -> None:
-    joint_pos = np.asarray(joint_pos, dtype=np.float32)
-    num_frames = int(joint_pos.shape[0])
-    joint_vel = np.zeros_like(joint_pos)
-    body_pos_w = np.zeros((num_frames, 1, 3), dtype=np.float32)
-    body_quat_w = np.zeros((num_frames, 1, 4), dtype=np.float32)
-    body_quat_w[..., 0] = 1.0
-    body_lin_vel_w = np.zeros((num_frames, 1, 3), dtype=np.float32)
-    body_ang_vel_w = np.zeros((num_frames, 1, 3), dtype=np.float32)
-
-    payload = {
-        "fps": np.asarray(fps, dtype=np.float32),
-        "joint_names": np.asarray(["joint_0"]),
-        "body_names": np.asarray(["body_0"]),
-        "joint_pos": joint_pos,
-        "joint_vel": joint_vel,
-        "body_pos_w": body_pos_w,
-        "body_quat_w": body_quat_w,
-        "body_lin_vel_w": body_lin_vel_w,
-        "body_ang_vel_w": body_ang_vel_w,
-    }
-    if name is not None:
-        payload["name"] = np.asarray(name)
-    if include_segments:
-        payload["segment_start_times"] = np.asarray([0.0], dtype=np.float32)
-        payload["segment_end_times"] = np.asarray([num_frames / fps], dtype=np.float32)
-        payload["segment_types"] = np.asarray([0], dtype=np.int64)
-    np.savez(path, **payload)
-
-
-def test_motion_lib_supports_mixed_motion_batches() -> None:
-    motion_lib = MotionLib(
-        [
-            TEST_DATA_DIR / "jab.npz",
-            TEST_DATA_DIR / "pick_up.npz",
-        ]
+    offset: float = 0.0,
+    frames: int = 4,
+    fps: float = 10.0,
+    anchors: list[tuple[int, float]] | None = None,
+) -> Path:
+    directory.mkdir()
+    joint_pos = np.arange(frames, dtype=np.float32)[:, None] + offset
+    quat = np.zeros((frames, 1, 4), dtype=np.float32)
+    quat[..., 3] = 1.0
+    np.savez(
+        directory / "final_motion.npz",
+        fps=np.asarray(fps, dtype=np.float32),
+        robot=np.asarray("g1"),
+        joint_names=np.asarray(["joint"]),
+        body_names=np.asarray(["pelvis"]),
+        joint_pos=joint_pos,
+        joint_vel=np.ones_like(joint_pos),
+        body_pos_w=np.repeat(joint_pos[:, None], 3, axis=2),
+        body_quat_xyzw=quat,
+        body_lin_vel_w=np.ones((frames, 1, 3), dtype=np.float32),
+        body_ang_vel_w=np.zeros((frames, 1, 3), dtype=np.float32),
     )
-
-    motion_ids = torch.tensor([0, 1], dtype=torch.long)
-    times = torch.tensor([0.0, 0.0], dtype=torch.float32)
-    samples = motion_lib.sample_motion(motion_ids=motion_ids, times=times)
-
-    jab_clip = motion_lib.get_clip(0)
-    pick_clip = motion_lib.get_clip(1)
-
-    assert motion_lib.num_motions == 2
-    assert motion_lib.motion_names == ["jab", "pick_up"]
-    assert motion_lib.get_duration(motion_ids)[0] != motion_lib.get_duration(motion_ids)[1]
-    assert torch.allclose(samples["joint_pos"][0], jab_clip.joint_pos[0])
-    assert torch.allclose(samples["joint_pos"][1], pick_clip.joint_pos[0])
+    if anchors is not None:
+        (directory / "reset_anchors.json").write_text(
+            json.dumps({"enabled": True, "anchors": [{"frame": f, "time_s": t} for f, t in anchors]})
+        )
+    return directory
 
 
-def test_motion_lib_applies_offsets_per_selected_motion() -> None:
-    motion_lib = MotionLib(
-        [
-            TEST_DATA_DIR / "jab.npz",
-            TEST_DATA_DIR / "pick_up.npz",
-        ]
+def test_accepts_directory_direct_file_and_explicit_multi_motion(tmp_path: Path) -> None:
+    first = _write_motion(tmp_path / "first", offset=0.0)
+    second = _write_motion(tmp_path / "second", offset=10.0)
+    lib = MotionLib([first, second / "final_motion.npz"])
+    sample = lib.sample_motion(torch.tensor([0, 1]), torch.tensor([0.1, 0.1]))
+    assert lib.num_motions == 2
+    assert torch.allclose(sample["joint_pos"][:, 0], torch.tensor([1.0, 11.0]))
+
+
+def test_applies_position_offsets_per_selected_motion(tmp_path: Path) -> None:
+    first = _write_motion(tmp_path / "first")
+    second = _write_motion(tmp_path / "second", offset=10.0)
+    lib = MotionLib([first, second])
+    offsets = torch.tensor([[1.0, 2.0, 3.0], [-1.0, -2.0, -3.0]])
+    sample = lib.sample_motion(torch.tensor([0, 1]), torch.zeros(2), position_offsets=offsets)
+    assert torch.allclose(sample["body_positions"][:, 0], torch.tensor([[1.0, 2.0, 3.0], [9.0, 8.0, 7.0]]))
+
+
+def test_rejects_arbitrary_npz_and_dataset_root(tmp_path: Path) -> None:
+    arbitrary = tmp_path / "motion.npz"
+    arbitrary.touch()
+    with pytest.raises(ValueError, match="final_motion.npz"):
+        MotionLib(arbitrary)
+    with pytest.raises(FileNotFoundError, match="final_motion.npz"):
+        MotionLib(tmp_path)
+
+
+def test_rejects_legacy_or_incomplete_npz(tmp_path: Path) -> None:
+    directory = tmp_path / "legacy"
+    directory.mkdir()
+    np.savez(directory / "final_motion.npz", body_quat_w=np.zeros((2, 1, 4), dtype=np.float32))
+    with pytest.raises(ValueError, match="missing required fields"):
+        MotionLib(directory)
+
+
+def test_rejects_non_finite_data_and_multi_motion_topology_mismatch(tmp_path: Path) -> None:
+    non_finite = _write_motion(tmp_path / "non_finite")
+    with np.load(non_finite / "final_motion.npz") as archive:
+        payload = {key: archive[key] for key in archive.files}
+    payload["joint_vel"] = payload["joint_vel"].copy()
+    payload["joint_vel"][0, 0] = np.nan
+    np.savez(non_finite / "final_motion.npz", **payload)
+    with pytest.raises(ValueError, match="NaN or inf"):
+        MotionLib(non_finite)
+
+    first = _write_motion(tmp_path / "first")
+    second = _write_motion(tmp_path / "second")
+    with np.load(second / "final_motion.npz") as archive:
+        payload = {key: archive[key] for key in archive.files}
+    payload["joint_names"] = np.asarray(["different_joint"])
+    np.savez(second / "final_motion.npz", **payload)
+    with pytest.raises(ValueError, match="Joint names do not match"):
+        MotionLib([first, second])
+
+
+def test_validates_anchor_order_range_and_time(tmp_path: Path) -> None:
+    directory = _write_motion(tmp_path / "motion", anchors=[(1, 0.1), (2, 0.25)])
+    with pytest.raises(ValueError, match="inconsistent"):
+        MotionLib(directory)
+    (directory / "reset_anchors.json").write_text(
+        json.dumps({"enabled": True, "anchors": [{"frame": 2, "time_s": 0.2}, {"frame": 1, "time_s": 0.1}]})
     )
-
-    motion_ids = torch.tensor([0, 1], dtype=torch.long)
-    times = torch.tensor([0.0, 0.0], dtype=torch.float32)
-    position_offsets = torch.tensor([[1.0, 2.0, 3.0], [-1.0, -2.0, -3.0]], dtype=torch.float32)
-    samples = motion_lib.sample_motion(
-        motion_ids=motion_ids,
-        times=times,
-        position_offsets=position_offsets,
-    )
-
-    jab_clip = motion_lib.get_clip(0)
-    pick_clip = motion_lib.get_clip(1)
-
-    assert torch.allclose(
-        samples["body_positions"][0],
-        jab_clip.body_positions[0] + position_offsets[0].view(1, 3),
-    )
-    assert torch.allclose(
-        samples["body_positions"][1],
-        pick_clip.body_positions[0] + position_offsets[1].view(1, 3),
-    )
+    with pytest.raises(ValueError, match="sorted"):
+        MotionLib(directory)
 
 
-def test_motion_lib_packed_sampling_matches_grouped_fractional_mixed_batch() -> None:
-    motion_lib = MotionLib(
-        [
-            TEST_DATA_DIR / "jab.npz",
-            TEST_DATA_DIR / "pick_up.npz",
-            TEST_DATA_DIR / "walk.npz",
-        ]
-    )
-
-    motion_ids = torch.tensor([0, 1, 2, 1, 0, 2], dtype=torch.long)
-    times = torch.tensor([0.0, 0.25 / 30.0, 1.5 / 30.0, 10.25 / 30.0, 20.5 / 30.0, 83.75 / 30.0])
-    position_offsets = torch.tensor(
-        [
-            [0.0, 0.0, 0.0],
-            [1.0, 2.0, 3.0],
-            [-1.0, 0.5, 2.0],
-            [0.25, -0.5, 0.75],
-            [2.0, -1.0, 0.0],
-            [-0.25, -0.75, 1.5],
-        ],
-        dtype=torch.float32,
-    )
-
-    assert motion_lib._packed_sampling_enabled
-    packed_samples = motion_lib.sample_motion(
-        motion_ids=motion_ids,
-        times=times,
-        position_offsets=position_offsets,
-    )
-    grouped_samples = motion_lib._sample_motion_grouped(
-        motion_ids=motion_ids,
-        times=times,
-        position_offsets=position_offsets,
-    )
-
-    for key, packed_value in packed_samples.items():
-        assert torch.allclose(packed_value, grouped_samples[key], atol=1.0e-5, rtol=1.0e-5)
+def test_disabled_anchor_sidecar_means_no_anchors(tmp_path: Path) -> None:
+    directory = _write_motion(tmp_path / "motion")
+    (directory / "reset_anchors.json").write_text(json.dumps({"enabled": False, "anchors": [{"frame": 0, "time_s": 0.0}]}))
+    lib = MotionLib(directory)
+    assert lib.clips[0].anchor_times is None
 
 
-def test_motion_lib_packed_sampling_handles_single_motion_batch() -> None:
-    motion_lib = MotionLib([TEST_DATA_DIR / "jab.npz"])
-    motion_ids = torch.zeros(4, dtype=torch.long)
-    times = torch.tensor([0.0, 0.5 / 30.0, 5.25 / 30.0, 97.0 / 30.0], dtype=torch.float32)
-
-    assert motion_lib._packed_sampling_enabled
-    packed_samples = motion_lib.sample_motion(motion_ids=motion_ids, times=times)
-    grouped_samples = motion_lib._sample_motion_grouped(motion_ids=motion_ids, times=times)
-
-    for key, packed_value in packed_samples.items():
-        assert torch.allclose(packed_value, grouped_samples[key], atol=1.0e-5, rtol=1.0e-5)
-
-
-def test_motion_lib_packed_sampling_uses_per_motion_fps_and_frame_count(tmp_path: Path) -> None:
-    motion_a = tmp_path / "slow.npz"
-    motion_b = tmp_path / "fast.npz"
-    _write_motion_file(
-        motion_a,
-        fps=10.0,
-        joint_pos=np.asarray([[0.0], [10.0], [20.0]], dtype=np.float32),
-        name="slow",
-    )
-    _write_motion_file(
-        motion_b,
-        fps=20.0,
-        joint_pos=np.asarray([[100.0], [120.0], [140.0], [160.0]], dtype=np.float32),
-        name="fast",
-    )
-
-    motion_lib = MotionLib([motion_a, motion_b])
-    motion_ids = torch.tensor([0, 1, 0, 1], dtype=torch.long)
-    times = torch.tensor([0.05, 0.025, 1.0, 1.0], dtype=torch.float32)
-    samples = motion_lib.sample_motion(motion_ids=motion_ids, times=times)
-
-    assert motion_lib._packed_sampling_enabled
-    assert torch.allclose(
-        samples["joint_pos"].reshape(-1),
-        torch.tensor([5.0, 110.0, 20.0, 160.0], dtype=torch.float32),
-    )
-
-
-def test_motion_lib_packed_sampling_uses_flat_frame_storage(tmp_path: Path) -> None:
-    motion_a = tmp_path / "short.npz"
-    motion_b = tmp_path / "long.npz"
-    _write_motion_file(
-        motion_a,
-        fps=10.0,
-        joint_pos=np.asarray([[0.0], [1.0]], dtype=np.float32),
-        name="short",
-    )
-    _write_motion_file(
-        motion_b,
-        fps=10.0,
-        joint_pos=np.asarray([[10.0], [11.0], [12.0], [13.0], [14.0]], dtype=np.float32),
-        name="long",
-    )
-
-    motion_lib = MotionLib([motion_a, motion_b])
-
-    assert motion_lib._packed_sampling_enabled
-    assert motion_lib._packed_sampling_tensors["joint_pos"].shape[0] == 7
-    assert torch.equal(motion_lib._packed_frame_offsets, torch.tensor([0, 2], dtype=torch.long))
-
-
-def test_motion_lib_compact_storage_samples_like_non_compact(tmp_path: Path) -> None:
-    motion_a = tmp_path / "short.npz"
-    motion_b = tmp_path / "long.npz"
-    _write_motion_file(
-        motion_a,
-        fps=10.0,
-        joint_pos=np.asarray([[0.0], [1.0]], dtype=np.float32),
-        name="short",
-        include_segments=True,
-    )
-    _write_motion_file(
-        motion_b,
-        fps=10.0,
-        joint_pos=np.asarray([[10.0], [11.0], [12.0]], dtype=np.float32),
-        name="long",
-        include_segments=True,
-    )
-
-    full_motion_lib = MotionLib([motion_a, motion_b])
-    compact_motion_lib = MotionLib([motion_a, motion_b], compact_after_packing=True)
-    motion_ids = torch.tensor([0, 1, 0, 1], dtype=torch.long)
-    times = torch.tensor([0.0, 0.05, 0.1, 0.2], dtype=torch.float32)
-
-    full_samples = full_motion_lib.sample_motion(motion_ids=motion_ids, times=times)
-    compact_samples = compact_motion_lib.sample_motion(motion_ids=motion_ids, times=times)
-
-    assert compact_motion_lib._packed_sampling_enabled
-    assert compact_motion_lib.get_clip(0).has_segments
-    assert compact_motion_lib.get_clip(0).segment_start_times is not None
-    with pytest.raises(RuntimeError, match="compact_after_packing=True"):
-        _ = compact_motion_lib.get_clip(0).joint_pos
-    for key, full_value in full_samples.items():
-        assert torch.allclose(compact_samples[key], full_value, atol=1.0e-6, rtol=1.0e-6)
-
-
-def test_motion_lib_compact_storage_reuses_packed_cache(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
+def test_packed_cache_invalidates_when_sidecar_changes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     cache_dir = tmp_path / "cache"
     monkeypatch.setenv("REF2ACT_MOTION_PACK_CACHE_DIR", str(cache_dir))
-    motion_a = tmp_path / "short.npz"
-    motion_b = tmp_path / "long.npz"
-    _write_motion_file(
-        motion_a,
-        fps=10.0,
-        joint_pos=np.asarray([[0.0], [1.0]], dtype=np.float32),
-        name="short",
-        include_segments=True,
-    )
-    _write_motion_file(
-        motion_b,
-        fps=10.0,
-        joint_pos=np.asarray([[10.0], [11.0], [12.0]], dtype=np.float32),
-        name="long",
-        include_segments=True,
-    )
-
-    first_motion_lib = MotionLib([motion_a, motion_b], compact_after_packing=True)
-    cache_files = list(cache_dir.glob("motionlib_*.pt"))
-    second_motion_lib = MotionLib([motion_a, motion_b], compact_after_packing=True)
-    output = capsys.readouterr().out
-    motion_ids = torch.tensor([0, 1], dtype=torch.long)
-    times = torch.tensor([0.0, 0.1], dtype=torch.float32)
-
-    assert len(cache_files) == 1
-    assert "packed motion cache loaded:" in output
-    assert second_motion_lib._packed_sampling_enabled
-    assert second_motion_lib.get_clip(0).has_segments
-    with pytest.raises(RuntimeError, match="compact_after_packing=True"):
-        _ = second_motion_lib.get_clip(0).joint_pos
-    for key, first_value in first_motion_lib.sample_motion(motion_ids=motion_ids, times=times).items():
-        second_value = second_motion_lib.sample_motion(motion_ids=motion_ids, times=times)[key]
-        assert torch.allclose(second_value, first_value, atol=1.0e-6, rtol=1.0e-6)
-
-
-def test_motion_lib_default_storage_keeps_clip_frame_tensors(tmp_path: Path) -> None:
-    motion_file = tmp_path / "motion.npz"
-    _write_motion_file(
-        motion_file,
-        fps=10.0,
-        joint_pos=np.asarray([[0.0], [1.0]], dtype=np.float32),
-        name="motion",
-    )
-
-    motion_lib = MotionLib([motion_file])
-
-    assert torch.equal(motion_lib.get_clip(0).joint_pos.reshape(-1), torch.tensor([0.0, 1.0]))
+    directory = _write_motion(tmp_path / "motion", anchors=[(1, 0.1)])
+    first = MotionLib(directory, compact_after_packing=True)
+    cache_files_before = set(cache_dir.iterdir())
+    sidecar = directory / "reset_anchors.json"
+    sidecar.write_text(json.dumps({"enabled": True, "anchors": [{"frame": 2, "time_s": 0.2}]}))
+    stat = sidecar.stat()
+    os.utime(sidecar, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000))
+    second = MotionLib(directory, compact_after_packing=True)
+    assert set(cache_dir.iterdir()) != cache_files_before
+    assert first.clips[0].anchor_times.item() == pytest.approx(0.1)
+    assert second.clips[0].anchor_times.item() == pytest.approx(0.2)

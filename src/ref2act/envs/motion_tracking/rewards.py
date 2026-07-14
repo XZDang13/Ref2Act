@@ -6,13 +6,14 @@ from typing import Any, Protocol
 import torch
 from isaaclab.assets import Articulation
 from isaaclab.sensors import ContactSensor
-from isaaclab.utils.math import quat_apply, quat_error_magnitude, quat_inv, quat_mul, yaw_quat
+from ref2act.common.math import quat_apply, quat_error_magnitude, quat_inv, quat_mul, yaw_quat
+from ref2act.isaac_compat import to_torch
 
 from .action import ActionProcessor
 from .types import ReferenceMotions
 
 
-@dataclass(frozen=True)
+@dataclass
 class RewardTermCfg:
     id: str
     type: str
@@ -20,28 +21,28 @@ class RewardTermCfg:
     enabled: bool = True
 
 
-@dataclass(frozen=True)
+@dataclass
 class JointAccPenaltyTermCfg(RewardTermCfg):
     id: str = "joint_acc_penalty"
     type: str = "joint_acc_penalty"
     weight: float = -2.5e-7
 
 
-@dataclass(frozen=True)
+@dataclass
 class JointTorquePenaltyTermCfg(RewardTermCfg):
     id: str = "joint_torque_penalty"
     type: str = "joint_torque_penalty"
     weight: float = -1e-5
 
 
-@dataclass(frozen=True)
+@dataclass
 class JointLimitPenaltyTermCfg(RewardTermCfg):
     id: str = "joint_limit_penalty"
     type: str = "joint_limit_penalty"
     weight: float = -10.0
 
 
-@dataclass(frozen=True)
+@dataclass
 class SelfCollisionPenaltyTermCfg(RewardTermCfg):
     id: str = "self_collision_penalty"
     type: str = "self_collision_penalty"
@@ -50,7 +51,7 @@ class SelfCollisionPenaltyTermCfg(RewardTermCfg):
     force_threshold: float = 1.0
 
 
-@dataclass(frozen=True)
+@dataclass
 class FootSlipPenaltyTermCfg(RewardTermCfg):
     id: str = "foot_slip_penalty"
     type: str = "foot_slip_penalty"
@@ -60,14 +61,14 @@ class FootSlipPenaltyTermCfg(RewardTermCfg):
     force_threshold: float = 1.0
 
 
-@dataclass(frozen=True)
+@dataclass
 class ActionRatePenaltyTermCfg(RewardTermCfg):
     id: str = "action_rate_penalty"
     type: str = "action_rate_penalty"
     weight: float = -1e-3
 
 
-@dataclass(frozen=True)
+@dataclass
 class AnchorPositionRewardTermCfg(RewardTermCfg):
     id: str = "anchor_position_reward"
     type: str = "anchor_position_reward"
@@ -77,7 +78,7 @@ class AnchorPositionRewardTermCfg(RewardTermCfg):
     height_only: bool = False
 
 
-@dataclass(frozen=True)
+@dataclass
 class AnchorQuaternionRewardTermCfg(RewardTermCfg):
     id: str = "anchor_quaternion_reward"
     type: str = "anchor_quaternion_reward"
@@ -86,7 +87,7 @@ class AnchorQuaternionRewardTermCfg(RewardTermCfg):
     std: float = 0.4**2
 
 
-@dataclass(frozen=True)
+@dataclass
 class AnchorLinearVelocityRewardTermCfg(RewardTermCfg):
     id: str = "anchor_linear_velocity_reward"
     type: str = "anchor_linear_velocity_reward"
@@ -95,7 +96,7 @@ class AnchorLinearVelocityRewardTermCfg(RewardTermCfg):
     std: float = 1.0**2
 
 
-@dataclass(frozen=True)
+@dataclass
 class AnchorAngularVelocityRewardTermCfg(RewardTermCfg):
     id: str = "anchor_angular_velocity_reward"
     type: str = "anchor_angular_velocity_reward"
@@ -104,7 +105,7 @@ class AnchorAngularVelocityRewardTermCfg(RewardTermCfg):
     std: float = 3.14**2
 
 
-@dataclass(frozen=True)
+@dataclass
 class KeyPositionRewardTermCfg(RewardTermCfg):
     id: str = "key_position_reward"
     type: str = "key_position_reward"
@@ -113,7 +114,7 @@ class KeyPositionRewardTermCfg(RewardTermCfg):
     std: float = 0.3**2
 
 
-@dataclass(frozen=True)
+@dataclass
 class KeyQuaternionRewardTermCfg(RewardTermCfg):
     id: str = "key_quaternion_reward"
     type: str = "key_quaternion_reward"
@@ -122,7 +123,7 @@ class KeyQuaternionRewardTermCfg(RewardTermCfg):
     std: float = 0.4**2
 
 
-@dataclass(frozen=True)
+@dataclass
 class KeyLinearVelocityRewardTermCfg(RewardTermCfg):
     id: str = "key_linear_velocity_reward"
     type: str = "key_linear_velocity_reward"
@@ -132,7 +133,7 @@ class KeyLinearVelocityRewardTermCfg(RewardTermCfg):
     std: float = 1.0**2
 
 
-@dataclass(frozen=True)
+@dataclass
 class KeyAngularVelocityRewardTermCfg(RewardTermCfg):
     id: str = "key_angular_velocity_reward"
     type: str = "key_angular_velocity_reward"
@@ -142,7 +143,7 @@ class KeyAngularVelocityRewardTermCfg(RewardTermCfg):
     std: float = 3.14**2
 
 
-@dataclass(frozen=True)
+@dataclass
 class CoMPositionRewardTermCfg(RewardTermCfg):
     id: str = "com_position_reward"
     type: str = "com_position_reward"
@@ -150,7 +151,7 @@ class CoMPositionRewardTermCfg(RewardTermCfg):
     std: float = 0.3**2
 
 
-@dataclass(frozen=True)
+@dataclass
 class CoMVelocityRewardTermCfg(RewardTermCfg):
     id: str = "com_velocity_reward"
     type: str = "com_velocity_reward"
@@ -159,7 +160,7 @@ class CoMVelocityRewardTermCfg(RewardTermCfg):
     std: float = 1.0**2
 
 
-@dataclass(frozen=True)
+@dataclass
 class CoMSupportRewardTermCfg(RewardTermCfg):
     id: str = "com_support_reward"
     type: str = "com_support_reward"
@@ -171,7 +172,7 @@ class CoMSupportRewardTermCfg(RewardTermCfg):
     std: float = 0.1**2
 
 
-@dataclass(frozen=True)
+@dataclass
 class EndEffectorPositionRewardTermCfg(RewardTermCfg):
     id: str = "end_effector_position_reward"
     type: str = "end_effector_position_reward"
@@ -180,7 +181,7 @@ class EndEffectorPositionRewardTermCfg(RewardTermCfg):
     std: float = 0.3**2
 
 
-@dataclass(frozen=True)
+@dataclass
 class EndEffectorQuaternionRewardTermCfg(RewardTermCfg):
     id: str = "end_effector_quaternion_reward"
     type: str = "end_effector_quaternion_reward"
@@ -189,7 +190,7 @@ class EndEffectorQuaternionRewardTermCfg(RewardTermCfg):
     std: float = 0.4**2
 
 
-@dataclass(frozen=True)
+@dataclass
 class EndEffectorVelocityRewardTermCfg(RewardTermCfg):
     id: str = "end_effector_velocity_reward"
     type: str = "end_effector_velocity_reward"
@@ -199,7 +200,7 @@ class EndEffectorVelocityRewardTermCfg(RewardTermCfg):
     std: float = 1.0**2
 
 
-@dataclass(frozen=True)
+@dataclass
 class MultiScaleJointPositionRewardTermCfg(RewardTermCfg):
     id: str = "multi_scale_joint_position_reward"
     type: str = "multi_scale_joint_position_reward"
@@ -213,7 +214,7 @@ class MultiScaleJointPositionRewardTermCfg(RewardTermCfg):
     coarse_kernel: str = "rational"
 
 
-@dataclass(frozen=True)
+@dataclass
 class MultiScaleJointVelocityRewardTermCfg(RewardTermCfg):
     id: str = "multi_scale_joint_velocity_reward"
     type: str = "multi_scale_joint_velocity_reward"
@@ -227,7 +228,7 @@ class MultiScaleJointVelocityRewardTermCfg(RewardTermCfg):
     coarse_kernel: str = "rational"
 
 
-@dataclass(frozen=True)
+@dataclass
 class MultiScaleAnchorHeightRewardTermCfg(RewardTermCfg):
     id: str = "multi_scale_anchor_height_reward"
     type: str = "multi_scale_anchor_height_reward"
@@ -242,7 +243,7 @@ class MultiScaleAnchorHeightRewardTermCfg(RewardTermCfg):
     coarse_kernel: str = "rational"
 
 
-@dataclass(frozen=True)
+@dataclass
 class MultiScaleAnchorPositionRewardTermCfg(RewardTermCfg):
     id: str = "multi_scale_anchor_position_reward"
     type: str = "multi_scale_anchor_position_reward"
@@ -257,7 +258,7 @@ class MultiScaleAnchorPositionRewardTermCfg(RewardTermCfg):
     coarse_kernel: str = "rational"
 
 
-@dataclass(frozen=True)
+@dataclass
 class MultiScaleAnchorQuaternionRewardTermCfg(RewardTermCfg):
     id: str = "multi_scale_anchor_quaternion_reward"
     type: str = "multi_scale_anchor_quaternion_reward"
@@ -272,7 +273,7 @@ class MultiScaleAnchorQuaternionRewardTermCfg(RewardTermCfg):
     coarse_kernel: str = "rational"
 
 
-@dataclass(frozen=True)
+@dataclass
 class MultiScaleProjectedGravityRewardTermCfg(RewardTermCfg):
     id: str = "multi_scale_projected_gravity_reward"
     type: str = "multi_scale_projected_gravity_reward"
@@ -287,7 +288,7 @@ class MultiScaleProjectedGravityRewardTermCfg(RewardTermCfg):
     coarse_kernel: str = "rational"
 
 
-@dataclass(frozen=True)
+@dataclass
 class MultiScaleAnchorLinearVelocityRewardTermCfg(RewardTermCfg):
     id: str = "multi_scale_anchor_linear_velocity_reward"
     type: str = "multi_scale_anchor_linear_velocity_reward"
@@ -302,7 +303,7 @@ class MultiScaleAnchorLinearVelocityRewardTermCfg(RewardTermCfg):
     coarse_kernel: str = "rational"
 
 
-@dataclass(frozen=True)
+@dataclass
 class MultiScaleAnchorAngularVelocityRewardTermCfg(RewardTermCfg):
     id: str = "multi_scale_anchor_angular_velocity_reward"
     type: str = "multi_scale_anchor_angular_velocity_reward"
@@ -317,7 +318,7 @@ class MultiScaleAnchorAngularVelocityRewardTermCfg(RewardTermCfg):
     coarse_kernel: str = "rational"
 
 
-@dataclass(frozen=True)
+@dataclass
 class MultiScaleKeyPositionRewardTermCfg(RewardTermCfg):
     id: str = "multi_scale_key_position_reward"
     type: str = "multi_scale_key_position_reward"
@@ -332,7 +333,7 @@ class MultiScaleKeyPositionRewardTermCfg(RewardTermCfg):
     coarse_kernel: str = "rational"
 
 
-@dataclass(frozen=True)
+@dataclass
 class MultiScaleKeyQuaternionRewardTermCfg(RewardTermCfg):
     id: str = "multi_scale_key_quaternion_reward"
     type: str = "multi_scale_key_quaternion_reward"
@@ -347,7 +348,7 @@ class MultiScaleKeyQuaternionRewardTermCfg(RewardTermCfg):
     coarse_kernel: str = "rational"
 
 
-@dataclass(frozen=True)
+@dataclass
 class MultiScaleKeyLinearVelocityRewardTermCfg(RewardTermCfg):
     id: str = "multi_scale_key_linear_velocity_reward"
     type: str = "multi_scale_key_linear_velocity_reward"
@@ -363,7 +364,7 @@ class MultiScaleKeyLinearVelocityRewardTermCfg(RewardTermCfg):
     coarse_kernel: str = "rational"
 
 
-@dataclass(frozen=True)
+@dataclass
 class MultiScaleKeyAngularVelocityRewardTermCfg(RewardTermCfg):
     id: str = "multi_scale_key_angular_velocity_reward"
     type: str = "multi_scale_key_angular_velocity_reward"
@@ -379,7 +380,7 @@ class MultiScaleKeyAngularVelocityRewardTermCfg(RewardTermCfg):
     coarse_kernel: str = "rational"
 
 
-@dataclass(frozen=True)
+@dataclass
 class MultiScaleEndEffectorPositionRewardTermCfg(RewardTermCfg):
     id: str = "multi_scale_end_effector_position_reward"
     type: str = "multi_scale_end_effector_position_reward"
@@ -394,7 +395,7 @@ class MultiScaleEndEffectorPositionRewardTermCfg(RewardTermCfg):
     coarse_kernel: str = "rational"
 
 
-@dataclass(frozen=True)
+@dataclass
 class MultiScaleEndEffectorQuaternionRewardTermCfg(RewardTermCfg):
     id: str = "multi_scale_end_effector_quaternion_reward"
     type: str = "multi_scale_end_effector_quaternion_reward"
@@ -409,7 +410,7 @@ class MultiScaleEndEffectorQuaternionRewardTermCfg(RewardTermCfg):
     coarse_kernel: str = "rational"
 
 
-@dataclass(frozen=True)
+@dataclass
 class MultiScaleEndEffectorVelocityRewardTermCfg(RewardTermCfg):
     id: str = "multi_scale_end_effector_velocity_reward"
     type: str = "multi_scale_end_effector_velocity_reward"
@@ -425,7 +426,7 @@ class MultiScaleEndEffectorVelocityRewardTermCfg(RewardTermCfg):
     coarse_kernel: str = "rational"
 
 
-@dataclass(frozen=True)
+@dataclass
 class RewardSpec:
     terms: tuple[RewardTermCfg, ...]
     dt: float
@@ -465,7 +466,7 @@ class RewardContext:
     _cache: dict[tuple, tuple[torch.Tensor, ...] | torch.Tensor] = field(default_factory=dict, init=False, repr=False)
 
     def _zeros(self) -> torch.Tensor:
-        return torch.zeros(self.robot.data.joint_pos.shape[0], device=self.robot.data.joint_pos.device)
+        return torch.zeros(to_torch(self.robot.data.joint_pos).shape[0], device=to_torch(self.robot.data.joint_pos).device)
 
     def body_masses(self) -> torch.Tensor:
         cache_key = ("body_masses",)
@@ -473,7 +474,7 @@ class RewardContext:
         if cached is not None:
             return cached  # type: ignore[return-value]
 
-        masses = self.robot.root_physx_view.get_masses().to(self.robot.data.body_pos_w.device)
+        masses = to_torch(self.robot.root_view.get_masses()).to(to_torch(self.robot.data.body_link_pos_w).device)
         self._cache[cache_key] = masses
         return masses
 
@@ -492,8 +493,8 @@ class RewardContext:
             self._cache[cache_key] = result
             return result
 
-        robot_body_positions = self.robot.data.body_pos_w[:, body_indices]
-        robot_body_quaternions = self.robot.data.body_quat_w[:, body_indices]
+        robot_body_positions = to_torch(self.robot.data.body_link_pos_w)[:, body_indices]
+        robot_body_quaternions = to_torch(self.robot.data.body_link_quat_w)[:, body_indices]
 
         reference_relative_body_positions = self.reference_motion.body_pos_relative[:, body_indices]
         reference_relative_body_quaternions = self.reference_motion.body_quat_relative[:, body_indices]
@@ -522,8 +523,8 @@ class RewardContext:
             self._cache[cache_key] = result
             return result
 
-        robot_body_lin_vel_w = self.robot.data.body_lin_vel_w[:, body_indices]
-        robot_body_ang_vel_w = self.robot.data.body_ang_vel_w[:, body_indices]
+        robot_body_lin_vel_w = to_torch(self.robot.data.body_link_lin_vel_w)[:, body_indices]
+        robot_body_ang_vel_w = to_torch(self.robot.data.body_link_ang_vel_w)[:, body_indices]
 
         alignment_quaternion_w = self.reference_alignment_quaternion(anchor_body_index)
         alignment_quaternion_w = alignment_quaternion_w[:, None, :].expand(-1, len(body_indices), -1)
@@ -555,8 +556,8 @@ class RewardContext:
             return cached  # type: ignore[return-value]
 
         position_slice = slice(2, 3) if height_only else slice(None)
-        robot_anchor_body_positions = self.robot.data.body_pos_w[:, anchor_body_index, position_slice]
-        robot_anchor_body_quaternions = self.robot.data.body_quat_w[:, anchor_body_index]
+        robot_anchor_body_positions = to_torch(self.robot.data.body_link_pos_w)[:, anchor_body_index, position_slice]
+        robot_anchor_body_quaternions = to_torch(self.robot.data.body_link_quat_w)[:, anchor_body_index]
 
         reference_anchor_body_positions = self.reference_motion.body_positions[:, anchor_body_index, position_slice]
         reference_anchor_body_quaternions = self.reference_motion.body_quaternions[:, anchor_body_index]
@@ -576,7 +577,7 @@ class RewardContext:
         if cached is not None:
             return cached  # type: ignore[return-value]
 
-        robot_anchor_quaternion = self.robot.data.body_quat_w[:, anchor_body_index]
+        robot_anchor_quaternion = to_torch(self.robot.data.body_link_quat_w)[:, anchor_body_index]
         reference_anchor_quaternion = self.reference_motion.body_quaternions[:, anchor_body_index]
         gravity_w = robot_anchor_quaternion.new_tensor((0.0, 0.0, -1.0)).expand(robot_anchor_quaternion.shape[0], -1)
         robot_projected_gravity = quat_apply(quat_inv(robot_anchor_quaternion), gravity_w)
@@ -594,7 +595,7 @@ class RewardContext:
         if cached is not None:
             return cached  # type: ignore[return-value]
 
-        robot_anchor_quaternion = self.robot.data.body_quat_w[:, anchor_body_index]
+        robot_anchor_quaternion = to_torch(self.robot.data.body_link_quat_w)[:, anchor_body_index]
         reference_anchor_quaternion = self.reference_motion.body_quaternions[:, anchor_body_index]
         result = yaw_quat(quat_mul(robot_anchor_quaternion, quat_inv(reference_anchor_quaternion)))
         self._cache[cache_key] = result
@@ -626,7 +627,7 @@ class RewardContext:
         if cached is not None:
             return cached  # type: ignore[return-value]
 
-        result = self.robot.data.body_com_pos_w
+        result = to_torch(self.robot.data.body_com_pos_w)
         self._cache[cache_key] = result
         return result
 
@@ -636,9 +637,9 @@ class RewardContext:
         if cached is not None:
             return cached  # type: ignore[return-value]
 
-        body_com_offset_w = quat_apply(self.robot.data.body_quat_w, self.robot.data.body_com_pos_b)
-        result = self.robot.data.body_link_lin_vel_w + torch.linalg.cross(
-            self.robot.data.body_ang_vel_w,
+        body_com_offset_w = quat_apply(to_torch(self.robot.data.body_link_quat_w), to_torch(self.robot.data.body_com_pos_b))
+        result = to_torch(self.robot.data.body_link_lin_vel_w) + torch.linalg.cross(
+            to_torch(self.robot.data.body_link_ang_vel_w),
             body_com_offset_w,
             dim=-1,
         )
@@ -653,7 +654,7 @@ class RewardContext:
 
         reference_body_com_offset_w = quat_apply(
             self.reference_motion.body_quat_relative,
-            self.robot.data.body_com_pos_b,
+            to_torch(self.robot.data.body_com_pos_b),
         )
         result = self.reference_motion.body_pos_relative + reference_body_com_offset_w
         self._cache[cache_key] = result
@@ -667,7 +668,7 @@ class RewardContext:
 
         reference_body_com_offset_w = quat_apply(
             self.reference_motion.body_quaternions,
-            self.robot.data.body_com_pos_b,
+            to_torch(self.robot.data.body_com_pos_b),
         )
         reference_body_com_vel_w = self.reference_motion.body_linear_velocities + torch.linalg.cross(
             self.reference_motion.body_angular_velocities,
@@ -755,7 +756,7 @@ class RewardContext:
 
         foot_body_indices = foot_body_indices[:num_feet]
         foot_contact_body_indices = foot_contact_body_indices[:num_feet]
-        foot_positions_xy = self.robot.data.body_pos_w[:, foot_body_indices, :2]
+        foot_positions_xy = to_torch(self.robot.data.body_link_pos_w)[:, foot_body_indices, :2]
         is_contact = (
             torch.norm(contact_history[:, :, foot_contact_body_indices], dim=-1).amax(dim=1) > force_threshold
         )
@@ -797,8 +798,8 @@ class RewardContext:
         if cached is not None:
             return cached  # type: ignore[return-value]
 
-        pos_error = (self.robot.data.joint_pos - self.reference_motion.joint_pos).square().sum(-1)
-        vel_error = (self.robot.data.joint_vel - self.reference_motion.joint_vel).square().sum(-1)
+        pos_error = (to_torch(self.robot.data.joint_pos) - self.reference_motion.joint_pos).square().sum(-1)
+        vel_error = (to_torch(self.robot.data.joint_vel) - self.reference_motion.joint_vel).square().sum(-1)
         result = (pos_error, vel_error)
         self._cache[cache_key] = result
         return result
@@ -807,12 +808,12 @@ class RewardContext:
 def context_contact_history(contact_sensor: ContactSensor) -> torch.Tensor | None:
     contact_history = contact_sensor.data.net_forces_w_history
     if contact_history is not None:
-        return contact_history
+        return to_torch(contact_history)
 
     net_contact_forces = contact_sensor.data.net_forces_w
     if net_contact_forces is None:
         return None
-    return net_contact_forces.unsqueeze(1)
+    return to_torch(net_contact_forces).unsqueeze(1)
 
 
 def _point_to_segment_distance_2d(
@@ -871,7 +872,7 @@ class JointAccPenaltyTerm:
     type_name = "joint_acc_penalty"
 
     def compute(self, context: RewardContext, spec: JointAccPenaltyTermCfg) -> RewardTermResult:
-        raw = torch.sum(torch.square(context.robot.data.joint_acc), dim=1)
+        raw = torch.sum(torch.square(to_torch(context.robot.data.joint_acc)), dim=1)
         return _weighted_result(raw, spec.weight)
 
 
@@ -879,7 +880,7 @@ class JointTorquePenaltyTerm:
     type_name = "joint_torque_penalty"
 
     def compute(self, context: RewardContext, spec: JointTorquePenaltyTermCfg) -> RewardTermResult:
-        raw = torch.sum(torch.square(context.robot.data.applied_torque), dim=1)
+        raw = torch.sum(torch.square(to_torch(context.robot.data.applied_torque)), dim=1)
         return _weighted_result(raw, spec.weight)
 
 
@@ -887,8 +888,8 @@ class JointLimitPenaltyTerm:
     type_name = "joint_limit_penalty"
 
     def compute(self, context: RewardContext, spec: JointLimitPenaltyTermCfg) -> RewardTermResult:
-        out_of_limits = -(context.robot.data.joint_pos - context.robot.data.soft_joint_pos_limits[:, :, 0]).clip(max=0.0)
-        out_of_limits += (context.robot.data.joint_pos - context.robot.data.soft_joint_pos_limits[:, :, 1]).clip(min=0.0)
+        out_of_limits = -(to_torch(context.robot.data.joint_pos) - to_torch(context.robot.data.soft_joint_pos_limits)[:, :, 0]).clip(max=0.0)
+        out_of_limits += (to_torch(context.robot.data.joint_pos) - to_torch(context.robot.data.soft_joint_pos_limits)[:, :, 1]).clip(min=0.0)
         raw = torch.sum(out_of_limits, dim=1)
         return _weighted_result(raw, spec.weight)
 
@@ -898,26 +899,34 @@ class SelfCollisionPenaltyTerm:
 
     def compute(self, context: RewardContext, spec: SelfCollisionPenaltyTermCfg) -> RewardTermResult:
         net_contact_forces = context.contact_sensor.data.net_forces_w_history
+        if net_contact_forces is not None:
+            net_contact_forces = to_torch(net_contact_forces)
         if len(spec.body_indices) == 0:
             if net_contact_forces is not None:
                 raw = torch.zeros(net_contact_forces.shape[0], device=net_contact_forces.device)
             else:
                 net_contact_forces = context.contact_sensor.data.net_forces_w
+                if net_contact_forces is not None:
+                    net_contact_forces = to_torch(net_contact_forces)
                 num_envs = 0 if net_contact_forces is None else net_contact_forces.shape[0]
-                device = context.contact_sensor.device if net_contact_forces is None else net_contact_forces.device
+                device = context.robot.device if net_contact_forces is None else net_contact_forces.device
                 raw = torch.zeros(num_envs, device=device)
             return _weighted_result(raw, spec.weight)
 
         if net_contact_forces is None:
             net_contact_forces = context.contact_sensor.data.net_forces_w
+            if net_contact_forces is not None:
+                net_contact_forces = to_torch(net_contact_forces)
             num_envs = 0 if net_contact_forces is None else net_contact_forces.shape[0]
-            device = context.contact_sensor.device if net_contact_forces is None else net_contact_forces.device
+            device = context.robot.device if net_contact_forces is None else net_contact_forces.device
             return _weighted_result(torch.zeros(num_envs, device=device), spec.weight)
 
         filtered_contact_forces = context.contact_sensor.data.force_matrix_w_history
         if filtered_contact_forces is None:
             raw = torch.zeros(net_contact_forces.shape[0], device=net_contact_forces.device)
             return _weighted_result(raw, spec.weight)
+
+        filtered_contact_forces = to_torch(filtered_contact_forces)
 
         contact_magnitudes = torch.norm(filtered_contact_forces[:, :, spec.body_indices], dim=-1)
         is_contact = contact_magnitudes.amax(dim=1).amax(dim=-1) > spec.force_threshold
@@ -929,22 +938,22 @@ class FootSlipPenaltyTerm:
     type_name = "foot_slip_penalty"
 
     def compute(self, context: RewardContext, spec: FootSlipPenaltyTermCfg) -> RewardTermResult:
-        num_envs = context.robot.data.body_lin_vel_w.shape[0]
-        device = context.robot.data.body_lin_vel_w.device
+        num_envs = to_torch(context.robot.data.body_link_lin_vel_w).shape[0]
+        device = to_torch(context.robot.data.body_link_lin_vel_w).device
         if len(spec.foot_body_indices) == 0 or len(spec.foot_contact_body_indices) == 0:
             return _weighted_result(torch.zeros(num_envs, device=device), spec.weight)
 
-        contact_history = context.contact_sensor.data.net_forces_w_history
+        contact_history = context_contact_history(context.contact_sensor)
         if contact_history is None:
             net_contact_forces = context.contact_sensor.data.net_forces_w
             if net_contact_forces is None:
                 return _weighted_result(torch.zeros(num_envs, device=device), spec.weight)
-            contact_history = net_contact_forces.unsqueeze(1)
+            contact_history = to_torch(net_contact_forces).unsqueeze(1)
 
         is_contact = (
             torch.norm(contact_history[:, :, spec.foot_contact_body_indices], dim=-1).amax(dim=1) > spec.force_threshold
-        ).to(context.robot.data.body_lin_vel_w.dtype)
-        foot_planar_vel = torch.linalg.norm(context.robot.data.body_lin_vel_w[:, spec.foot_body_indices, :2], dim=-1)
+        ).to(to_torch(context.robot.data.body_link_lin_vel_w).dtype)
+        foot_planar_vel = torch.linalg.norm(to_torch(context.robot.data.body_link_lin_vel_w)[:, spec.foot_body_indices, :2], dim=-1)
         raw = torch.sum(foot_planar_vel * is_contact, dim=1)
         return _weighted_result(raw, spec.weight)
 
@@ -1325,7 +1334,8 @@ class Rewards:
         if components:
             reward_vector = torch.stack(components, dim=-1)
         else:
-            reward_vector = torch.zeros(robot.data.joint_pos.shape[0], 0, device=robot.data.joint_pos.device)
+            joint_pos = to_torch(robot.data.joint_pos)
+            reward_vector = torch.zeros(joint_pos.shape[0], 0, device=joint_pos.device)
         total_reward = reward_vector.sum(-1)
 
         self.last_result = RewardComputation(
@@ -1346,7 +1356,7 @@ class Rewards:
         return total_reward
 
 
-@dataclass(frozen=True)
+@dataclass
 class AMPRewardsCfg:
     discriminator_reward_scale: float = 2.0
     discriminator_reward_weight: float = 1.0

@@ -5,32 +5,33 @@ from typing import Protocol
 
 import torch
 from isaaclab.assets import Articulation
-from isaaclab.utils.math import quat_apply_inverse
+from ref2act.common.math import quat_apply_inverse
+from ref2act.isaac_compat import to_torch
 from ref2act.motion.sampling import MotionSampler
 
 from .types import ReferenceMotions
 
 
-@dataclass(frozen=True)
+@dataclass
 class TerminationRuleCfg:
     id: str
     type: str
     enabled: bool = True
 
 
-@dataclass(frozen=True)
+@dataclass
 class EpisodeLengthTimeoutRuleCfg(TerminationRuleCfg):
     id: str = "episode_length_timeout"
     type: str = "episode_length_timeout"
 
 
-@dataclass(frozen=True)
+@dataclass
 class EndOfMotionTimeoutRuleCfg(TerminationRuleCfg):
     id: str = "end_of_motion_timeout"
     type: str = "end_of_motion_timeout"
 
 
-@dataclass(frozen=True)
+@dataclass
 class AnchorPositionFailureRuleCfg(TerminationRuleCfg):
     id: str = "anchor_position_failure"
     type: str = "anchor_position_failure"
@@ -39,7 +40,7 @@ class AnchorPositionFailureRuleCfg(TerminationRuleCfg):
     height_only: bool = True
 
 
-@dataclass(frozen=True)
+@dataclass
 class AnchorOrientationFailureRuleCfg(TerminationRuleCfg):
     id: str = "anchor_orientation_failure"
     type: str = "anchor_orientation_failure"
@@ -47,7 +48,7 @@ class AnchorOrientationFailureRuleCfg(TerminationRuleCfg):
     threshold: float = 0.8
 
 
-@dataclass(frozen=True)
+@dataclass
 class EndEffectorPositionFailureRuleCfg(TerminationRuleCfg):
     id: str = "end_effector_position_failure"
     type: str = "end_effector_position_failure"
@@ -57,7 +58,7 @@ class EndEffectorPositionFailureRuleCfg(TerminationRuleCfg):
     reduction: str = "any"
 
 
-@dataclass(frozen=True)
+@dataclass
 class TerminationSpec:
     timeout_rules: tuple[TerminationRuleCfg, ...]
     failure_rules: tuple[TerminationRuleCfg, ...]
@@ -78,7 +79,7 @@ class TerminationContext:
         if cached is not None:
             return cached
 
-        robot_pos = self.robot.data.body_pos_w[:, anchor_body_index]
+        robot_pos = to_torch(self.robot.data.body_link_pos_w)[:, anchor_body_index]
         ref_pos = self.reference_motion.body_positions[:, anchor_body_index]
         diff = robot_pos - ref_pos
         if height_only:
@@ -94,11 +95,12 @@ class TerminationContext:
         if cached is not None:
             return cached
 
-        robot_anchor_quat_w = self.robot.data.body_quat_w[:, anchor_body_index]
+        robot_anchor_quat_w = to_torch(self.robot.data.body_link_quat_w)[:, anchor_body_index]
         reference_anchor_quat_w = self.reference_motion.body_quaternions[:, anchor_body_index]
 
-        robot_projected_gravity_b = quat_apply_inverse(robot_anchor_quat_w, self.robot.data.GRAVITY_VEC_W)
-        reference_projected_gravity_b = quat_apply_inverse(reference_anchor_quat_w, self.robot.data.GRAVITY_VEC_W)
+        gravity_vec_w = to_torch(self.robot.data.GRAVITY_VEC_W)
+        robot_projected_gravity_b = quat_apply_inverse(robot_anchor_quat_w, gravity_vec_w)
+        reference_projected_gravity_b = quat_apply_inverse(reference_anchor_quat_w, gravity_vec_w)
         result = torch.abs(robot_projected_gravity_b[:, 2] - reference_projected_gravity_b[:, 2])
         self._cache[cache_key] = result
         return result
@@ -114,7 +116,7 @@ class TerminationContext:
         if cached is not None:
             return cached
 
-        robot_pos = self.robot.data.body_pos_w[:, end_effector_body_indices]
+        robot_pos = to_torch(self.robot.data.body_link_pos_w)[:, end_effector_body_indices]
         ref_pos = self.reference_motion.body_pos_relative[:, end_effector_body_indices]
         diff = robot_pos - ref_pos
         if height_only:

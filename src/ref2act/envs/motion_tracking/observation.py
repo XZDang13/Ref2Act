@@ -5,13 +5,14 @@ from dataclasses import dataclass
 import torch
 from isaaclab.assets import Articulation
 from isaaclab.scene import InteractiveScene
-from isaaclab.utils.math import quat_apply_inverse
 
 from ref2act.common.math import (
+    quat_apply_inverse,
     quaternion_to_rotation_6d,
     quaternion_to_tangent_and_normal,
     relative_transform,
 )
+from ref2act.isaac_compat import to_torch
 from ref2act.common.observation_spec import (
     ObservationComposer,
     ObservationContext,
@@ -32,6 +33,62 @@ def _anchor_ang_vel_b(anchor_quat_w: torch.Tensor, anchor_ang_vel_w: torch.Tenso
 
 def _anchor_lin_vel_b(anchor_quat_w: torch.Tensor, anchor_lin_vel_w: torch.Tensor) -> torch.Tensor:
     return quat_apply_inverse(anchor_quat_w, anchor_lin_vel_w)
+
+
+def build_observation_context(
+    robot_state: MotionState,
+    reference_state: MotionState,
+    gravity_vector: torch.Tensor,
+    previous_action: torch.Tensor,
+) -> ObservationContext:
+    """Build the shared, simulator-independent observation context."""
+    target_projected_gravity_b = quat_apply_inverse(reference_state.anchor_quat, gravity_vector)
+    robot_projected_gravity_b = quat_apply_inverse(robot_state.anchor_quat, gravity_vector)
+    target_anchor_ori_6d = quaternion_to_rotation_6d(reference_state.anchor_quat)
+    robot_anchor_ori_6d = quaternion_to_rotation_6d(robot_state.anchor_quat)
+    robot_anchor_lin_vel_b = _anchor_lin_vel_b(robot_state.anchor_quat, robot_state.anchor_lin_vel)
+    target_anchor_ang_vel_b = _anchor_ang_vel_b(reference_state.anchor_quat, reference_state.anchor_ang_vel)
+    robot_anchor_ang_vel_b = _anchor_ang_vel_b(robot_state.anchor_quat, robot_state.anchor_ang_vel)
+
+    motion_anchor_pos_b, motion_quat_b = relative_transform(
+        robot_state.anchor_pos,
+        robot_state.anchor_quat,
+        reference_state.anchor_pos,
+        reference_state.anchor_quat,
+    )
+    body_pos_b, body_quat_b = relative_transform(
+        robot_state.anchor_pos,
+        robot_state.anchor_quat,
+        robot_state.key_pos,
+        robot_state.key_quat,
+    )
+    motion_ori_b = quaternion_to_rotation_6d(motion_quat_b)
+
+    return ObservationContext(
+        target_projected_gravity=target_projected_gravity_b,
+        target_anchor_ori_6d=target_anchor_ori_6d,
+        target_joint_pos=reference_state.joint_pos,
+        target_joint_vel=reference_state.joint_vel,
+        target_anchor_lin_vel=reference_state.anchor_lin_vel,
+        target_anchor_ang_vel_b=target_anchor_ang_vel_b,
+        projected_gravity=robot_projected_gravity_b,
+        anchor_ori_6d=robot_anchor_ori_6d,
+        anchor_lin_vel_b=robot_anchor_lin_vel_b,
+        anchor_ang_vel_b=robot_anchor_ang_vel_b,
+        joint_pos=robot_state.joint_pos,
+        joint_vel=robot_state.joint_vel,
+        previous_action=previous_action.clone(),
+        motion_anchor_pos_b=motion_anchor_pos_b,
+        motion_ori_b=motion_ori_b,
+        motion_anchor_ori_b=motion_ori_b,
+        relative_anchor_pos=motion_anchor_pos_b,
+        relative_anchor_tangent_and_normal=quaternion_to_tangent_and_normal(motion_quat_b),
+        relative_key_pos=body_pos_b.flatten(1),
+        relative_key_tangent_and_normal=quaternion_to_tangent_and_normal(body_quat_b).flatten(1),
+        body_pos_b=body_pos_b.flatten(1),
+        body_ori_b=quaternion_to_rotation_6d(body_quat_b).flatten(1),
+        anchor_lin_vel=robot_state.anchor_lin_vel,
+    )
 
 
 def default_training_observation_spec(add_noise: bool = True) -> ObservationSpec:
@@ -93,7 +150,7 @@ def default_training_observation_spec(add_noise: bool = True) -> ObservationSpec
     )
 
 
-@dataclass(frozen=True)
+@dataclass
 class ObservationPreset:
     spec: ObservationSpec
 
@@ -119,13 +176,13 @@ class Observation:
         return self.spec.describe(self.layout)
 
     def get_robot_state(self, robot: Articulation, scene: InteractiveScene) -> MotionState:
-        joint_pos = robot.data.joint_pos
-        joint_vel = robot.data.joint_vel
+        joint_pos = to_torch(robot.data.joint_pos)
+        joint_vel = to_torch(robot.data.joint_vel)
 
-        local_body_positions_w = robot.data.body_pos_w - scene.env_origins.unsqueeze(1)
-        body_quaternions_w = robot.data.body_quat_w
-        body_linear_velocities_w = robot.data.body_lin_vel_w
-        body_angular_velocities_w = robot.data.body_ang_vel_w
+        local_body_positions_w = to_torch(robot.data.body_link_pos_w) - scene.env_origins.unsqueeze(1)
+        body_quaternions_w = to_torch(robot.data.body_link_quat_w)
+        body_linear_velocities_w = to_torch(robot.data.body_link_lin_vel_w)
+        body_angular_velocities_w = to_torch(robot.data.body_link_ang_vel_w)
 
         anchor_positions = local_body_positions_w[:, self.anchor_body_index]
         anchor_quaternions = body_quaternions_w[:, self.anchor_body_index]
@@ -196,54 +253,11 @@ class Observation:
         robot_state = self.get_robot_state(robot, scene)
         reference_state = self.get_reference_motion_state(reference_motion, scene)
 
-        gravity_vector = robot.data.GRAVITY_VEC_W
-
-        target_projected_gravity_b = quat_apply_inverse(reference_state.anchor_quat, gravity_vector)
-        robot_projected_gravity_b = quat_apply_inverse(robot_state.anchor_quat, gravity_vector)
-        target_anchor_ori_6d = quaternion_to_rotation_6d(reference_state.anchor_quat)
-        robot_anchor_ori_6d = quaternion_to_rotation_6d(robot_state.anchor_quat)
-        robot_anchor_lin_vel_b = _anchor_lin_vel_b(robot_state.anchor_quat, robot_state.anchor_lin_vel)
-        target_anchor_ang_vel_b = _anchor_ang_vel_b(reference_state.anchor_quat, reference_state.anchor_ang_vel)
-        robot_anchor_ang_vel_b = _anchor_ang_vel_b(robot_state.anchor_quat, robot_state.anchor_ang_vel)
-
-        motion_anchor_pos_b, motion_quat_b = relative_transform(
-            robot_state.anchor_pos,
-            robot_state.anchor_quat,
-            reference_state.anchor_pos,
-            reference_state.anchor_quat,
-        )
-        body_pos_b, body_quat_b = relative_transform(
-            robot_state.anchor_pos,
-            robot_state.anchor_quat,
-            robot_state.key_pos,
-            robot_state.key_quat,
-        )
-        motion_ori_b = quaternion_to_rotation_6d(motion_quat_b)
-
-        return ObservationContext(
-            target_projected_gravity=target_projected_gravity_b,
-            target_anchor_ori_6d=target_anchor_ori_6d,
-            target_joint_pos=reference_state.joint_pos,
-            target_joint_vel=reference_state.joint_vel,
-            target_anchor_lin_vel=reference_state.anchor_lin_vel,
-            target_anchor_ang_vel_b=target_anchor_ang_vel_b,
-            projected_gravity=robot_projected_gravity_b,
-            anchor_ori_6d=robot_anchor_ori_6d,
-            anchor_lin_vel_b=robot_anchor_lin_vel_b,
-            anchor_ang_vel_b=robot_anchor_ang_vel_b,
-            joint_pos=robot_state.joint_pos,
-            joint_vel=robot_state.joint_vel,
-            previous_action=last_applied_actions.clone(),
-            motion_anchor_pos_b=motion_anchor_pos_b,
-            motion_ori_b=motion_ori_b,
-            motion_anchor_ori_b=motion_ori_b,
-            relative_anchor_pos=motion_anchor_pos_b,
-            relative_anchor_tangent_and_normal=quaternion_to_tangent_and_normal(motion_quat_b),
-            relative_key_pos=body_pos_b.flatten(1),
-            relative_key_tangent_and_normal=quaternion_to_tangent_and_normal(body_quat_b).flatten(1),
-            body_pos_b=body_pos_b.flatten(1),
-            body_ori_b=quaternion_to_rotation_6d(body_quat_b).flatten(1),
-            anchor_lin_vel=robot_state.anchor_lin_vel,
+        return build_observation_context(
+            robot_state,
+            reference_state,
+            to_torch(robot.data.GRAVITY_VEC_W),
+            last_applied_actions,
         )
 
     def reset(
@@ -254,7 +268,7 @@ class Observation:
         scene: InteractiveScene,
         last_applied_actions: torch.Tensor,
     ) -> None:
-        device = getattr(robot.data, "device", robot.data.joint_pos.device)
+        device = getattr(robot.data, "device", to_torch(robot.data.joint_pos).device)
         if isinstance(env_ids, torch.Tensor):
             env_ids = env_ids.to(device=device, dtype=torch.long)
         else:

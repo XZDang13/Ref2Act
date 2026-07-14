@@ -137,19 +137,19 @@ def test_default_observation_keeps_privileged_observation_clean() -> None:
         data=types.SimpleNamespace(
             joint_pos=joint_pos.clone(),
             joint_vel=joint_vel.clone(),
-            body_pos_w=torch.tensor(
+            body_link_pos_w=torch.tensor(
                 [[[0.0, 0.0, 0.0], [0.2, 0.3, 0.4]]],
                 dtype=torch.float32,
             ),
-            body_quat_w=torch.tensor(
-                [[[1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]]],
+            body_link_quat_w=torch.tensor(
+                [[[0.0, 0.0, 0.0, 1.0], [0.0, 0.0, 0.0, 1.0]]],
                 dtype=torch.float32,
             ),
-            body_lin_vel_w=torch.tensor(
+            body_link_lin_vel_w=torch.tensor(
                 [[[0.9, 1.0, 1.1], [0.0, 0.0, 0.0]]],
                 dtype=torch.float32,
             ),
-            body_ang_vel_w=torch.tensor(
+            body_link_ang_vel_w=torch.tensor(
                 [[[0.4, 0.5, 0.6], [0.0, 0.0, 0.0]]],
                 dtype=torch.float32,
             ),
@@ -164,7 +164,7 @@ def test_default_observation_keeps_privileged_observation_clean() -> None:
             dtype=torch.float32,
         ),
         body_quaternions=torch.tensor(
-            [[[1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]]],
+            [[[0.0, 0.0, 0.0, 1.0], [0.0, 0.0, 0.0, 1.0]]],
             dtype=torch.float32,
         ),
         body_linear_velocities=torch.stack(
@@ -189,7 +189,7 @@ def test_default_observation_keeps_privileged_observation_clean() -> None:
 
     assert torch.allclose(robot.data.joint_pos, joint_pos)
     assert torch.allclose(robot.data.joint_vel, joint_vel)
-    assert torch.allclose(robot.data.body_ang_vel_w[:, 0], anchor_ang_vel)
+    assert torch.allclose(robot.data.body_link_ang_vel_w[:, 0], anchor_ang_vel)
 
     robot_obs = obs["robot"]
     privilege_obs = obs["privilege"]
@@ -199,41 +199,34 @@ def test_default_observation_keeps_privileged_observation_clean() -> None:
     assert not torch.allclose(robot_obs[0, 9:11], joint_pos[0])
     assert not torch.allclose(robot_obs[0, 11:13], joint_vel[0])
 
+    description = observation.describe()
+    term_slice = lambda term_id: description.term_slice("privilege", term_id)
     num_joints = joint_pos.shape[1]
     num_keys = 2
-    motion_anchor_pos_start = 2 * num_joints
-    motion_anchor_ori_start = motion_anchor_pos_start + 3
-    body_pos_start = motion_anchor_ori_start + 6
-    body_ori_start = body_pos_start + num_keys * 3
-    anchor_lin_start = body_ori_start + num_keys * 6
-    anchor_ang_start = anchor_lin_start + 3
-    joint_pos_start = anchor_ang_start + 3
-    joint_vel_start = joint_pos_start + num_joints
-    last_action_start = joint_vel_start + num_joints
 
-    assert torch.allclose(privilege_obs[0, :num_joints], torch.zeros(num_joints))
-    assert torch.allclose(privilege_obs[0, num_joints:2 * num_joints], torch.zeros(num_joints))
+    assert torch.allclose(privilege_obs[0, term_slice("priv_target_joint_pos")], torch.zeros(num_joints))
+    assert torch.allclose(privilege_obs[0, term_slice("priv_target_joint_vel")], torch.zeros(num_joints))
     assert torch.allclose(
-        privilege_obs[0, motion_anchor_pos_start:motion_anchor_pos_start + 3],
+        privilege_obs[0, term_slice("priv_motion_anchor_pos_b")],
         torch.zeros(3),
     )
     assert torch.allclose(
-        privilege_obs[0, motion_anchor_ori_start:motion_anchor_ori_start + 6],
+        privilege_obs[0, term_slice("priv_motion_anchor_ori_b")],
         identity_6d,
     )
     assert torch.allclose(
-        privilege_obs[0, body_pos_start:body_pos_start + num_keys * 3],
+        privilege_obs[0, term_slice("body_pos")],
         torch.tensor([0.0, 0.0, 0.0, 0.2, 0.3, 0.4], dtype=torch.float32),
     )
     assert torch.allclose(
-        privilege_obs[0, body_ori_start:body_ori_start + num_keys * 6],
+        privilege_obs[0, term_slice("body_ori")],
         identity_6d.repeat(num_keys),
     )
-    assert torch.allclose(privilege_obs[0, anchor_lin_start:anchor_lin_start + 3], robot.data.body_lin_vel_w[0, 0])
-    assert torch.allclose(privilege_obs[0, anchor_ang_start:anchor_ang_start + 3], anchor_ang_vel[0])
-    assert torch.allclose(privilege_obs[0, joint_pos_start:joint_pos_start + num_joints], joint_pos[0])
-    assert torch.allclose(privilege_obs[0, joint_vel_start:joint_vel_start + num_joints], joint_vel[0])
-    assert torch.allclose(privilege_obs[0, last_action_start:last_action_start + num_joints], last_action[0])
+    assert torch.allclose(privilege_obs[0, term_slice("priv_anchor_lin_vel_b")], robot.data.body_link_lin_vel_w[0, 0])
+    assert torch.allclose(privilege_obs[0, term_slice("priv_anchor_ang_vel_b")], anchor_ang_vel[0])
+    assert torch.allclose(privilege_obs[0, term_slice("priv_joint_pos")], joint_pos[0])
+    assert torch.allclose(privilege_obs[0, term_slice("priv_joint_vel")], joint_vel[0])
+    assert torch.allclose(privilege_obs[0, term_slice("priv_previous_action")], last_action[0])
 
 
 def test_window_observation_reset_fills_history_oldest_to_newest() -> None:
@@ -264,10 +257,10 @@ def test_window_observation_reset_fills_history_oldest_to_newest() -> None:
         data=types.SimpleNamespace(
             joint_pos=torch.tensor([[0.1, 0.2]], dtype=torch.float32),
             joint_vel=torch.zeros((1, 2), dtype=torch.float32),
-            body_pos_w=torch.zeros((1, 1, 3), dtype=torch.float32),
-            body_quat_w=torch.tensor([[[1.0, 0.0, 0.0, 0.0]]], dtype=torch.float32),
-            body_lin_vel_w=torch.zeros((1, 1, 3), dtype=torch.float32),
-            body_ang_vel_w=torch.zeros((1, 1, 3), dtype=torch.float32),
+            body_link_pos_w=torch.zeros((1, 1, 3), dtype=torch.float32),
+            body_link_quat_w=torch.tensor([[[0.0, 0.0, 0.0, 1.0]]], dtype=torch.float32),
+            body_link_lin_vel_w=torch.zeros((1, 1, 3), dtype=torch.float32),
+            body_link_ang_vel_w=torch.zeros((1, 1, 3), dtype=torch.float32),
             GRAVITY_VEC_W=torch.tensor([[0.0, 0.0, -1.0]], dtype=torch.float32),
         )
     )
@@ -275,7 +268,7 @@ def test_window_observation_reset_fills_history_oldest_to_newest() -> None:
         joint_pos=torch.zeros((1, 2), dtype=torch.float32),
         joint_vel=torch.zeros((1, 2), dtype=torch.float32),
         body_positions=torch.zeros((1, 1, 3), dtype=torch.float32),
-        body_quaternions=torch.tensor([[[1.0, 0.0, 0.0, 0.0]]], dtype=torch.float32),
+        body_quaternions=torch.tensor([[[0.0, 0.0, 0.0, 1.0]]], dtype=torch.float32),
         body_linear_velocities=torch.zeros((1, 1, 3), dtype=torch.float32),
         body_angular_velocities=torch.zeros((1, 1, 3), dtype=torch.float32),
     )

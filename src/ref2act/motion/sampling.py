@@ -11,7 +11,7 @@ import torch.nn.functional as F
 from ref2act.common.utils import IndexLike
 
 from .library import MotionClip, MotionLib
-from .segments import build_legacy_time_segments
+from .segments import build_time_bins
 
 
 DEFAULT_ANCHOR_FAILURE_BIN_SIZE = 0.3
@@ -127,7 +127,6 @@ class MotionSampler:
         self.bin_types: list[torch.Tensor] | None = None
         self.bin_reset_times: list[torch.Tensor] | None = None
         self.bin_reset_eligible: list[torch.Tensor] | None = None
-        self.bin_uses_segment_metadata: list[bool] | None = None
         self.bin_fail_counts: list[torch.Tensor] | None = None
         self.bin_sample_counts: list[torch.Tensor] | None = None
         self.motion_reset_eligible: torch.Tensor | None = None
@@ -147,7 +146,6 @@ class MotionSampler:
             and (
                 self.segment_source == SegmentSource.Anchor
                 or self.bin_size is not None
-                or (self.segment_source == SegmentSource.Time and self.motion_lib.all_clips_have_segments)
             )
         )
         if should_init_failure_bins:
@@ -413,39 +411,6 @@ class MotionSampler:
         else:
             target_bin_indices = torch.full(motion_ids.shape, -1, dtype=torch.long, device=self.device)
 
-        if not torch.any(self.motion_lib.motion_has_segments[motion_ids]):
-            return times, target_bin_indices
-
-        if (
-            self._has_padded_failure_bins()
-            and self._bin_start_times_padded is not None
-            and bool(torch.all(self.motion_lib.motion_has_segments[motion_ids]).item())
-        ):
-            num_bins = self.num_bins_per_motion[motion_ids]
-            segment_indices = torch.floor(torch.rand(motion_ids.shape, device=self.device) * num_bins).long()
-            segment_indices = torch.clamp(segment_indices, max=num_bins - 1)
-            times = self._bin_start_times_padded[motion_ids, segment_indices]
-            target_bin_indices = segment_indices
-            return times, target_bin_indices
-
-        for motion_id in torch.unique(motion_ids, sorted=True).tolist():
-            if not bool(self.motion_lib.motion_has_segments[motion_id].item()):
-                continue
-
-            mask = motion_ids == motion_id
-            segment_start_times = self.motion_lib.motion_segment_start_times[motion_id]
-            if segment_start_times is None or segment_start_times.numel() == 0:
-                continue
-
-            segment_indices = torch.randint(
-                segment_start_times.shape[0],
-                (int(mask.sum().item()),),
-                device=self.device,
-            )
-            times[mask] = segment_start_times[segment_indices]
-            if self._has_failure_bins():
-                target_bin_indices[mask] = segment_indices
-
         return times, target_bin_indices
 
     def _sample_anchor_source_random_times_for_motion_ids(
@@ -646,18 +611,11 @@ class MotionSampler:
     def _build_time_source_bins_for_clip(
         self,
         clip: MotionClip,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, bool]:
-        if clip.has_segments:
-            return (
-                clip.segment_start_times.to(device=self.device),
-                clip.segment_end_times.to(device=self.device),
-                clip.segment_types.to(device=self.device),
-                True,
-            )
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if self.bin_size is None:
-            raise RuntimeError("Time-segment target bins require either segment metadata or bin_size.")
+            raise RuntimeError("Time-segment target bins require bin_size.")
 
-        start_times_np, end_times_np, segment_types_np = build_legacy_time_segments(
+        start_times_np, end_times_np, segment_types_np = build_time_bins(
             duration=clip.duration,
             bin_size=self.bin_size,
         )
@@ -665,7 +623,6 @@ class MotionSampler:
             torch.as_tensor(start_times_np, dtype=torch.float32, device=self.device),
             torch.as_tensor(end_times_np, dtype=torch.float32, device=self.device),
             torch.as_tensor(segment_types_np, dtype=torch.long, device=self.device),
-            False,
         )
 
     def _build_anchor_source_bins_for_clip(
@@ -826,7 +783,6 @@ class MotionSampler:
         self.bin_types = []
         self.bin_reset_times = []
         self.bin_reset_eligible = []
-        self.bin_uses_segment_metadata = []
         num_bins_per_motion: list[int] = []
         init_start_time = perf_counter()
         last_progress_time = init_start_time
@@ -842,14 +798,10 @@ class MotionSampler:
                 start_times, end_times, segment_types, reset_times, reset_eligible = (
                     self._build_anchor_source_bins_for_clip(clip)
                 )
-                self.bin_uses_segment_metadata.append(True)
             else:
-                start_times, end_times, segment_types, uses_segment_metadata = self._build_time_source_bins_for_clip(
-                    clip
-                )
+                start_times, end_times, segment_types = self._build_time_source_bins_for_clip(clip)
                 reset_times = start_times.clone()
                 reset_eligible = torch.ones(start_times.shape, dtype=torch.bool, device=self.device)
-                self.bin_uses_segment_metadata.append(uses_segment_metadata)
 
             self.bin_start_times.append(start_times)
             self.bin_end_times.append(end_times)
@@ -987,7 +939,6 @@ class MotionSampler:
             and self.bin_types is not None
             and self.bin_reset_times is not None
             and self.bin_reset_eligible is not None
-            and self.bin_uses_segment_metadata is not None
             and self.bin_fail_counts is not None
             and self.bin_sample_counts is not None
             and self._has_padded_failure_bins()
@@ -999,7 +950,7 @@ class MotionSampler:
 
     def _anchor_sampling_error(self, message: str) -> RuntimeError:
         return RuntimeError(
-            f"{message} Reconvert the motion .npz files with `ref2act-convert --segment-method anchor`."
+            f"{message} Provide an enabled reset_anchors.json sidecar next to final_motion.npz."
         )
 
     def _check_anchor_motion_ids_have_eligible_resets(self, motion_ids: torch.Tensor) -> None:
@@ -1034,7 +985,7 @@ class MotionSampler:
                 )
             raise RuntimeError(
                 "Failure-weighted sampling requires initialized time bins. "
-                "Set sampler bin_size or reconvert the motion .npz files with segment metadata."
+                "Set sampler bin_size."
             )
 
     def _times_to_bins(self, motion_ids: torch.Tensor, times: torch.Tensor) -> torch.Tensor:

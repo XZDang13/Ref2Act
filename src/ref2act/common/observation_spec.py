@@ -17,7 +17,7 @@ def ensure_batch_vector(tensor: torch.Tensor) -> torch.Tensor:
     return tensor.flatten(start_dim=1)
 
 
-@dataclass(frozen=True)
+@dataclass
 class ObservationNoiseSpec:
     low: float
     high: float
@@ -31,7 +31,7 @@ class ObservationNoiseSpec:
         return value + torch.empty_like(value).uniform_(self.low, self.high)
 
 
-@dataclass(frozen=True)
+@dataclass
 class ObservationTermSpec:
     id: str
     type: str
@@ -45,14 +45,14 @@ class ObservationTermSpec:
             raise ValueError("Observation term window_length must be at least 1.")
 
 
-@dataclass(frozen=True)
+@dataclass
 class ObservationGroupSpec:
     name: str
     terms: tuple[ObservationTermSpec, ...]
     enabled: bool = True
 
 
-@dataclass(frozen=True)
+@dataclass
 class ObservationSpec:
     groups: tuple[ObservationGroupSpec, ...]
 
@@ -66,32 +66,41 @@ class ObservationSpec:
     ) -> "ObservationDescription":
         registry = DEFAULT_OBSERVATION_TERM_REGISTRY if registry is None else registry
         group_dims: dict[str, int] = {}
+        term_slices: dict[str, dict[str, slice]] = {}
         for group in self.enabled_groups():
             group_dim = 0
+            group_slices: dict[str, slice] = {}
             for term_spec in group.terms:
                 if not term_spec.enabled:
                     continue
                 term = registry[term_spec.type]
                 term_dim = term.dimension(layout, term_spec)
                 if term_spec.flatten:
-                    group_dim += term_dim * term_spec.window_length
+                    output_dim = term_dim * term_spec.window_length
                 elif term_spec.window_length == 1:
-                    group_dim += term_dim
+                    output_dim = term_dim
                 else:
                     raise ValueError(
                         f"Observation description only supports flattened history or single-frame terms: {term_spec.id}"
                     )
+                group_slices[term_spec.id] = slice(group_dim, group_dim + output_dim)
+                group_dim += output_dim
             group_dims[group.name] = group_dim
-        return ObservationDescription(group_dims=group_dims)
+            term_slices[group.name] = group_slices
+        return ObservationDescription(group_dims=group_dims, term_slices=term_slices)
 
 
 @dataclass(frozen=True)
 class ObservationDescription:
     group_dims: Mapping[str, int]
+    term_slices: Mapping[str, Mapping[str, slice]]
 
     @property
     def total_dim(self) -> int:
         return sum(self.group_dims.values())
+
+    def term_slice(self, group_name: str, term_id: str) -> slice:
+        return self.term_slices[group_name][term_id]
 
 
 @dataclass(frozen=True)

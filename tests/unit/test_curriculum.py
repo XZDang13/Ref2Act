@@ -22,14 +22,17 @@ def _configclass(cls, **kwargs):
 def _load_curriculum_module():
     isaaclab = types.ModuleType("isaaclab")
     utils_mod = types.ModuleType("isaaclab.utils")
-    utils_mod.configclass = _configclass
+    configclass_mod = types.ModuleType("isaaclab.utils.configclass")
+    configclass_mod.configclass = _configclass
     isaaclab.utils = utils_mod
 
     previous_isaaclab = sys.modules.get("isaaclab")
     previous_utils = sys.modules.get("isaaclab.utils")
+    previous_configclass = sys.modules.get("isaaclab.utils.configclass")
 
     sys.modules["isaaclab"] = isaaclab
     sys.modules["isaaclab.utils"] = utils_mod
+    sys.modules["isaaclab.utils.configclass"] = configclass_mod
     try:
         sys.modules.pop("ref2act.envs.motion_tracking.curriculum", None)
         return importlib.import_module("ref2act.envs.motion_tracking.curriculum")
@@ -42,6 +45,10 @@ def _load_curriculum_module():
             sys.modules.pop("isaaclab.utils", None)
         else:
             sys.modules["isaaclab.utils"] = previous_utils
+        if previous_configclass is None:
+            sys.modules.pop("isaaclab.utils.configclass", None)
+        else:
+            sys.modules["isaaclab.utils.configclass"] = previous_configclass
 
 
 curriculum_mod = _load_curriculum_module()

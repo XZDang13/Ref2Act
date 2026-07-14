@@ -27,12 +27,15 @@ G1_CFG = ArticulationCfg(
         usd_path=str(
             robot_asset_path(
                 "g1",
-                "g1_23_dof_rubber_hand",
-                "g1_23dof_rubber_hand",
-                "g1_23dof_rubber_hand.usd",
+                "g1_23_dof",
+                "g1_23dof.usda",
             )
         ),
-        activate_contact_sensors=True,
+        # The nested G1 USD authors PhysxContactReportAPI on the two ankle
+        # bodies explicitly.  Isaac's generic activation helper assumes a
+        # flat rigid-body hierarchy and produces invalid duplicated paths for
+        # this asset.
+        activate_contact_sensors=False,
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
             disable_gravity=False,
             retain_accelerations=False,

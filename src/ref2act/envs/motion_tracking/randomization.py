@@ -1,8 +1,11 @@
 import torch
+import warp as wp
 
 import isaaclab.utils.math as math_utils
 from isaaclab.assets import Articulation, RigidObject
 from isaaclab.managers import EventTermCfg, ManagerTermBase, SceneEntityCfg
+
+from ref2act.isaac_compat import to_torch
 
 
 def _resolve_asset(env, *entity_cfgs: SceneEntityCfg | None) -> Articulation:
@@ -22,16 +25,16 @@ def _resolve_asset(env, *entity_cfgs: SceneEntityCfg | None) -> Articulation:
 
 def _resolve_env_ids(env, env_ids: torch.Tensor | None, device: str) -> torch.Tensor:
     if env_ids is None:
-        return torch.arange(env.scene.num_envs, device=device)
-    return env_ids.to(device=device)
+        return torch.arange(env.scene.num_envs, device=device, dtype=torch.int32)
+    return env_ids.to(device=device, dtype=torch.int32)
 
 
 def _resolve_ids(ids: slice | list[int] | torch.Tensor | None, total: int, device: str) -> torch.Tensor:
     if ids == slice(None) or ids is None:
-        return torch.arange(total, device=device)
+        return torch.arange(total, device=device, dtype=torch.int32)
     if isinstance(ids, torch.Tensor):
-        return ids.to(device=device)
-    return torch.tensor(ids, device=device)
+        return ids.to(device=device, dtype=torch.int32)
+    return torch.tensor(ids, device=device, dtype=torch.int32)
 
 
 def _iter_group_cfgs(
@@ -60,22 +63,25 @@ def randomize_rigid_body_com_from_default(
     com_range: dict[str, tuple[float, float]],
 ):
     asset = _resolve_asset(env, asset_cfg)
-    env_ids_cpu = _resolve_env_ids(env, env_ids, "cpu")
-    body_ids = _resolve_ids(asset_cfg.body_ids, asset.num_bodies, "cpu")
+    env_ids_device = _resolve_env_ids(env, env_ids, asset.device)
+    body_ids = _resolve_ids(asset_cfg.body_ids, asset.num_bodies, asset.device)
 
     default_com_cache = _get_env_cache(env, "_ref2act_default_com_cache")
     if asset_cfg.name not in default_com_cache:
-        default_com_cache[asset_cfg.name] = asset.root_physx_view.get_coms().clone()
+        default_com_cache[asset_cfg.name] = to_torch(asset.data.body_com_pose_b).clone()
 
     default_coms = default_com_cache[asset_cfg.name]
-    coms = asset.root_physx_view.get_coms().clone()
-    coms[env_ids_cpu[:, None], body_ids] = default_coms[env_ids_cpu[:, None], body_ids]
+    coms = default_coms.clone()
 
     range_list = [com_range.get(axis, (0.0, 0.0)) for axis in ("x", "y", "z")]
-    ranges = torch.tensor(range_list, device="cpu")
-    offsets = math_utils.sample_uniform(ranges[:, 0], ranges[:, 1], (len(env_ids_cpu), 1, 3), device="cpu")
-    coms[env_ids_cpu[:, None], body_ids, :3] += offsets
-    asset.root_physx_view.set_coms(coms, env_ids_cpu)
+    ranges = torch.tensor(range_list, device=asset.device)
+    offsets = math_utils.sample_uniform(
+        ranges[:, 0], ranges[:, 1], (len(env_ids_device), 1, 3), device=asset.device
+    )
+    coms[env_ids_device[:, None], body_ids, :3] += offsets
+    asset.set_coms_index(
+        coms=coms[env_ids_device[:, None], body_ids], body_ids=body_ids, env_ids=env_ids_device
+    )
 
 
 def randomize_group_body_masses(
@@ -97,29 +103,29 @@ def randomize_group_body_masses(
         ]
     )
     asset = _resolve_asset(env, *(cfg for _, cfg, _ in group_cfgs))
-    env_ids_cpu = _resolve_env_ids(env, env_ids, "cpu")
+    env_ids_device = _resolve_env_ids(env, env_ids, asset.device)
 
-    masses = asset.root_physx_view.get_masses()
-    inertias = asset.root_physx_view.get_inertias()
+    masses = to_torch(asset.data.body_mass).clone()
+    inertias = to_torch(asset.data.body_inertia).clone()
 
     seen_body_ids: set[int] = set()
     for group_name, group_cfg, scale_range in group_cfgs:
-        body_ids = _resolve_ids(group_cfg.body_ids, asset.num_bodies, "cpu")
+        body_ids = _resolve_ids(group_cfg.body_ids, asset.num_bodies, asset.device)
         overlap = seen_body_ids.intersection(body_ids.tolist())
         if overlap:
             raise ValueError(f"Structured mass randomization group '{group_name}' overlaps with another group.")
         seen_body_ids.update(body_ids.tolist())
 
-        scale = math_utils.sample_uniform(*scale_range, (len(env_ids_cpu), 1), device="cpu")
-        default_mass = asset.data.default_mass[env_ids_cpu[:, None], body_ids].clone()
-        masses[env_ids_cpu[:, None], body_ids] = torch.clamp(default_mass * scale, min=min_mass)
+        scale = math_utils.sample_uniform(*scale_range, (len(env_ids_device), 1), device=asset.device)
+        default_mass = to_torch(asset.data.default_mass)[env_ids_device[:, None], body_ids].clone()
+        masses[env_ids_device[:, None], body_ids] = torch.clamp(default_mass * scale, min=min_mass)
 
-        ratios = masses[env_ids_cpu[:, None], body_ids] / default_mass
-        default_inertia = asset.data.default_inertia[env_ids_cpu[:, None], body_ids].clone()
-        inertias[env_ids_cpu[:, None], body_ids] = default_inertia * ratios[..., None]
+        ratios = masses[env_ids_device[:, None], body_ids] / default_mass
+        default_inertia = to_torch(asset.data.default_inertia)[env_ids_device[:, None], body_ids].clone()
+        inertias[env_ids_device[:, None], body_ids] = default_inertia * ratios[..., None]
 
-    asset.root_physx_view.set_masses(masses, env_ids_cpu)
-    asset.root_physx_view.set_inertias(inertias, env_ids_cpu)
+    asset.set_masses_index(masses=masses[env_ids_device], env_ids=env_ids_device)
+    asset.set_inertias_index(inertias=inertias[env_ids_device], env_ids=env_ids_device)
 
 
 def randomize_group_actuator_gains(
@@ -142,8 +148,8 @@ def randomize_group_actuator_gains(
     asset = _resolve_asset(env, *(cfg for _, cfg, _ in group_cfgs))
     env_ids_device = _resolve_env_ids(env, env_ids, asset.device)
 
-    joint_stiffness = asset.data.default_joint_stiffness[env_ids_device].clone()
-    joint_damping = asset.data.default_joint_damping[env_ids_device].clone()
+    joint_stiffness = to_torch(asset.data.default_joint_stiffness)[env_ids_device].clone()
+    joint_damping = to_torch(asset.data.default_joint_damping)[env_ids_device].clone()
 
     seen_joint_ids: set[int] = set()
     for group_name, group_cfg, scale_range in group_cfgs:
@@ -154,11 +160,11 @@ def randomize_group_actuator_gains(
         seen_joint_ids.update(joint_ids.tolist())
 
         scale = math_utils.sample_uniform(*scale_range, (len(env_ids_device), 1), device=asset.device)
-        joint_stiffness[:, joint_ids] = asset.data.default_joint_stiffness[env_ids_device][:, joint_ids] * scale
-        joint_damping[:, joint_ids] = asset.data.default_joint_damping[env_ids_device][:, joint_ids] * scale
+        joint_stiffness[:, joint_ids] = to_torch(asset.data.default_joint_stiffness)[env_ids_device][:, joint_ids] * scale
+        joint_damping[:, joint_ids] = to_torch(asset.data.default_joint_damping)[env_ids_device][:, joint_ids] * scale
 
-    asset.write_joint_stiffness_to_sim(joint_stiffness, env_ids=env_ids_device)
-    asset.write_joint_damping_to_sim(joint_damping, env_ids=env_ids_device)
+    asset.write_joint_stiffness_to_sim_index(stiffness=joint_stiffness, env_ids=env_ids_device)
+    asset.write_joint_damping_to_sim_index(damping=joint_damping, env_ids=env_ids_device)
 
     for actuator in asset.actuators.values():
         actuator_joint_ids = _resolve_ids(actuator.joint_indices, asset.num_joints, asset.device)
@@ -189,10 +195,10 @@ def randomize_group_motor_strength(
 
     effort_limit_cache = _get_env_cache(env, "_ref2act_default_effort_limit_cache")
     if group_cfgs[0][1].name not in effort_limit_cache:
-        effort_limit_cache[group_cfgs[0][1].name] = asset.data.joint_effort_limits.clone()
+        effort_limit_cache[group_cfgs[0][1].name] = to_torch(asset.data.joint_effort_limits).clone()
 
     default_effort_limits = effort_limit_cache[group_cfgs[0][1].name]
-    effort_limits = asset.data.joint_effort_limits.clone()
+    effort_limits = to_torch(asset.data.joint_effort_limits).clone()
 
     seen_joint_ids: set[int] = set()
     for group_name, group_cfg, scale_range in group_cfgs:
@@ -206,7 +212,7 @@ def randomize_group_motor_strength(
         default_limits = default_effort_limits[env_ids_device][:, joint_ids]
         effort_limits[:, joint_ids] = torch.clamp(default_limits * scale, min=min_effort_limit)
 
-    asset.write_joint_effort_limit_to_sim(effort_limits, env_ids=env_ids_device)
+    asset.write_joint_effort_limit_to_sim_index(effort_limit=effort_limits, env_ids=env_ids_device)
 
     for actuator in asset.actuators.values():
         actuator_joint_ids = _resolve_ids(actuator.joint_indices, asset.num_joints, asset.device)
@@ -236,7 +242,7 @@ class randomize_rigid_body_collider_offsets_by_body(ManagerTermBase):
 
         if isinstance(self.asset, Articulation):
             self.num_shapes_per_body = []
-            for link_path in self.asset.root_physx_view.link_paths[0]:
+            for link_path in self.asset.root_view.link_paths[0]:
                 link_physx_view = self.asset._physics_sim_view.create_rigid_body_view(link_path)  # type: ignore[attr-defined]
                 self.num_shapes_per_body.append(link_physx_view.max_shapes)
         else:
@@ -244,7 +250,7 @@ class randomize_rigid_body_collider_offsets_by_body(ManagerTermBase):
 
     def _shape_ranges(self) -> list[tuple[int, int]]:
         if self.num_shapes_per_body is None or self.asset_cfg.body_ids == slice(None):
-            return [(0, self.asset.root_physx_view.max_shapes)]
+            return [(0, self.asset.root_view.max_shapes)]
 
         ranges = []
         for body_id in self.asset_cfg.body_ids:
@@ -263,8 +269,8 @@ class randomize_rigid_body_collider_offsets_by_body(ManagerTermBase):
         min_contact_gap: float = 1e-4,
     ):
         env_ids_cpu = _resolve_env_ids(env, env_ids, "cpu")
-        current_rest_offsets = self.asset.root_physx_view.get_rest_offsets().clone()
-        current_contact_offsets = self.asset.root_physx_view.get_contact_offsets().clone()
+        current_rest_offsets = to_torch(self.asset.root_view.get_rest_offsets()).clone()
+        current_contact_offsets = to_torch(self.asset.root_view.get_contact_offsets()).clone()
         target_rest_offsets = current_rest_offsets.clone()
         target_contact_offsets = current_contact_offsets.clone()
 
@@ -291,6 +297,7 @@ class randomize_rigid_body_collider_offsets_by_body(ManagerTermBase):
             current_rest_offsets[env_ids_cpu] + min_contact_gap,
         )
 
-        self.asset.root_physx_view.set_contact_offsets(contact_offsets_for_rest_update, env_ids_cpu)
-        self.asset.root_physx_view.set_rest_offsets(target_rest_offsets, env_ids_cpu)
-        self.asset.root_physx_view.set_contact_offsets(target_contact_offsets, env_ids_cpu)
+        wp_env_ids = wp.from_torch(env_ids_cpu.to(dtype=torch.int32), dtype=wp.int32)
+        self.asset.root_view.set_contact_offsets(wp.from_torch(contact_offsets_for_rest_update), wp_env_ids)
+        self.asset.root_view.set_rest_offsets(wp.from_torch(target_rest_offsets), wp_env_ids)
+        self.asset.root_view.set_contact_offsets(wp.from_torch(target_contact_offsets), wp_env_ids)

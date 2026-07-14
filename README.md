@@ -1,222 +1,69 @@
 # Ref2Act
 
-Ref2Act provides motion-tracking environments built on Isaac Lab, offline motion tooling, and a MuJoCo bridge for sim-to-sim evaluation. The codebase now uses a `src/ref2act` layout with explicit subpackages for runtime envs, motion processing, robot configs, shared utilities, and bridge code.
+Ref2Act is a humanoid motion-tracking reinforcement-learning task for Isaac Lab 3.0. Motion retargeting is intentionally outside this repository; training and sim2sim consume the current Retargeter output directly.
 
-## Installation
+## Runtime contract
 
-Core install:
+- Isaac Lab 3.0 is the only supported Isaac runtime.
+- Every quaternion inside Ref2Act is scalar-last XYZW. MuJoCo `qpos` and `xquat` are converted explicitly at the bridge boundary because MuJoCo uses WXYZ.
+- Body positions and velocities refer to the body-link origin in world coordinates. CoM quantities are derived explicitly from link state and the local CoM offset.
+- `cfg.expert_motion_file` is the only motion input. It accepts one explicit path or a list of explicit paths; each path must be either a motion directory containing `final_motion.npz` or that exact file.
+- Dataset-root discovery, manifests, CSV catalogs, GMR pickle conversion, and legacy NPZ schemas are not supported.
 
-```bash
-python -m pip install -e .
-```
+## Retargeter motion layout
 
-MuJoCo bridge install:
-
-```bash
-python -m pip install -e ".[sim2sim]"
-```
-
-Dependency boundaries:
-
-- `ref2act.common` and `ref2act.motion` are pure Python/Torch modules.
-- `ref2act.envs` and `ref2act.robots` require Isaac Lab.
-- `ref2act.bridges.mujoco` requires the `sim2sim` extra.
-
-## Architecture
-
-The package is organized by responsibility:
-
-- `ref2act.common`: shared math, interpolation, and buffer utilities
-- `ref2act.motion`: motion loading, sampling strategies, segmentation, smoothing, and GMR I/O
-- `ref2act.envs.motion_tracking`: the Isaac Lab motion-tracking environment and its action, observation, reward, termination, curriculum, and visualization helpers
-- `ref2act.robots.g1` and `ref2act.robots.pi_plus`: robot-specific articulation and env config exports
-- `ref2act.bridges.mujoco`: MuJoCo runtime bridge
-- `ref2act.assets`: packaged robot and scene assets accessed through `importlib.resources`
-
-See [docs/repo-layout.md](/home/xdang/Desktop/Ref2Act/docs/repo-layout.md) for the layout contract.
-
-## Training Usage
-
-Canonical runtime imports:
-
-```python
-from ref2act.envs.motion_tracking import MotionTrackingEnv
-from ref2act.motion import SamplingStrategy
-from ref2act.robots.g1 import G1MotionTrackingEnvCfg
-
-cfg = G1MotionTrackingEnvCfg()
-cfg.expert_motion_file = "path/to/motion.npz"
-cfg.scene.num_envs = 32
-cfg.sampling_strategy = SamplingStrategy.FailureWeighted
-cfg.weight_fail = 0.5
-cfg.weight_novel = 0.3
-cfg.cap_beta = 2.0
-cfg.adaptive_uniform_ratio = 0.1
-cfg.adaptive_alpha = 0.001
-
-env = MotionTrackingEnv(cfg)
-obs, info = env.reset()
-```
-
-With `SamplingStrategy.FailureWeighted`, Ref2Act follows MOSAIC's two-level sampler. Motion choice across clips uses a failure/novelty/uniform mixture:
+`final_motion.npz` must contain finite, topology-consistent arrays:
 
 ```text
-p_motion = weight_fail * p_fail + weight_novel * p_novel + weight_uniform * p_uniform
+fps, robot, joint_names, body_names
+joint_pos, joint_vel
+body_pos_w, body_quat_xyzw
+body_lin_vel_w, body_ang_vel_w
 ```
 
-`p_novel` is proportional to `1 / sqrt(assigned_count + 1)`. `weight_fail` and `weight_novel` can be warm-started with `motion_sampling_warmup_s`, ramped with `motion_sampling_ramp_s`, and scheduled by `motion_sampling_schedule`; any remaining mass becomes uniform probability. Motion-level failure rates are capped by `cap_beta * mean_fail_rate` before normalization.
+The body arrays are `[T, B, 3/4]`, joint arrays are `[T, J]`, and names define their topology. Quaternions must be unit XYZW values.
 
-Within each selected motion, reset bins use MOSAIC's adaptive failure distribution: `bin_failed_count + adaptive_uniform_ratio / num_eligible_bins`, optionally smoothed by `adaptive_kernel_size` and `adaptive_lambda`, then normalized. The bin failure counts are an EMA controlled by `adaptive_alpha`; failure recording is skipped during the motion-level warmup window. When `cfg.segment_source == SegmentSource.Time`, the sampler can use exported segment metadata or generate fixed time bins from `cfg.bin_size`. When `cfg.segment_source == SegmentSource.Anchor`, conversion always includes frame `0` as a reset anchor and adds safe local minima of `sum(abs(joint_vel))`; long spans between reset anchors are split using `cfg.bin_size`, while each bin still resets from the nearest selected anchor.
+An optional `reset_anchors.json` may sit next to the NPZ:
 
-The package registers these Gym environments when Isaac Lab is available:
+```json
+{
+  "enabled": true,
+  "anchors": [
+    {"frame": 24, "time_s": 0.8},
+    {"frame": 90, "time_s": 3.0}
+  ]
+}
+```
 
-- `G1MotionTracking-v0`
-- `PiPlusMotionTracking-v0`
-- `G1MotionTrackingRough-v0`
-- `PiPlusMotionTrackingRough-v0`
+Enabled anchors must be sorted, unique, in range, and satisfy `time_s == frame / fps`. Ref2Act never inserts frame 0. Anchor sampling uses only this sidecar; time sampling uses fixed bins from `bin_size` only.
 
-## Motion Conversion
+## Configuration example
 
-Single-file conversion:
+```python
+cfg.expert_motion_file = [
+    "/data/motions/75_07_stageii",
+    "/data/motions/88_09_stageii/final_motion.npz",
+]
+```
+
+Packed cache fingerprints include the resolved NPZ and sidecar paths, sizes, and modification times.
+
+## Diagnostics and sim2sim
+
+The read-only diagnostics command visualizes configured anchors without selecting new ones:
 
 ```bash
-ref2act-convert --input_file path/to/motion.pkl --output_file path/to/motion.npz
+ref2act-plot-anchor-diagnostics -f /data/motions/75_07_stageii
 ```
 
-Batch conversion:
+The MuJoCo bridge builds the same noise-free policy groups as training. For the supported G1 23-DOF task the layout is `motion=29`, `robot=78`, total `107` values; it does not construct the privileged training group.
+
+## Validation
+
+Run CPU unit tests with:
 
 ```bash
-ref2act-convert-batch --input_dir path/to/mocap --output_dir path/to/converted_mocap
+conda run -n isaaclab pytest tests/unit
 ```
 
-Useful options:
-
-- `--target-fps`: resample the exported clip
-- `--smooth-motion`: smooth root and joint trajectories before export
-- `--segment-bin-size`: emit segment metadata for merged or custom failure-weighted bins
-- `--segment-method anchor`: keep legacy `segment_*` output and also export anchor metadata
-
-The converter emits `.npz` clips compatible with `ref2act.motion.MotionLib` and the motion-tracking env configs.
-
-### Tutorial: Using `ref2act-convert`
-
-`ref2act-convert` converts one retargeted GMR `.pkl` motion file into the `.npz` format used by Ref2Act training and tooling.
-
-1. Install the package in editable mode:
-
-```bash
-python -m pip install -e .
-```
-
-2. Check the available flags:
-
-```bash
-ref2act-convert --help
-```
-
-3. Run the simplest conversion:
-
-```bash
-ref2act-convert \
-  --input_file data/motions/walk.pkl \
-  --output_file data/motions/walk.npz
-```
-
-If `--output_file` is omitted, the converter writes the output next to the input file with the same stem and an `.npz` suffix.
-
-4. Convert a motion with settings that are usually useful for training:
-
-```bash
-ref2act-convert \
-  --input_file data/motions/walk.pkl \
-  --output_file data/motions/walk_train.npz \
-  --target-fps 60 \
-  --smooth-motion \
-  --smoothing-profile medium \
-  --segment-bin-size 0.3
-```
-
-This does four things:
-
-- resamples the clip to `60 Hz`
-- smooths root and joint trajectories before export
-- writes `segment_start_times`, `segment_end_times`, and `segment_types`
-- produces a clip that can be used directly by `MotionLib` and the motion-tracking env
-
-5. Export anchor-aware metadata in addition to the standard segment metadata:
-
-```bash
-ref2act-convert \
-  --input_file data/motions/jump.pkl \
-  --output_file data/motions/jump_anchor.npz \
-  --segment-method anchor \
-  --segment-bin-size 0.3
-```
-
-Anchor mode still writes the normal `segment_*` arrays for compatibility, and also writes the v3 anchor metadata contract:
-
-- `anchor_selection_version`
-- `anchor_frame_indices`
-- `anchor_times`
-- `anchor_joint_kinetic_energy`
-
-Use this mode when you want the converted file to carry stable reset-anchor annotations alongside the current time-segment metadata. Anchor selection treats frame `0` as a safe reset anchor, then uses local minima of `sum(abs(joint_vel))` that pass contact/support and torso-tilt safety checks. With `cfg.segment_source = SegmentSource.Anchor`, the sampler uses every exported `anchor_time` as a reset unit and splits long anchor spans into `cfg.bin_size` failure-attribution bins. Older anchor files must be reconverted because the v2 label and segment fields are no longer loaded in anchor mode.
-
-6. Adjust the vertical offset or airborne detection if the imported motion needs it:
-
-```bash
-ref2act-convert \
-  --input_file data/motions/custom.pkl \
-  --output_file data/motions/custom.npz \
-  --height_offset 0.02 \
-  --airborne-height-threshold 0.08
-```
-
-`--height_offset` shifts the root height before export. `--airborne-height-threshold` changes how aggressively the converter marks both feet as airborne when it builds segment metadata.
-
-For many files at once, use `ref2act-convert-batch`:
-
-```bash
-ref2act-convert-batch \
-  --input_dir data/motions/raw \
-  --output_dir data/motions/converted \
-  --target-fps 60 \
-  --smooth-motion \
-  --segment-method anchor
-```
-
-## Anchor Diagnostics
-
-If a motion was converted with `--segment-method anchor`, you can inspect the selected anchors with:
-
-```bash
-ref2act-plot-anchor-diagnostics --input_file data/motions/jump_anchor.npz
-```
-
-The tool writes two figures by default under `anchor_diagnostics/` next to the input file:
-
-- `<stem>_overview.png`: kinetic energy, selected anchors, contact/support state, and torso tilt
-- `<stem>_reasons.png`: safety mask and rejection reasons used by the v3 start-anchor plus local-minimum selector
-
-Example with explicit output settings:
-
-```bash
-ref2act-plot-anchor-diagnostics \
-  --input_file data/motions/jump_anchor.npz \
-  --output_dir data/motions/anchor_diagnostics \
-  --output-prefix jump_anchor
-```
-
-Useful options:
-
-- `--output_dir`: choose where the figures are saved
-- `--output-prefix`: control the output filename prefix
-- `--airborne-height-threshold`: recompute diagnostics with a different airborne threshold
-
-The CLI prints a short summary to stdout, including:
-
-- how many anchors were found
-- whether the lowest-energy safe fallback was used
-- frame, time, support mode, and raw joint-kinetic-energy proxy for each anchor
-
-If the `.npz` file already contains v3 `anchor_*` arrays, the tool uses them for the anchor overlay and checks whether they still match the current diagnostics implementation.
+Isaac USD/config integration and headless environment smoke tests require the same `isaaclab` environment and a working Isaac installation.

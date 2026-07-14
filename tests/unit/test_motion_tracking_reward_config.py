@@ -60,6 +60,7 @@ def _load_motion_tracking_env_module():
         "isaaclab.sensors": sys.modules.get("isaaclab.sensors"),
         "isaaclab.sim": sys.modules.get("isaaclab.sim"),
         "isaaclab.utils": sys.modules.get("isaaclab.utils"),
+        "isaaclab.utils.configclass": sys.modules.get("isaaclab.utils.configclass"),
         "isaaclab.utils.math": sys.modules.get("isaaclab.utils.math"),
         "ref2act.envs.motion_tracking.action": sys.modules.get("ref2act.envs.motion_tracking.action"),
         "ref2act.envs.motion_tracking.curriculum": sys.modules.get("ref2act.envs.motion_tracking.curriculum"),
@@ -167,6 +168,7 @@ def _load_env_cfg_shared_module():
         "isaaclab.sim": sys.modules.get("isaaclab.sim"),
         "isaaclab.terrains": sys.modules.get("isaaclab.terrains"),
         "isaaclab.utils": sys.modules.get("isaaclab.utils"),
+        "isaaclab.utils.configclass": sys.modules.get("isaaclab.utils.configclass"),
         "isaaclab.utils.math": sys.modules.get("isaaclab.utils.math"),
         "ref2act.envs.motion_tracking.action": sys.modules.get("ref2act.envs.motion_tracking.action"),
         "ref2act.envs.motion_tracking.curriculum": sys.modules.get("ref2act.envs.motion_tracking.curriculum"),
@@ -221,6 +223,7 @@ def _load_env_cfg_shared_module():
 
     sim_mod = types.ModuleType("isaaclab.sim")
     sim_mod.RigidBodyMaterialCfg = _Cfg
+    sim_mod.PhysxRigidBodyMaterialCfg = _Cfg
     sim_mod.GroundPlaneCfg = _Cfg
     sim_mod.DomeLightCfg = _Cfg
     sim_mod.SimulationCfg = _Cfg
@@ -240,6 +243,8 @@ def _load_env_cfg_shared_module():
     utils_mod = types.ModuleType("isaaclab.utils")
     utils_mod.configclass = _identity_configclass
     utils_mod.math = math_mod
+    configclass_mod = types.ModuleType("isaaclab.utils.configclass")
+    configclass_mod.configclass = _identity_configclass
 
     action_mod = types.ModuleType("ref2act.envs.motion_tracking.action")
     action_mod.ActionSpec = _Cfg
@@ -282,6 +287,7 @@ def _load_env_cfg_shared_module():
     sys.modules["isaaclab.sim"] = sim_mod
     sys.modules["isaaclab.terrains"] = terrains_mod
     sys.modules["isaaclab.utils"] = utils_mod
+    sys.modules["isaaclab.utils.configclass"] = configclass_mod
     sys.modules["isaaclab.utils.math"] = math_mod
     sys.modules["ref2act.envs.motion_tracking.action"] = action_mod
     sys.modules["ref2act.envs.motion_tracking.curriculum"] = curriculum_mod

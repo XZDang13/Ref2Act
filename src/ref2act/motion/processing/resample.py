@@ -8,19 +8,19 @@ from ref2act.common.utils import compute_frame_blend_from_fps, interpolate, sler
 
 def _quat_conjugate(quaternions: torch.Tensor) -> torch.Tensor:
     conjugate = quaternions.clone()
-    conjugate[..., 1:] *= -1.0
+    conjugate[..., :3] *= -1.0
     return conjugate
 
 
 def _quat_mul(q0: torch.Tensor, q1: torch.Tensor) -> torch.Tensor:
-    w0, x0, y0, z0 = q0.unbind(dim=-1)
-    w1, x1, y1, z1 = q1.unbind(dim=-1)
+    x0, y0, z0, w0 = q0.unbind(dim=-1)
+    x1, y1, z1, w1 = q1.unbind(dim=-1)
     return torch.stack(
         (
-            w0 * w1 - x0 * x1 - y0 * y1 - z0 * z1,
             w0 * x1 + x0 * w1 + y0 * z1 - z0 * y1,
             w0 * y1 - x0 * z1 + y0 * w1 + z0 * x1,
             w0 * z1 + x0 * y1 - y0 * x1 + z0 * w1,
+            w0 * w1 - x0 * x1 - y0 * y1 - z0 * z1,
         ),
         dim=-1,
     )
@@ -28,11 +28,11 @@ def _quat_mul(q0: torch.Tensor, q1: torch.Tensor) -> torch.Tensor:
 
 def _axis_angle_from_quat(quaternions: torch.Tensor) -> torch.Tensor:
     normalized = quaternions / torch.linalg.norm(quaternions, dim=-1, keepdim=True).clamp_min(1.0e-8)
-    normalized = torch.where(normalized[..., :1] < 0.0, -normalized, normalized)
+    normalized = torch.where(normalized[..., 3:] < 0.0, -normalized, normalized)
 
-    vector = normalized[..., 1:]
+    vector = normalized[..., :3]
     vector_norm = torch.linalg.norm(vector, dim=-1, keepdim=True)
-    angle = 2.0 * torch.atan2(vector_norm, normalized[..., :1].clamp(min=-1.0, max=1.0))
+    angle = 2.0 * torch.atan2(vector_norm, normalized[..., 3:].clamp(min=-1.0, max=1.0))
     axis = vector / vector_norm.clamp_min(1.0e-8)
     axis_angle = axis * angle
     return torch.where(vector_norm > 1.0e-8, axis_angle, 2.0 * vector)
@@ -107,7 +107,7 @@ def _resample_motion_log(
 
     joint_pos = torch.as_tensor(log["joint_pos"], dtype=torch.float32)
     body_pos_w = torch.as_tensor(log["body_pos_w"], dtype=torch.float32)
-    body_quat_w = torch.as_tensor(log["body_quat_w"], dtype=torch.float32)
+    body_quat_xyzw = torch.as_tensor(log["body_quat_xyzw"], dtype=torch.float32)
     foot_height_tensor = torch.as_tensor(foot_heights, dtype=torch.float32)
 
     resampled_joint_pos = _resample_frames(
@@ -122,8 +122,8 @@ def _resample_motion_log(
         target_fps=target_fps,
         target_num_frames=target_num_frames,
     )
-    resampled_body_quat_w = _resample_frames(
-        body_quat_w,
+    resampled_body_quat_xyzw = _resample_frames(
+        body_quat_xyzw,
         source_fps=source_fps,
         target_fps=target_fps,
         target_num_frames=target_num_frames,
@@ -143,8 +143,8 @@ def _resample_motion_log(
         "joint_pos": resampled_joint_pos.cpu().numpy(),
         "joint_vel": _linear_derivative(resampled_joint_pos, target_dt).cpu().numpy(),
         "body_pos_w": resampled_body_pos_w.cpu().numpy(),
-        "body_quat_w": resampled_body_quat_w.cpu().numpy(),
+        "body_quat_xyzw": resampled_body_quat_xyzw.cpu().numpy(),
         "body_lin_vel_w": _linear_derivative(resampled_body_pos_w, target_dt).cpu().numpy(),
-        "body_ang_vel_w": _so3_derivative(resampled_body_quat_w, target_dt).cpu().numpy(),
+        "body_ang_vel_w": _so3_derivative(resampled_body_quat_xyzw, target_dt).cpu().numpy(),
     }
     return resampled_log, resampled_foot_heights.cpu().numpy()

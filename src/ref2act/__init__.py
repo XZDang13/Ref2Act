@@ -4,12 +4,9 @@ __version__ = "0.2.1"
 
 
 def _register_default_envs() -> None:
-    try:
-        from .envs.motion_tracking.registry import register_envs
+    from .envs.motion_tracking.registry import register_envs
 
-        register_envs()
-    except Exception:
-        return
+    register_envs()
 
 
 _register_default_envs()

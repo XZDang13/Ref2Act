@@ -33,13 +33,7 @@ def slerp(
     if q0.ndim >= 3:
         blend = blend.unsqueeze(-1)
 
-    qw, qx, qy, qz = 0, 1, 2, 3  # wxyz
-    cos_half_theta = (
-        q0[..., qw] * q1[..., qw]
-        + q0[..., qx] * q1[..., qx]
-        + q0[..., qy] * q1[..., qy]
-        + q0[..., qz] * q1[..., qz]
-    )
+    cos_half_theta = torch.sum(q0 * q1, dim=-1)
 
     neg_mask = cos_half_theta < 0
     q1 = q1.clone()
@@ -53,15 +47,10 @@ def slerp(
     ratio_a = torch.sin((1 - blend) * half_theta) / sin_half_theta
     ratio_b = torch.sin(blend * half_theta) / sin_half_theta
 
-    new_q_x = ratio_a * q0[..., qx : qx + 1] + ratio_b * q1[..., qx : qx + 1]
-    new_q_y = ratio_a * q0[..., qy : qy + 1] + ratio_b * q1[..., qy : qy + 1]
-    new_q_z = ratio_a * q0[..., qz : qz + 1] + ratio_b * q1[..., qz : qz + 1]
-    new_q_w = ratio_a * q0[..., qw : qw + 1] + ratio_b * q1[..., qw : qw + 1]
-
-    new_q = torch.cat([new_q_w, new_q_x, new_q_y, new_q_z], dim=len(new_q_w.shape) - 1)
+    new_q = ratio_a * q0 + ratio_b * q1
     new_q = torch.where(torch.abs(sin_half_theta) < 0.001, 0.5 * q0 + 0.5 * q1, new_q)
     new_q = torch.where(torch.abs(cos_half_theta) >= 1, q0, new_q)
-    return new_q
+    return new_q / torch.linalg.norm(new_q, dim=-1, keepdim=True).clamp_min(1.0e-8)
 
 def compute_frame_blend(times: torch.Tensor,
                         duration: float,

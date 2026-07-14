@@ -72,18 +72,17 @@ def _load_rewards_module():
 
 
 def _make_robot(
-    body_lin_vel_w: torch.Tensor,
+    body_link_lin_vel_w: torch.Tensor,
     *,
-    body_pos_w: torch.Tensor | None = None,
-    body_quat_w: torch.Tensor | None = None,
-    body_ang_vel_w: torch.Tensor | None = None,
+    body_link_pos_w: torch.Tensor | None = None,
+    body_link_quat_w: torch.Tensor | None = None,
+    body_link_ang_vel_w: torch.Tensor | None = None,
     body_com_pos_b: torch.Tensor | None = None,
     body_com_pos_w: torch.Tensor | None = None,
-    body_link_lin_vel_w: torch.Tensor | None = None,
     masses: torch.Tensor | None = None,
 ) -> types.SimpleNamespace:
-    num_envs = body_lin_vel_w.shape[0]
-    num_bodies = body_lin_vel_w.shape[1]
+    num_envs = body_link_lin_vel_w.shape[0]
+    num_bodies = body_link_lin_vel_w.shape[1]
     joint_shape = (num_envs, 2)
     joint_limits = torch.stack(
         (
@@ -92,19 +91,17 @@ def _make_robot(
         ),
         dim=-1,
     )
-    if body_pos_w is None:
-        body_pos_w = torch.zeros((num_envs, num_bodies, 3), dtype=torch.float32)
-    if body_quat_w is None:
-        body_quat_w = torch.zeros((num_envs, num_bodies, 4), dtype=torch.float32)
-        body_quat_w[..., 0] = 1.0
-    if body_ang_vel_w is None:
-        body_ang_vel_w = torch.zeros((num_envs, num_bodies, 3), dtype=torch.float32)
+    if body_link_pos_w is None:
+        body_link_pos_w = torch.zeros((num_envs, num_bodies, 3), dtype=torch.float32)
+    if body_link_quat_w is None:
+        body_link_quat_w = torch.zeros((num_envs, num_bodies, 4), dtype=torch.float32)
+        body_link_quat_w[..., 3] = 1.0
+    if body_link_ang_vel_w is None:
+        body_link_ang_vel_w = torch.zeros((num_envs, num_bodies, 3), dtype=torch.float32)
     if body_com_pos_b is None:
         body_com_pos_b = torch.zeros((num_envs, num_bodies, 3), dtype=torch.float32)
     if body_com_pos_w is None:
-        body_com_pos_w = body_pos_w + body_com_pos_b
-    if body_link_lin_vel_w is None:
-        body_link_lin_vel_w = body_lin_vel_w.clone()
+        body_com_pos_w = body_link_pos_w + body_com_pos_b
     if masses is None:
         masses = torch.ones((num_envs, num_bodies), dtype=torch.float32)
 
@@ -115,16 +112,15 @@ def _make_robot(
             joint_pos=torch.zeros(joint_shape, dtype=torch.float32),
             joint_vel=torch.zeros(joint_shape, dtype=torch.float32),
             soft_joint_pos_limits=joint_limits,
-            body_lin_vel_w=body_lin_vel_w,
-            body_ang_vel_w=body_ang_vel_w,
+            body_link_ang_vel_w=body_link_ang_vel_w,
             body_link_lin_vel_w=body_link_lin_vel_w,
-            body_pos_w=body_pos_w,
-            body_quat_w=body_quat_w,
+            body_link_pos_w=body_link_pos_w,
+            body_link_quat_w=body_link_quat_w,
             body_com_pos_b=body_com_pos_b,
             body_com_pos_w=body_com_pos_w,
         )
         ,
-        root_physx_view=types.SimpleNamespace(get_masses=lambda: masses.clone()),
+        root_view=types.SimpleNamespace(get_masses=lambda: masses.clone()),
     )
 
 
@@ -158,7 +154,7 @@ def _make_reference_motion(
 ) -> types.SimpleNamespace:
     if body_quaternions is None:
         body_quaternions = torch.zeros((num_envs, num_bodies, 4), dtype=torch.float32)
-        body_quaternions[..., 0] = 1.0
+        body_quaternions[..., 3] = 1.0
     if body_positions is None:
         body_positions = torch.zeros((num_envs, num_bodies, 3), dtype=torch.float32)
     if body_pos_relative is None:
@@ -407,29 +403,29 @@ def test_com_position_reward_tracks_mass_weighted_xy_error() -> None:
         )
     )
 
-    body_pos_w = torch.tensor(
+    body_link_pos_w = torch.tensor(
         [[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]],
         dtype=torch.float32,
     )
     masses = torch.tensor([[1.0, 2.0, 1.0]], dtype=torch.float32)
-    reference_motion = _make_reference_motion(body_positions=body_pos_w, body_pos_relative=body_pos_w)
+    reference_motion = _make_reference_motion(body_positions=body_link_pos_w, body_pos_relative=body_link_pos_w)
     contact_sensor = _make_contact_sensor(torch.zeros((1, 1, 3, 3), dtype=torch.float32))
     action_model = _make_action_model()
 
     matched_robot = _make_robot(
         torch.zeros((1, 3, 3), dtype=torch.float32),
-        body_pos_w=body_pos_w,
-        body_com_pos_w=body_pos_w,
+        body_link_pos_w=body_link_pos_w,
+        body_com_pos_w=body_link_pos_w,
         masses=masses,
     )
     matched_reward = rewards.get_task_reward(matched_robot, reference_motion, contact_sensor, action_model)
     assert torch.allclose(matched_reward, torch.tensor([1.0], dtype=torch.float32))
 
-    shifted_body_com_pos_w = body_pos_w.clone()
+    shifted_body_com_pos_w = body_link_pos_w.clone()
     shifted_body_com_pos_w[:, 1, 0] += 1.0
     shifted_robot = _make_robot(
         torch.zeros((1, 3, 3), dtype=torch.float32),
-        body_pos_w=body_pos_w,
+        body_link_pos_w=body_link_pos_w,
         body_com_pos_w=shifted_body_com_pos_w,
         masses=masses,
     )
@@ -453,8 +449,7 @@ def test_com_velocity_reward_uses_reference_angular_velocity_com_offset_correcti
         dtype=torch.float32,
     )
     robot = _make_robot(
-        torch.zeros((1, 2, 3), dtype=torch.float32),
-        body_link_lin_vel_w=torch.tensor(
+        torch.tensor(
             [[[-1.0, 0.0, 0.0], [0.0, 0.0, 0.0]]],
             dtype=torch.float32,
         ),
@@ -495,7 +490,7 @@ def test_com_velocity_reward_uses_current_angular_velocity_com_offset_correction
     )
     robot = _make_robot(
         torch.zeros((1, 2, 3), dtype=torch.float32),
-        body_ang_vel_w=torch.tensor(
+        body_link_ang_vel_w=torch.tensor(
             [[[0.0, 0.0, 1.0], [0.0, 0.0, 0.0]]],
             dtype=torch.float32,
         ),
@@ -539,7 +534,7 @@ def test_com_support_reward_handles_no_contact_single_and_double_stance() -> Non
         )
     )
 
-    body_pos_w = torch.tensor(
+    body_link_pos_w = torch.tensor(
         [
             [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
             [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
@@ -557,7 +552,7 @@ def test_com_support_reward_handles_no_contact_single_and_double_stance() -> Non
     )
     robot = _make_robot(
         torch.zeros((3, 2, 3), dtype=torch.float32),
-        body_pos_w=body_pos_w,
+        body_link_pos_w=body_link_pos_w,
         body_com_pos_w=body_com_pos_w,
     )
     contact_sensor = _make_contact_sensor(
@@ -610,7 +605,7 @@ def test_end_effector_rewards_ignore_non_end_effector_body_errors() -> None:
             [[[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [5.0, 0.0, 0.0]]],
             dtype=torch.float32,
         ),
-        body_pos_w=torch.tensor(
+        body_link_pos_w=torch.tensor(
             [[[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [10.0, 0.0, 0.0]]],
             dtype=torch.float32,
         ),
@@ -644,13 +639,13 @@ def test_end_effector_quaternion_reward_ignores_non_end_effector_body_errors() -
         )
     )
 
-    body_quat_w = torch.zeros((2, 3, 4), dtype=torch.float32)
-    body_quat_w[..., 0] = 1.0
-    body_quat_w[:, 2, 1] = 10.0
-    body_quat_w[1, 0, 1] = 2.0
+    body_link_quat_w = torch.zeros((2, 3, 4), dtype=torch.float32)
+    body_link_quat_w[..., 0] = 1.0
+    body_link_quat_w[:, 2, 1] = 10.0
+    body_link_quat_w[1, 0, 1] = 2.0
     robot = _make_robot(
         torch.zeros((2, 3, 3), dtype=torch.float32),
-        body_quat_w=body_quat_w,
+        body_link_quat_w=body_link_quat_w,
     )
 
     reward_vector = rewards.get_task_reward(
@@ -680,7 +675,7 @@ def test_anchor_position_reward_uses_only_configured_anchor_body_full_xyz() -> N
 
     robot = _make_robot(
         torch.zeros((2, 3, 3), dtype=torch.float32),
-        body_pos_w=torch.tensor(
+        body_link_pos_w=torch.tensor(
             [
                 [[10.0, 0.0, 0.0], [0.0, 0.0, 0.0], [5.0, 0.0, 0.0]],
                 [[10.0, 0.0, 0.0], [1.0, 2.0, 2.0], [5.0, 0.0, 0.0]],
@@ -715,14 +710,14 @@ def test_anchor_quaternion_reward_uses_only_configured_anchor_body_orientation()
         )
     )
 
-    body_quat_w = torch.zeros((2, 3, 4), dtype=torch.float32)
-    body_quat_w[..., 0] = 1.0
-    body_quat_w[:, 0, 1] = 10.0
-    body_quat_w[:, 2, 1] = 5.0
-    body_quat_w[1, 1, 1] = 2.0
+    body_link_quat_w = torch.zeros((2, 3, 4), dtype=torch.float32)
+    body_link_quat_w[..., 0] = 1.0
+    body_link_quat_w[:, 0, 1] = 10.0
+    body_link_quat_w[:, 2, 1] = 5.0
+    body_link_quat_w[1, 1, 1] = 2.0
     robot = _make_robot(
         torch.zeros((2, 3, 3), dtype=torch.float32),
-        body_quat_w=body_quat_w,
+        body_link_quat_w=body_link_quat_w,
     )
 
     reward_vector = rewards.get_task_reward(
@@ -761,7 +756,7 @@ def test_anchor_velocity_rewards_use_only_configured_anchor_body() -> None:
             ],
             dtype=torch.float32,
         ),
-        body_ang_vel_w=torch.tensor(
+        body_link_ang_vel_w=torch.tensor(
             [
                 [[0.0, 10.0, 0.0], [0.0, 0.0, 0.0], [0.0, 5.0, 0.0]],
                 [[0.0, 10.0, 0.0], [0.0, 2.0, 0.0], [0.0, 5.0, 0.0]],

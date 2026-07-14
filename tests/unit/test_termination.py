@@ -79,7 +79,7 @@ def _make_context_inputs(num_envs: int = 1):
     return torch.zeros(num_envs, dtype=torch.long), torch.full((num_envs,), 100, dtype=torch.long), _make_sampler(num_envs)
 
 
-def test_anchor_orientation_failure_rule_uses_body_quat_world() -> None:
+def test_anchor_orientation_failure_rule_uses_body_link_quat_world() -> None:
     termination_mod = _load_termination_module()
     termination = termination_mod.Termination(
         termination_mod.TerminationSpec(
@@ -95,14 +95,13 @@ def test_anchor_orientation_failure_rule_uses_body_quat_world() -> None:
 
     robot = types.SimpleNamespace(
         data=types.SimpleNamespace(
-            body_quat_w=torch.tensor([[[1.0, 0.0, 0.0, 0.0]]], dtype=torch.float32),
             body_link_quat_w=torch.tensor([[[0.0, 1.0, 0.0, 0.0]]], dtype=torch.float32),
             GRAVITY_VEC_W=torch.tensor([[0.0, 0.0, -1.0]], dtype=torch.float32),
         )
     )
     reference_motion = types.SimpleNamespace(
         body_positions=torch.zeros((1, 1, 3), dtype=torch.float32),
-        body_quaternions=torch.tensor([[[1.0, 0.0, 0.0, 0.0]]], dtype=torch.float32),
+        body_quaternions=torch.tensor([[[0.0, 0.0, 0.0, 1.0]]], dtype=torch.float32),
         body_pos_relative=torch.zeros((1, 1, 3), dtype=torch.float32),
     )
 
@@ -115,7 +114,7 @@ def test_anchor_orientation_failure_rule_uses_body_quat_world() -> None:
         sampler,
     )
 
-    assert torch.equal(terminate, torch.tensor([False]))
+    assert torch.equal(terminate, torch.tensor([True]))
     assert torch.equal(time_out, torch.tensor([False]))
 
 
@@ -123,15 +122,15 @@ def test_end_effector_position_rule_supports_full_3d_and_height_only_modes() -> 
     termination_mod = _load_termination_module()
     robot = types.SimpleNamespace(
         data=types.SimpleNamespace(
-            body_pos_w=torch.tensor([[[0.0, 0.0, 0.0], [0.2, 0.2, 0.0]]], dtype=torch.float32),
-            body_quat_w=torch.tensor([[[1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]]], dtype=torch.float32),
+            body_link_pos_w=torch.tensor([[[0.0, 0.0, 0.0], [0.2, 0.2, 0.0]]], dtype=torch.float32),
+            body_link_quat_w=torch.tensor([[[0.0, 0.0, 0.0, 1.0], [0.0, 0.0, 0.0, 1.0]]], dtype=torch.float32),
             GRAVITY_VEC_W=torch.tensor([[0.0, 0.0, -1.0]], dtype=torch.float32),
         )
     )
     reference_motion = types.SimpleNamespace(
         body_positions=torch.zeros((1, 2, 3), dtype=torch.float32),
         body_quaternions=torch.tensor(
-            [[[1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]]],
+            [[[0.0, 0.0, 0.0, 1.0], [0.0, 0.0, 0.0, 1.0]]],
             dtype=torch.float32,
         ),
         body_pos_relative=torch.zeros((1, 2, 3), dtype=torch.float32),
@@ -199,14 +198,14 @@ def test_runtime_threshold_update_takes_effect_without_recreating_termination() 
 
     robot = types.SimpleNamespace(
         data=types.SimpleNamespace(
-            body_pos_w=torch.tensor([[[0.0, 0.0, 0.3]]], dtype=torch.float32),
-            body_quat_w=torch.tensor([[[1.0, 0.0, 0.0, 0.0]]], dtype=torch.float32),
+            body_link_pos_w=torch.tensor([[[0.0, 0.0, 0.3]]], dtype=torch.float32),
+            body_link_quat_w=torch.tensor([[[0.0, 0.0, 0.0, 1.0]]], dtype=torch.float32),
             GRAVITY_VEC_W=torch.tensor([[0.0, 0.0, -1.0]], dtype=torch.float32),
         )
     )
     reference_motion = types.SimpleNamespace(
         body_positions=torch.zeros((1, 1, 3), dtype=torch.float32),
-        body_quaternions=torch.tensor([[[1.0, 0.0, 0.0, 0.0]]], dtype=torch.float32),
+        body_quaternions=torch.tensor([[[0.0, 0.0, 0.0, 1.0]]], dtype=torch.float32),
         body_pos_relative=torch.zeros((1, 1, 3), dtype=torch.float32),
     )
 
@@ -252,12 +251,12 @@ def test_failure_rules_expose_continuous_errors() -> None:
     )
     robot = types.SimpleNamespace(
         data=types.SimpleNamespace(
-            body_pos_w=torch.tensor(
+            body_link_pos_w=torch.tensor(
                 [[[0.0, 0.0, 0.3], [0.0, 0.0, 0.1], [0.0, 0.0, 0.4]]],
                 dtype=torch.float32,
             ),
-            body_quat_w=torch.tensor(
-                [[[1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]]],
+            body_link_quat_w=torch.tensor(
+                [[[0.0, 0.0, 0.0, 1.0], [0.0, 0.0, 0.0, 1.0], [0.0, 0.0, 0.0, 1.0]]],
                 dtype=torch.float32,
             ),
             GRAVITY_VEC_W=torch.tensor([[0.0, 0.0, -1.0]], dtype=torch.float32),
@@ -266,7 +265,7 @@ def test_failure_rules_expose_continuous_errors() -> None:
     reference_motion = types.SimpleNamespace(
         body_positions=torch.zeros((1, 3, 3), dtype=torch.float32),
         body_quaternions=torch.tensor(
-            [[[1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]]],
+            [[[0.0, 0.0, 0.0, 1.0], [0.0, 0.0, 0.0, 1.0], [0.0, 0.0, 0.0, 1.0]]],
             dtype=torch.float32,
         ),
         body_pos_relative=torch.zeros((1, 3, 3), dtype=torch.float32),

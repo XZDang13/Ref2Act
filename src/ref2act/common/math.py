@@ -4,21 +4,21 @@ import torch
 
 
 def quat_mul(q1: torch.Tensor, q2: torch.Tensor) -> torch.Tensor:
-    w1, x1, y1, z1 = q1.unbind(dim=-1)
-    w2, x2, y2, z2 = q2.unbind(dim=-1)
+    x1, y1, z1, w1 = q1.unbind(dim=-1)
+    x2, y2, z2, w2 = q2.unbind(dim=-1)
     return torch.stack(
         (
-            w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
             w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
             w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
             w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
+            w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
         ),
         dim=-1,
     )
 
 
 def quat_conjugate(q: torch.Tensor) -> torch.Tensor:
-    return torch.cat((q[..., :1], -q[..., 1:]), dim=-1)
+    return torch.cat((-q[..., :3], q[..., 3:]), dim=-1)
 
 
 def quat_inv(q: torch.Tensor) -> torch.Tensor:
@@ -26,9 +26,9 @@ def quat_inv(q: torch.Tensor) -> torch.Tensor:
 
 
 def quat_apply(q: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
-    q_xyz = q[..., 1:]
+    q_xyz = q[..., :3]
     t = 2.0 * torch.cross(q_xyz, v, dim=-1)
-    return v + q[..., :1] * t + torch.cross(q_xyz, t, dim=-1)
+    return v + q[..., 3:] * t + torch.cross(q_xyz, t, dim=-1)
 
 
 def quat_apply_inverse(q: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
@@ -44,10 +44,10 @@ def quat_from_euler_xyz(roll: torch.Tensor, pitch: torch.Tensor, yaw: torch.Tens
     sy = torch.sin(yaw * 0.5)
     return torch.stack(
         (
-            cr * cp * cy + sr * sp * sy,
             sr * cp * cy - cr * sp * sy,
             cr * sp * cy + sr * cp * sy,
             cr * cp * sy - sr * sp * cy,
+            cr * cp * cy + sr * sp * sy,
         ),
         dim=-1,
     )
@@ -55,8 +55,8 @@ def quat_from_euler_xyz(roll: torch.Tensor, pitch: torch.Tensor, yaw: torch.Tens
 
 def yaw_quat(q: torch.Tensor) -> torch.Tensor:
     yaw = torch.atan2(
-        2.0 * (q[..., 0] * q[..., 3] + q[..., 1] * q[..., 2]),
-        1.0 - 2.0 * (q[..., 2] * q[..., 2] + q[..., 3] * q[..., 3]),
+        2.0 * (q[..., 3] * q[..., 2] + q[..., 0] * q[..., 1]),
+        1.0 - 2.0 * (q[..., 1] * q[..., 1] + q[..., 2] * q[..., 2]),
     )
     zeros = torch.zeros_like(yaw)
     return quat_from_euler_xyz(zeros, zeros, yaw)
@@ -122,7 +122,7 @@ def quaternion_to_tangent_and_normal(q: torch.Tensor) -> torch.Tensor:
 
 
 def quaternion_to_rotation_6d(q: torch.Tensor) -> torch.Tensor:
-    w, x, y, z = q.unbind(dim=-1)
+    x, y, z, w = q.unbind(dim=-1)
     rot_00 = 1.0 - 2.0 * (y * y + z * z)
     rot_01 = 2.0 * (x * y - z * w)
     rot_10 = 2.0 * (x * y + z * w)
@@ -134,6 +134,14 @@ def quaternion_to_rotation_6d(q: torch.Tensor) -> torch.Tensor:
 
 def quat_diff(q1: torch.Tensor, q2: torch.Tensor) -> torch.Tensor:
     return quat_mul(q1, quat_conjugate(q2))
+
+
+def quat_error_magnitude(q1: torch.Tensor, q2: torch.Tensor) -> torch.Tensor:
+    """Return the shortest angular distance between scalar-last quaternions."""
+    relative = quat_mul(q1, quat_inv(q2))
+    vector_norm = torch.linalg.vector_norm(relative[..., :3], dim=-1)
+    scalar = relative[..., 3].abs()
+    return 2.0 * torch.atan2(vector_norm, scalar.clamp_min(1.0e-8))
 
 
 def exp_error(error: torch.Tensor, std: float) -> torch.Tensor:

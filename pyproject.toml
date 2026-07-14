@@ -23,8 +23,6 @@ sim2sim = [
 ]
 
 [project.scripts]
-ref2act-convert = "ref2act.cli.convert:main"
-ref2act-convert-batch = "ref2act.cli.convert_batch:main"
 ref2act-plot-anchor-diagnostics = "ref2act.cli.plot_anchor_diagnostics:main"
 
 [tool.setuptools]

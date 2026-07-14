@@ -10,21 +10,21 @@ from ref2act.common.math import quaternion_to_rotation_6d
 
 
 def _quat_mul(q1: torch.Tensor, q2: torch.Tensor) -> torch.Tensor:
-    w1, x1, y1, z1 = q1.unbind(dim=-1)
-    w2, x2, y2, z2 = q2.unbind(dim=-1)
+    x1, y1, z1, w1 = q1.unbind(dim=-1)
+    x2, y2, z2, w2 = q2.unbind(dim=-1)
     return torch.stack(
         (
-            w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
             w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
             w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
             w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
+            w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
         ),
         dim=-1,
     )
 
 
 def _quat_conjugate(q: torch.Tensor) -> torch.Tensor:
-    return torch.cat((q[..., :1], -q[..., 1:]), dim=-1)
+    return torch.cat((-q[..., :3], q[..., 3:]), dim=-1)
 
 
 def _quat_inv(q: torch.Tensor) -> torch.Tensor:
@@ -32,9 +32,9 @@ def _quat_inv(q: torch.Tensor) -> torch.Tensor:
 
 
 def _quat_apply(q: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
-    q_xyz = q[..., 1:]
+    q_xyz = q[..., :3]
     t = 2.0 * torch.cross(q_xyz, v, dim=-1)
-    return v + q[..., :1] * t + torch.cross(q_xyz, t, dim=-1)
+    return v + q[..., 3:] * t + torch.cross(q_xyz, t, dim=-1)
 
 
 def _quat_from_euler_xyz(roll: torch.Tensor, pitch: torch.Tensor, yaw: torch.Tensor) -> torch.Tensor:
@@ -46,10 +46,10 @@ def _quat_from_euler_xyz(roll: torch.Tensor, pitch: torch.Tensor, yaw: torch.Ten
     sy = torch.sin(yaw * 0.5)
     return torch.stack(
         (
-            cr * cp * cy + sr * sp * sy,
             sr * cp * cy - cr * sp * sy,
             cr * sp * cy + sr * cp * sy,
             cr * cp * sy - sr * sp * cy,
+            cr * cp * cy + sr * sp * sy,
         ),
         dim=-1,
     )
@@ -57,8 +57,8 @@ def _quat_from_euler_xyz(roll: torch.Tensor, pitch: torch.Tensor, yaw: torch.Ten
 
 def _yaw_quat(q: torch.Tensor) -> torch.Tensor:
     yaw = torch.atan2(
-        2.0 * (q[..., 0] * q[..., 3] + q[..., 1] * q[..., 2]),
-        1.0 - 2.0 * (q[..., 2] * q[..., 2] + q[..., 3] * q[..., 3]),
+        2.0 * (q[..., 3] * q[..., 2] + q[..., 0] * q[..., 1]),
+        1.0 - 2.0 * (q[..., 1] * q[..., 1] + q[..., 2] * q[..., 2]),
     )
     zeros = torch.zeros_like(yaw)
     return _quat_from_euler_xyz(zeros, zeros, yaw)
@@ -125,8 +125,8 @@ def _load_math_module():
 def test_slerp_is_stable_for_identical_quaternions() -> None:
     q0 = torch.tensor(
         [
-            [1.0, 0.0, 0.0, 0.0],
-            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+            [0.0, 0.0, 0.0, 1.0],
         ],
         dtype=torch.float32,
     )

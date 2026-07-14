@@ -13,9 +13,10 @@ from ref2act.common.action_spec import (
 )
 from ref2act.common.buffer import DequeBuffer
 from ref2act.common.utils import IndexLike
+from ref2act.isaac_compat import to_torch
 
 
-@dataclass(frozen=True)
+@dataclass
 class ActionSpec:
     mode: str = "median"
     buffer_length: int = 1
@@ -40,8 +41,9 @@ class ActionProcessor:
         self.robot = robot
         self.spec = spec
         self.device = robot.data.device
-        self.num_env = robot.data.joint_pos.size(0)
-        self.action_size = robot.data.joint_pos.size(1)
+        joint_pos = to_torch(robot.data.joint_pos)
+        self.num_env = joint_pos.size(0)
+        self.action_size = joint_pos.size(1)
         self.action_mode = normalize_action_mode(spec.mode)
         self._mode_strategy = resolve_action_mode_strategy(self.action_mode)
 
@@ -52,14 +54,15 @@ class ActionProcessor:
             device=self.device,
         )
 
-        self.joint_low_limit = robot.data.joint_pos_limits[0, :, 0]
-        self.joint_up_limit = robot.data.joint_pos_limits[0, :, 1]
+        self.joint_low_limit = to_torch(robot.data.joint_pos_limits)[0, :, 0]
+        self.joint_up_limit = to_torch(robot.data.joint_pos_limits)[0, :, 1]
         self.delays = torch.zeros(self.num_env, device=self.device, dtype=torch.long)
-        self.applied_action = torch.zeros_like(robot.data.default_joint_pos)
-        self.previous_applied_action = torch.zeros_like(robot.data.default_joint_pos)
-        self.offset_noise = torch.zeros_like(robot.data.default_joint_pos)
-        self.reference_joint_position = robot.data.default_joint_pos.clone()
-        self.target_joint_position = robot.data.default_joint_pos.clone()
+        default_joint_pos = to_torch(robot.data.default_joint_pos)
+        self.applied_action = torch.zeros_like(default_joint_pos)
+        self.previous_applied_action = torch.zeros_like(default_joint_pos)
+        self.offset_noise = torch.zeros_like(default_joint_pos)
+        self.reference_joint_position = default_joint_pos.clone()
+        self.target_joint_position = default_joint_pos.clone()
 
         self.scale: torch.Tensor
         self.offset: torch.Tensor
@@ -72,12 +75,14 @@ class ActionProcessor:
             self.offset = 0.5 * (self.joint_up_limit + self.joint_low_limit)
             return
         if self.action_mode in {"offset", "residual", "current_residual"}:
-            self.scale = 0.25 * (robot.data.joint_effort_limits[0] / robot.data.default_joint_stiffness[0])
+            self.scale = 0.25 * (
+                to_torch(robot.data.joint_effort_limits)[0] / to_torch(robot.data.default_joint_stiffness)[0]
+            )
             if self.action_mode == "offset":
-                self.offset = robot.data.default_joint_pos.clone()
+                self.offset = to_torch(robot.data.default_joint_pos).clone()
             else:
-                self.offset = torch.zeros_like(robot.data.default_joint_pos)
-                self.reference_joint_position.copy_(robot.data.default_joint_pos)
+                self.offset = torch.zeros_like(to_torch(robot.data.default_joint_pos))
+                self.reference_joint_position.copy_(to_torch(robot.data.default_joint_pos))
             return
         raise ValueError(f"Unsupported action mode: {self.action_mode}")
 
@@ -93,7 +98,7 @@ class ActionProcessor:
             action_offset=self.offset + self.offset_noise,
             joint_pos_limits_lower=self.joint_low_limit,
             joint_pos_limits_upper=self.joint_up_limit,
-            current_joint_pos_loader=lambda: self.robot.data.joint_pos,
+            current_joint_pos_loader=lambda: to_torch(self.robot.data.joint_pos),
             reference_joint_pos_loader=lambda: self.reference_joint_position,
         )
 

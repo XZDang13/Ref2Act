@@ -13,6 +13,7 @@ from isaaclab.sensors import ContactSensor
 
 from ref2act.common.math import quat_mul
 from ref2act.common.observation_spec import ObservationLayout
+from ref2act.isaac_compat import to_torch
 from ref2act.motion import MotionLib, MotionSampler, SamplingStrategy, SegmentSource
 
 from .action import ActionProcessor
@@ -66,6 +67,14 @@ class MotionTrackingEnv(DirectRLEnv):
         self._derive_observation_spaces(cfg)
         super().__init__(cfg, render_mode, **kwargs)
 
+        # Isaac Lab 3 may expose the DirectRLEnv buffers as Warp/ProxyArray
+        # objects.  The base reset/step implementation performs Torch indexed
+        # writes, so retain their zero-copy Torch views for the whole runtime.
+        self.episode_length_buf = to_torch(self.episode_length_buf)
+        self.reset_terminated = to_torch(self.reset_terminated)
+        self.reset_time_outs = to_torch(self.reset_time_outs)
+        self.reset_buf = to_torch(self.reset_buf)
+
         self.action_processer = ActionProcessor(self.robot, self.cfg.action)
         self.action_processor = self.action_processer
 
@@ -84,6 +93,16 @@ class MotionTrackingEnv(DirectRLEnv):
         print(
             f"motion library initialized: elapsed={perf_counter() - motion_lib_start_time:.1f}s",
             flush=True,
+        )
+        self._motion_joint_indices_for_robot = self._build_name_alignment(
+            source_names=self.motion_lib.joint_names,
+            target_names=self.robot.data.joint_names,
+            topology_name="joint",
+        )
+        self._motion_body_indices_for_robot = self._build_name_alignment(
+            source_names=self.motion_lib.body_names,
+            target_names=self.robot.data.body_names,
+            topology_name="body",
         )
 
         self.anchor_body_index = self._resolve_shared_body_index(self.cfg.anchor_body_name)
@@ -144,16 +163,17 @@ class MotionTrackingEnv(DirectRLEnv):
             if self.cfg.segment_source == SegmentSource.Anchor:
                 raise ValueError(
                     "Failure-weighted anchor sampling requires motion clips with anchor metadata. "
-                    "Reconvert the motion .npz files with `ref2act-convert --segment-method anchor`."
+                    "Provide an enabled reset_anchors.json sidecar next to final_motion.npz."
                 )
             raise ValueError(
                 "Failure-weighted sampling requires initialized time bins. "
                 "Set cfg.bin_size or reconvert the motion .npz files with segment metadata."
             )
 
+        robot_joint_pos = to_torch(self.robot.data.joint_pos)
         observation_layout = ObservationLayout(
-            joint_dim=int(self.robot.data.joint_pos.shape[1]),
-            action_dim=int(self.robot.data.joint_pos.shape[1]),
+            joint_dim=int(robot_joint_pos.shape[1]),
+            action_dim=int(robot_joint_pos.shape[1]),
             key_body_count=len(self.key_body_indices),
         )
         self.observation_model = Observation(
@@ -240,39 +260,52 @@ class MotionTrackingEnv(DirectRLEnv):
         except ValueError as exc:
             raise ValueError(f"Body '{body_name}' was not found in robot.body_names.") from exc
 
-        try:
-            motion_index = self.motion_lib.body_names.index(body_name)
-        except ValueError as exc:
-            raise ValueError(f"Body '{body_name}' was not found in motion_lib.body_names.") from exc
-
-        if robot_index != motion_index:
-            raise ValueError(
-                f"Body '{body_name}' has mismatched indices between robot ({robot_index}) "
-                f"and motion clip ({motion_index}). ref2act requires matching body order "
-                "for shared robot/reference bodies."
-            )
+        if body_name not in self.motion_lib.body_names:
+            raise ValueError(f"Body '{body_name}' was not found in motion_lib.body_names.")
         return robot_index
+
+    def _build_name_alignment(
+        self,
+        *,
+        source_names: list[str],
+        target_names: list[str],
+        topology_name: str,
+    ) -> torch.Tensor:
+        if set(source_names) != set(target_names) or len(source_names) != len(target_names):
+            missing = sorted(set(target_names).difference(source_names))
+            extra = sorted(set(source_names).difference(target_names))
+            raise ValueError(
+                f"Retargeter {topology_name} topology does not match the Isaac articulation: "
+                f"missing={missing}, extra={extra}."
+            )
+        return torch.tensor(
+            [source_names.index(name) for name in target_names],
+            dtype=torch.long,
+            device=self.device,
+        )
 
     def _normalize_env_ids(self, env_ids: torch.Tensor | None) -> torch.Tensor:
         if env_ids is None or len(env_ids) == self.num_envs:
-            return self.robot._ALL_INDICES
-        return env_ids
+            return to_torch(self.robot._ALL_INDICES)
+        return to_torch(env_ids)
 
     def _build_reference_motion(self, env_ids: torch.Tensor) -> ReferenceMotions:
         motions = self.sampler.sample_motion_batch(
             env_ids,
-            position_offsets=self.scene.env_origins[env_ids],
+            position_offsets=to_torch(self.scene.env_origins)[env_ids],
         )
+        joint_indices = self._motion_joint_indices_for_robot
+        body_indices = self._motion_body_indices_for_robot
         return ReferenceMotions(
-            joint_pos=motions["joint_pos"],
-            joint_vel=motions["joint_vel"],
-            body_positions=motions["body_positions"],
-            body_quaternions=motions["body_quaternions"],
-            body_linear_velocities=motions["body_linear_velocities"],
-            body_angular_velocities=motions["body_angular_velocities"],
+            joint_pos=motions["joint_pos"][:, joint_indices],
+            joint_vel=motions["joint_vel"][:, joint_indices],
+            body_positions=motions["body_positions"][:, body_indices],
+            body_quaternions=motions["body_quaternions"][:, body_indices],
+            body_linear_velocities=motions["body_linear_velocities"][:, body_indices],
+            body_angular_velocities=motions["body_angular_velocities"][:, body_indices],
             anchor_body_index=self.anchor_body_index,
-            robot_body_positions=self.robot.data.body_pos_w[env_ids],
-            robot_body_quaternions=self.robot.data.body_quat_w[env_ids],
+            robot_body_positions=to_torch(self.robot.data.body_link_pos_w)[env_ids],
+            robot_body_quaternions=to_torch(self.robot.data.body_link_quat_w)[env_ids],
         )
 
     def _apply_reset_noise(self, env_ids: torch.Tensor, reference_motion: ReferenceMotions) -> tuple[torch.Tensor, ...]:
@@ -308,16 +341,17 @@ class MotionTrackingEnv(DirectRLEnv):
             reference_motion,
         )
 
-        root_state = self.robot.data.default_root_state[env_ids].clone()
+        root_state = to_torch(self.robot.data.default_root_state)[env_ids].clone()
         root_state[:, 0:3] = root_pos
         root_state[:, 2] += 0.05
         root_state[:, 3:7] = root_quat
         root_state[:, 7:10] = root_linear_vel
         root_state[:, 10:13] = root_angular_vel
 
-        self.robot.write_root_link_pose_to_sim(root_state[:, :7], env_ids)
-        self.robot.write_root_com_velocity_to_sim(root_state[:, 7:], env_ids)
-        self.robot.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
+        self.robot.write_root_link_pose_to_sim_index(root_pose=root_state[:, :7], env_ids=env_ids)
+        self.robot.write_root_link_velocity_to_sim_index(root_velocity=root_state[:, 7:], env_ids=env_ids)
+        self.robot.write_joint_position_to_sim_index(position=joint_pos, env_ids=env_ids)
+        self.robot.write_joint_velocity_to_sim_index(velocity=joint_vel, env_ids=env_ids)
 
     def _store_reference_motion(self, env_ids: torch.Tensor, reference_motion: ReferenceMotions) -> None:
         if not hasattr(self, "reference_motion") or len(env_ids) == self.num_envs:
@@ -333,7 +367,7 @@ class MotionTrackingEnv(DirectRLEnv):
             current_value[env_ids] = updated_value
 
     def _advance_reference_motion(self) -> None:
-        env_ids = self.robot._ALL_INDICES
+        env_ids = self._normalize_env_ids(None)
         self.sampler.advance(env_ids)
         reference_motion = self._build_reference_motion(env_ids)
         self._store_reference_motion(env_ids, reference_motion)
@@ -357,10 +391,10 @@ class MotionTrackingEnv(DirectRLEnv):
     def get_joint_params(self):
         return {
             "joint_names": self.robot.data.joint_names,
-            "joint_effort_limits": self.robot.data.joint_effort_limits[0],
-            "joint_pos_limits": self.robot.data.default_joint_limits[0],
-            "joint_stiffness": self.robot.data.default_joint_stiffness[0],
-            "joint_damping": self.robot.data.default_joint_damping[0],
+            "joint_effort_limits": to_torch(self.robot.data.joint_effort_limits)[0],
+            "joint_pos_limits": to_torch(self.robot.data.default_joint_limits)[0],
+            "joint_stiffness": to_torch(self.robot.data.default_joint_stiffness)[0],
+            "joint_damping": to_torch(self.robot.data.default_joint_damping)[0],
             "action_offset": self.action_processer.offset[0],
             "action_scale": self.action_processer.scale,
             "action_mode": self.action_processer.action_mode,
@@ -370,7 +404,11 @@ class MotionTrackingEnv(DirectRLEnv):
         self.robot = Articulation(self.cfg.robot)
         self.scene.articulations["robot"] = self.robot
 
-        self.contact_sensor = ContactSensor(self.cfg.contact_sensor)
+        contact_sensor_type = self.cfg.contact_sensor.class_type
+        if isinstance(contact_sensor_type, str):
+            module_name, _, attr_name = contact_sensor_type.partition(":")
+            contact_sensor_type = getattr(import_module(module_name), attr_name)
+        self.contact_sensor = contact_sensor_type(self.cfg.contact_sensor)
         self.scene.sensors["contact_sensor"] = self.contact_sensor
 
         self.cfg.terrain.num_envs = self.scene.cfg.num_envs

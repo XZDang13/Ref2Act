@@ -12,6 +12,7 @@ from ref2act.common.observation_spec import (
     ObservationSpec,
     ObservationTermSpec,
 )
+from ref2act.envs.motion_tracking.observation import default_training_observation_spec
 
 if TYPE_CHECKING:
     from .env import MujocoEnv
@@ -35,35 +36,8 @@ class MujocoObservationBuilder(Protocol):
 
 
 def default_mujoco_observation_spec() -> ObservationSpec:
-    return ObservationSpec(
-        groups=(
-            ObservationGroupSpec(
-                name="motion",
-                terms=(
-                    ObservationTermSpec(id="target_projected_gravity", type="target_projected_gravity"),
-                    ObservationTermSpec(id="target_joint_pos", type="target_joint_pos"),
-                    ObservationTermSpec(id="target_joint_vel", type="target_joint_vel"),
-                ),
-            ),
-            ObservationGroupSpec(
-                name="robot",
-                terms=(
-                    ObservationTermSpec(id="projected_gravity", type="projected_gravity"),
-                    ObservationTermSpec(id="anchor_ang_vel_b", type="anchor_ang_vel_b"),
-                    ObservationTermSpec(id="joint_pos", type="joint_pos"),
-                    ObservationTermSpec(id="joint_vel", type="joint_vel"),
-                    ObservationTermSpec(id="previous_action", type="previous_action"),
-                ),
-            ),
-            ObservationGroupSpec(
-                name="privilege",
-                terms=(
-                    ObservationTermSpec(id="target_anchor_lin_vel", type="target_anchor_lin_vel"),
-                    ObservationTermSpec(id="target_priv_anchor_ang_vel_b", type="target_anchor_ang_vel_b"),
-                ),
-            ),
-        )
-    )
+    training_spec = default_training_observation_spec(add_noise=False)
+    return ObservationSpec(groups=tuple(group for group in training_spec.groups if group.name in {"motion", "robot"}))
 
 
 class IsaacLabMujocoObservation:
@@ -118,9 +92,4 @@ class IsaacLabMujocoObservation:
 
     def get_policy_observation(self, env: MujocoEnv, context: MujocoObservationContext) -> torch.Tensor:
         default_observation = self.get_default_observation(env, context)
-        policy_groups = [
-            default_observation[group.name]
-            for group in self.spec.enabled_groups()
-            if group.name != "privilege"
-        ]
-        return torch.cat(policy_groups)
+        return torch.cat([default_observation[group.name] for group in self.spec.enabled_groups()])
