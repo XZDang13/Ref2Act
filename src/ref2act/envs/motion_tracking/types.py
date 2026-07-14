@@ -24,6 +24,7 @@ class ReferenceMotions:
     body_linear_velocities: torch.Tensor
     body_angular_velocities: torch.Tensor
     anchor_body_index: int
+    tracked_body_indices: tuple[int, ...] | None = None
     robot_body_positions: torch.Tensor | None = None
     robot_body_quaternions: torch.Tensor | None = None
     body_pos_relative: torch.Tensor = field(init=False)
@@ -34,6 +35,10 @@ class ReferenceMotions:
             raise IndexError(f"anchor_body_index out of range: {self.anchor_body_index}")
 
         batch_size, num_bodies, _ = self.body_positions.shape
+        if self.tracked_body_indices is None:
+            self.tracked_body_indices = tuple(range(num_bodies))
+        elif any(index < 0 or index >= num_bodies for index in self.tracked_body_indices):
+            raise IndexError("tracked_body_indices contains an out-of-range body index.")
         ref_anchor_pos = self.body_positions[:, self.anchor_body_index]
         ref_anchor_quat = self.body_quaternions[:, self.anchor_body_index]
 

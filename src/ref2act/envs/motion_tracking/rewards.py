@@ -478,6 +478,10 @@ class RewardContext:
         self._cache[cache_key] = masses
         return masses
 
+    def tracked_body_indices(self) -> tuple[int, ...]:
+        indices = getattr(self.reference_motion, "tracked_body_indices", None)
+        return tuple(range(self.reference_motion.body_positions.shape[1])) if indices is None else indices
+
     def _body_pose_error(
         self,
         cache_prefix: str,
@@ -687,9 +691,10 @@ class RewardContext:
         if cached is not None:
             return cached  # type: ignore[return-value]
 
-        body_masses = self.body_masses()
+        body_indices = self.tracked_body_indices()
+        body_masses = self.body_masses()[:, body_indices]
         total_mass = body_masses.sum(dim=1, keepdim=True).clamp_min(1.0e-8)
-        result = torch.sum(self.body_com_positions() * body_masses[..., None], dim=1) / total_mass
+        result = torch.sum(self.body_com_positions()[:, body_indices] * body_masses[..., None], dim=1) / total_mass
         self._cache[cache_key] = result
         return result
 
@@ -699,9 +704,12 @@ class RewardContext:
         if cached is not None:
             return cached  # type: ignore[return-value]
 
-        body_masses = self.body_masses()
+        body_indices = self.tracked_body_indices()
+        body_masses = self.body_masses()[:, body_indices]
         total_mass = body_masses.sum(dim=1, keepdim=True).clamp_min(1.0e-8)
-        result = torch.sum(self.reference_body_com_positions() * body_masses[..., None], dim=1) / total_mass
+        result = torch.sum(
+            self.reference_body_com_positions()[:, body_indices] * body_masses[..., None], dim=1
+        ) / total_mass
         self._cache[cache_key] = result
         return result
 
@@ -711,9 +719,10 @@ class RewardContext:
         if cached is not None:
             return cached  # type: ignore[return-value]
 
-        body_masses = self.body_masses()
+        body_indices = self.tracked_body_indices()
+        body_masses = self.body_masses()[:, body_indices]
         total_mass = body_masses.sum(dim=1, keepdim=True).clamp_min(1.0e-8)
-        result = torch.sum(self.body_com_velocities() * body_masses[..., None], dim=1) / total_mass
+        result = torch.sum(self.body_com_velocities()[:, body_indices] * body_masses[..., None], dim=1) / total_mass
         self._cache[cache_key] = result
         return result
 
@@ -723,9 +732,12 @@ class RewardContext:
         if cached is not None:
             return cached  # type: ignore[return-value]
 
-        body_masses = self.body_masses()
+        body_indices = self.tracked_body_indices()
+        body_masses = self.body_masses()[:, body_indices]
         total_mass = body_masses.sum(dim=1, keepdim=True).clamp_min(1.0e-8)
-        result = torch.sum(self.reference_body_com_velocities(anchor_body_index) * body_masses[..., None], dim=1) / total_mass
+        result = torch.sum(
+            self.reference_body_com_velocities(anchor_body_index)[:, body_indices] * body_masses[..., None], dim=1
+        ) / total_mass
         self._cache[cache_key] = result
         return result
 

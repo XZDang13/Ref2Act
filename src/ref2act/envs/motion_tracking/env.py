@@ -99,11 +99,27 @@ class MotionTrackingEnv(DirectRLEnv):
             target_names=self.robot.data.joint_names,
             topology_name="joint",
         )
-        self._motion_body_indices_for_robot = self._build_name_alignment(
+        (
+            self._motion_body_source_indices,
+            self._motion_body_robot_indices,
+        ) = self._build_body_alignment(
             source_names=self.motion_lib.body_names,
             target_names=self.robot.data.body_names,
-            topology_name="body",
         )
+
+        required_motion_bodies = {
+            self.cfg.root_link_name,
+            self.cfg.anchor_body_name,
+            *self.cfg.key_body_names,
+            *self.cfg.end_effector_body_names,
+            *self.cfg.foot_body_names,
+        }
+        missing_required_bodies = sorted(required_motion_bodies.difference(self.motion_lib.body_names))
+        if missing_required_bodies:
+            raise ValueError(
+                "Retargeter motion is missing bodies required by the environment: "
+                f"{missing_required_bodies}."
+            )
 
         self.anchor_body_index = self._resolve_shared_body_index(self.cfg.anchor_body_name)
         self.key_body_indices = [self._resolve_shared_body_index(name) for name in self.cfg.key_body_names]
@@ -284,6 +300,29 @@ class MotionTrackingEnv(DirectRLEnv):
             device=self.device,
         )
 
+    def _build_body_alignment(
+        self,
+        *,
+        source_names: list[str],
+        target_names: list[str],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        source_only = sorted(set(source_names).difference(target_names))
+        if source_only:
+            raise ValueError(
+                "Retargeter body topology contains bodies absent from the Isaac articulation: "
+                f"{source_only}."
+            )
+
+        source_lookup = {name: index for index, name in enumerate(source_names)}
+        matched_target_indices = [index for index, name in enumerate(target_names) if name in source_lookup]
+        if not matched_target_indices:
+            raise ValueError("Retargeter and Isaac body topologies have no bodies in common.")
+        matched_source_indices = [source_lookup[target_names[index]] for index in matched_target_indices]
+        return (
+            torch.tensor(matched_source_indices, dtype=torch.long, device=self.device),
+            torch.tensor(matched_target_indices, dtype=torch.long, device=self.device),
+        )
+
     def _normalize_env_ids(self, env_ids: torch.Tensor | None) -> torch.Tensor:
         if env_ids is None or len(env_ids) == self.num_envs:
             return to_torch(self.robot._ALL_INDICES)
@@ -295,17 +334,29 @@ class MotionTrackingEnv(DirectRLEnv):
             position_offsets=to_torch(self.scene.env_origins)[env_ids],
         )
         joint_indices = self._motion_joint_indices_for_robot
-        body_indices = self._motion_body_indices_for_robot
+        source_body_indices = self._motion_body_source_indices
+        robot_body_indices = self._motion_body_robot_indices
+        robot_body_positions = to_torch(self.robot.data.body_link_pos_w)[env_ids]
+        robot_body_quaternions = to_torch(self.robot.data.body_link_quat_w)[env_ids]
+        body_positions = robot_body_positions.clone()
+        body_quaternions = robot_body_quaternions.clone()
+        body_linear_velocities = to_torch(self.robot.data.body_link_lin_vel_w)[env_ids].clone()
+        body_angular_velocities = to_torch(self.robot.data.body_link_ang_vel_w)[env_ids].clone()
+        body_positions[:, robot_body_indices] = motions["body_positions"][:, source_body_indices]
+        body_quaternions[:, robot_body_indices] = motions["body_quaternions"][:, source_body_indices]
+        body_linear_velocities[:, robot_body_indices] = motions["body_linear_velocities"][:, source_body_indices]
+        body_angular_velocities[:, robot_body_indices] = motions["body_angular_velocities"][:, source_body_indices]
         return ReferenceMotions(
             joint_pos=motions["joint_pos"][:, joint_indices],
             joint_vel=motions["joint_vel"][:, joint_indices],
-            body_positions=motions["body_positions"][:, body_indices],
-            body_quaternions=motions["body_quaternions"][:, body_indices],
-            body_linear_velocities=motions["body_linear_velocities"][:, body_indices],
-            body_angular_velocities=motions["body_angular_velocities"][:, body_indices],
+            body_positions=body_positions,
+            body_quaternions=body_quaternions,
+            body_linear_velocities=body_linear_velocities,
+            body_angular_velocities=body_angular_velocities,
             anchor_body_index=self.anchor_body_index,
-            robot_body_positions=to_torch(self.robot.data.body_link_pos_w)[env_ids],
-            robot_body_quaternions=to_torch(self.robot.data.body_link_quat_w)[env_ids],
+            tracked_body_indices=tuple(int(index) for index in robot_body_indices.tolist()),
+            robot_body_positions=robot_body_positions,
+            robot_body_quaternions=robot_body_quaternions,
         )
 
     def _apply_reset_noise(self, env_ids: torch.Tensor, reference_motion: ReferenceMotions) -> tuple[torch.Tensor, ...]:

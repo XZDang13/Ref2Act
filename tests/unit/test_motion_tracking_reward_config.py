@@ -3,6 +3,7 @@ import sys
 import types
 from enum import Enum
 
+import pytest
 import torch
 
 
@@ -365,6 +366,32 @@ def test_build_reward_spec_autofills_end_effector_indices_alongside_existing_fie
     assert reward_spec.terms[10].foot_body_indices == (10, 11)
     assert reward_spec.terms[10].foot_contact_body_indices == (12, 13)
     assert reward_spec.dt == 0.02
+
+
+def test_body_alignment_accepts_motion_subset_of_asset_topology() -> None:
+    env_mod, _ = _load_motion_tracking_env_module()
+    env = object.__new__(env_mod.MotionTrackingEnv)
+    env.device = torch.device("cpu")
+
+    source_indices, robot_indices = env._build_body_alignment(
+        source_names=["pelvis", "torso_link"],
+        target_names=["pelvis", "helper_link", "torso_link"],
+    )
+
+    assert source_indices.tolist() == [0, 1]
+    assert robot_indices.tolist() == [0, 2]
+
+
+def test_body_alignment_rejects_motion_body_absent_from_asset() -> None:
+    env_mod, _ = _load_motion_tracking_env_module()
+    env = object.__new__(env_mod.MotionTrackingEnv)
+    env.device = torch.device("cpu")
+
+    with pytest.raises(ValueError, match="absent from the Isaac articulation"):
+        env._build_body_alignment(
+            source_names=["pelvis", "unknown_link"],
+            target_names=["pelvis", "helper_link"],
+        )
 
 
 def test_get_dones_records_termination_failures() -> None:

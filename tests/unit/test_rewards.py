@@ -151,6 +151,7 @@ def _make_reference_motion(
     body_quat_relative: torch.Tensor | None = None,
     body_linear_velocities: torch.Tensor | None = None,
     body_angular_velocities: torch.Tensor | None = None,
+    tracked_body_indices: tuple[int, ...] | None = None,
 ) -> types.SimpleNamespace:
     if body_quaternions is None:
         body_quaternions = torch.zeros((num_envs, num_bodies, 4), dtype=torch.float32)
@@ -175,6 +176,7 @@ def _make_reference_motion(
         body_angular_velocities=body_angular_velocities,
         joint_pos=torch.zeros((num_envs, num_joints), dtype=torch.float32),
         joint_vel=torch.zeros((num_envs, num_joints), dtype=torch.float32),
+        tracked_body_indices=tracked_body_indices,
     )
 
 
@@ -432,6 +434,40 @@ def test_com_position_reward_tracks_mass_weighted_xy_error() -> None:
     shifted_reward = rewards.get_task_reward(shifted_robot, reference_motion, contact_sensor, action_model)
 
     assert torch.allclose(shifted_reward, torch.exp(torch.tensor([-0.25], dtype=torch.float32)))
+
+
+def test_com_position_ignores_asset_only_helper_bodies() -> None:
+    rewards_mod = _load_rewards_module()
+    rewards = rewards_mod.Rewards(
+        rewards_mod.RewardSpec(
+            dt=1.0,
+            output_mode="sum",
+            terms=(rewards_mod.CoMPositionRewardTermCfg(weight=1.0, std=1.0),),
+        )
+    )
+    reference_positions = torch.zeros((1, 2, 3), dtype=torch.float32)
+    reference_motion = _make_reference_motion(
+        num_bodies=2,
+        body_positions=reference_positions,
+        body_pos_relative=reference_positions,
+        tracked_body_indices=(0,),
+    )
+    robot_positions = torch.tensor([[[0.0, 0.0, 0.0], [100.0, 0.0, 0.0]]])
+    robot = _make_robot(
+        torch.zeros((1, 2, 3), dtype=torch.float32),
+        body_link_pos_w=robot_positions,
+        body_com_pos_w=robot_positions,
+        masses=torch.tensor([[1.0, 100.0]]),
+    )
+
+    reward = rewards.get_task_reward(
+        robot,
+        reference_motion,
+        _make_contact_sensor(torch.zeros((1, 1, 2, 3))),
+        _make_action_model(),
+    )
+
+    assert torch.allclose(reward, torch.ones(1))
 
 
 def test_com_velocity_reward_uses_reference_angular_velocity_com_offset_correction() -> None:

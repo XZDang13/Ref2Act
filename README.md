@@ -23,6 +23,8 @@ body_lin_vel_w, body_ang_vel_w
 
 The body arrays are `[T, B, 3/4]`, joint arrays are `[T, J]`, and names define their topology. Quaternions must be unit XYZW values.
 
+The motion body topology may be a subset of the Isaac articulation body topology. This supports assets such as the G1 29-DOF USD, which contains fixed/helper rigid bodies that Retargeter does not export. Every motion body must exist in the asset, and every environment-required root, anchor, key, end-effector, and foot body must exist in the motion. CoM rewards use only the shared motion/asset body set.
+
 An optional `reset_anchors.json` may sit next to the NPZ:
 
 ```json
