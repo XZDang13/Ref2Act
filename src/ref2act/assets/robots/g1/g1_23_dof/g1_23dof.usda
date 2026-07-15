@@ -1,30 +1,49 @@
 #usda 1.0
 (
-    "robot-only GMR source g1_mocap_23dof_rubber_hand.xml; joint ranges patched from g1_23_robot.yaml"
     customLayerData = {
         string creator = "MuJoCo USD Converter v0.2.0"
     }
     defaultPrim = "g1_23dof"
+    doc = """Generated from Composed Stage of root layer /tmp/tmp3mqg1tgd/g1_23dof.usdc
+
+
+Generated from Composed Stage of root layer /tmp/mjcf_import_g1_23dof_rubber_hand_onjtq29m/usdex_g1_23dof_rubber_hand/g1_23dof.usdc
+
+
+Generated from Composed Stage of root layer /tmp/mjcf_import_g1_23dof_rubber_hand_onjtq29m/temp_g1_23dof_rubber_hand/g1_23dof_rubber_hand.usd
+"""
     kilogramsPerUnit = 1
     metersPerUnit = 1
     upAxis = "Z"
 )
 
 def Xform "g1_23dof" (
-    prepend apiSchemas = ["GeomModelAPI"]
-    assetInfo = {
-        string name = "g1_23dof"
+    prepend references = @./payloads/base.usda@
+    variants = {
+        string Physics = "physx"
     }
-    kind = "component"
-    prepend payload = @./Payload/Contents.usda@
+    append variantSets = "Physics"
 )
 {
-    float3[] extentsHint = [(-0.07909053, -0.18570189, 0.0007271025), (0.36861184, 0.18571189, 1.3235726), (3.4028235e38, 3.4028235e38, 3.4028235e38), (-3.4028235e38, -3.4028235e38, -3.4028235e38), (3.4028235e38, 3.4028235e38, 3.4028235e38), (-3.4028235e38, -3.4028235e38, -3.4028235e38), (-0.0535535, -0.12350646, 0.031136248), (0.05525, 0.12350646, 0.99492)]
-}
+    variantSet "Physics" = {
+        "mujoco" (
+            prepend payload = @./payloads/Physics/mujoco.usda@
+        ) {
 
-def PhysicsScene "PhysicsScene" (
-    prepend payload = @./Payload/Contents.usda@</PhysicsScene>
-)
-{
+        }
+        "none" {
+
+        }
+        "physics" (
+            prepend payload = @./payloads/Physics/physics.usda@
+        ) {
+
+        }
+        "physx" (
+            prepend payload = @./payloads/Physics/physx.usda@
+        ) {
+
+        }
+    }
 }
 

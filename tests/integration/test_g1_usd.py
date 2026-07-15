@@ -104,6 +104,20 @@ def _stage_names(path: Path) -> tuple[list[str], list[str]]:
     return body_names, joint_names
 
 
+@pytest.mark.parametrize("path", [G1_23_USD_PATH, G1_29_USD_PATH])
+def test_toe_bodies_have_valid_authored_mass_properties(path: Path) -> None:
+    stage = Usd.Stage.Open(str(path), Usd.Stage.LoadAll)
+    assert stage is not None
+
+    toe_prims = [prim for prim in stage.Traverse() if prim.GetName() in {"left_toe_link", "right_toe_link"}]
+    assert len(toe_prims) == 2
+    for prim in toe_prims:
+        mass_api = UsdPhysics.MassAPI(prim)
+        assert prim.HasAPI(UsdPhysics.MassAPI)
+        assert mass_api.GetMassAttr().Get() > 0.0
+        assert all(value > 0.0 for value in mass_api.GetDiagonalInertiaAttr().Get())
+
+
 def test_g1_23_usd_matches_retargeter_motion_topology() -> None:
     body_names, joint_names = _stage_names(G1_23_USD_PATH)
 
