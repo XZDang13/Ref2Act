@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import torch
 from isaaclab.assets import Articulation
@@ -12,6 +12,7 @@ from ref2act.common.math import (
     quaternion_to_tangent_and_normal,
     relative_transform,
 )
+from ref2act.common.proprioception import build_proprioceptive_context, default_robot_observation_terms
 from ref2act.isaac_compat import to_torch
 from ref2act.common.observation_spec import (
     ObservationComposer,
@@ -27,14 +28,6 @@ from ref2act.common.utils import IndexLike
 from .types import MotionState, ReferenceMotions
 
 
-def _anchor_ang_vel_b(anchor_quat_w: torch.Tensor, anchor_ang_vel_w: torch.Tensor) -> torch.Tensor:
-    return quat_apply_inverse(anchor_quat_w, anchor_ang_vel_w)
-
-
-def _anchor_lin_vel_b(anchor_quat_w: torch.Tensor, anchor_lin_vel_w: torch.Tensor) -> torch.Tensor:
-    return quat_apply_inverse(anchor_quat_w, anchor_lin_vel_w)
-
-
 def build_observation_context(
     robot_state: MotionState,
     reference_state: MotionState,
@@ -42,13 +35,18 @@ def build_observation_context(
     previous_action: torch.Tensor,
 ) -> ObservationContext:
     """Build the shared, simulator-independent observation context."""
+    context = build_proprioceptive_context(
+        anchor_quat_w=robot_state.anchor_quat,
+        anchor_lin_vel_w=robot_state.anchor_lin_vel,
+        anchor_ang_vel_w=robot_state.anchor_ang_vel,
+        gravity_vector_w=gravity_vector,
+        joint_pos=robot_state.joint_pos,
+        joint_vel=robot_state.joint_vel,
+        previous_action=previous_action,
+    )
     target_projected_gravity_b = quat_apply_inverse(reference_state.anchor_quat, gravity_vector)
-    robot_projected_gravity_b = quat_apply_inverse(robot_state.anchor_quat, gravity_vector)
     target_anchor_ori_6d = quaternion_to_rotation_6d(reference_state.anchor_quat)
-    robot_anchor_ori_6d = quaternion_to_rotation_6d(robot_state.anchor_quat)
-    robot_anchor_lin_vel_b = _anchor_lin_vel_b(robot_state.anchor_quat, robot_state.anchor_lin_vel)
-    target_anchor_ang_vel_b = _anchor_ang_vel_b(reference_state.anchor_quat, reference_state.anchor_ang_vel)
-    robot_anchor_ang_vel_b = _anchor_ang_vel_b(robot_state.anchor_quat, robot_state.anchor_ang_vel)
+    target_anchor_ang_vel_b = quat_apply_inverse(reference_state.anchor_quat, reference_state.anchor_ang_vel)
 
     motion_anchor_pos_b, motion_quat_b = relative_transform(
         robot_state.anchor_pos,
@@ -64,20 +62,14 @@ def build_observation_context(
     )
     motion_ori_b = quaternion_to_rotation_6d(motion_quat_b)
 
-    return ObservationContext(
+    return replace(
+        context,
         target_projected_gravity=target_projected_gravity_b,
         target_anchor_ori_6d=target_anchor_ori_6d,
         target_joint_pos=reference_state.joint_pos,
         target_joint_vel=reference_state.joint_vel,
         target_anchor_lin_vel=reference_state.anchor_lin_vel,
         target_anchor_ang_vel_b=target_anchor_ang_vel_b,
-        projected_gravity=robot_projected_gravity_b,
-        anchor_ori_6d=robot_anchor_ori_6d,
-        anchor_lin_vel_b=robot_anchor_lin_vel_b,
-        anchor_ang_vel_b=robot_anchor_ang_vel_b,
-        joint_pos=robot_state.joint_pos,
-        joint_vel=robot_state.joint_vel,
-        previous_action=previous_action.clone(),
         motion_anchor_pos_b=motion_anchor_pos_b,
         motion_ori_b=motion_ori_b,
         motion_anchor_ori_b=motion_ori_b,
@@ -87,34 +79,11 @@ def build_observation_context(
         relative_key_tangent_and_normal=quaternion_to_tangent_and_normal(body_quat_b).flatten(1),
         body_pos_b=body_pos_b.flatten(1),
         body_ori_b=quaternion_to_rotation_6d(body_quat_b).flatten(1),
-        anchor_lin_vel=robot_state.anchor_lin_vel,
     )
 
 
 def default_training_observation_spec(add_noise: bool = True) -> ObservationSpec:
-    robot_terms = (
-        ObservationTermSpec(
-            id="anchor_ori_6d",
-            type="anchor_ori_6d",
-            noise=ObservationNoiseSpec(-0.05, 0.05) if add_noise else None,
-        ),
-        ObservationTermSpec(
-            id="anchor_ang_vel_b",
-            type="anchor_ang_vel_b",
-            noise=ObservationNoiseSpec(-0.2, 0.2) if add_noise else None,
-        ),
-        ObservationTermSpec(
-            id="joint_pos",
-            type="joint_pos",
-            noise=ObservationNoiseSpec(-0.01, 0.01) if add_noise else None,
-        ),
-        ObservationTermSpec(
-            id="joint_vel",
-            type="joint_vel",
-            noise=ObservationNoiseSpec(-0.5, 0.5) if add_noise else None,
-        ),
-        ObservationTermSpec(id="previous_action", type="previous_action"),
-    )
+    robot_terms = default_robot_observation_terms(add_noise=add_noise)
     return ObservationSpec(
         groups=(
             ObservationGroupSpec(
@@ -165,11 +134,13 @@ class Observation:
         device: torch.device,
         anchor_body_index: int,
         key_body_indices: list[int],
+        policy_order_joint_indices: torch.Tensor | None = None,
     ) -> None:
         self.spec = spec
         self.layout = layout
         self.anchor_body_index = anchor_body_index
         self.key_body_indices = key_body_indices
+        self.policy_order_joint_indices = policy_order_joint_indices
         self.composer = ObservationComposer(spec=spec, layout=layout, num_envs=num_envs, device=device)
 
     def describe(self):
@@ -178,6 +149,9 @@ class Observation:
     def get_robot_state(self, robot: Articulation, scene: InteractiveScene) -> MotionState:
         joint_pos = to_torch(robot.data.joint_pos)
         joint_vel = to_torch(robot.data.joint_vel)
+        if self.policy_order_joint_indices is not None:
+            joint_pos = joint_pos[:, self.policy_order_joint_indices]
+            joint_vel = joint_vel[:, self.policy_order_joint_indices]
 
         local_body_positions_w = to_torch(robot.data.body_link_pos_w) - scene.env_origins.unsqueeze(1)
         body_quaternions_w = to_torch(robot.data.body_link_quat_w)
@@ -214,6 +188,9 @@ class Observation:
     ) -> MotionState:
         joint_pos = reference_motion.joint_pos
         joint_vel = reference_motion.joint_vel
+        if self.policy_order_joint_indices is not None:
+            joint_pos = joint_pos[:, self.policy_order_joint_indices]
+            joint_vel = joint_vel[:, self.policy_order_joint_indices]
 
         local_body_positions_w = reference_motion.body_positions - scene.env_origins.unsqueeze(1)
         body_quaternions_w = reference_motion.body_quaternions

@@ -32,10 +32,11 @@ def main() -> int:
     try:
         observation, _ = env.reset()
         sensor = env.unwrapped.contact_sensor
-        if tuple(sensor.body_names) != ("left_ankle_roll_link", "right_ankle_roll_link"):
-            raise RuntimeError(f"Unexpected nested contact bodies: {sensor.body_names}")
+        required_support_bodies = {"left_ankle_roll_link", "right_ankle_roll_link"}
+        if not required_support_bodies.issubset(sensor.body_names):
+            raise RuntimeError(f"Missing support bodies in nested contact sensor: {sensor.body_names}")
         contact_forces = to_torch(sensor.data.net_forces_w)
-        if tuple(contact_forces.shape) != (args.num_envs, 2, 3):
+        if tuple(contact_forces.shape) != (args.num_envs, len(sensor.body_names), 3):
             raise RuntimeError(f"Unexpected contact tensor shape: {tuple(contact_forces.shape)}")
         print("isaac smoke reset passed", flush=True)
         for _ in range(10):

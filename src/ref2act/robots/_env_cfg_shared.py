@@ -23,6 +23,7 @@ from ref2act.envs.motion_tracking.rewards import default_reward_spec
 from ref2act.envs.motion_tracking.termination import default_termination_spec
 from ref2act.motion.sampling import SamplerMod, SamplingStrategy, SegmentSource
 from ref2act.robots._articulation_shared import G1_CFG
+from ref2act.robots._g1_spec import G1_23_DOF_JOINT_ORDER, G1_23_DOF_SPEC
 
 G1_ACTION_LATENCY_RANGE = (0, 0)
 
@@ -227,6 +228,7 @@ class G1TrainingEventCfg(G1DomainRandCfg):
 
 @configclass
 class G1MotionTrackingEnvCfg(DirectRLEnvCfg):
+    robot_spec_name = G1_23_DOF_SPEC.name
     expert_motion_file = None
     episode_length_s = 10.0
 
@@ -390,28 +392,4 @@ class MotionViewerCfg(InteractiveSceneCfg):
     robot = G1_CFG.replace(prim_path="/World/Robot")
 
 
-JOINT_ORDER = [
-    "left_hip_pitch_joint",
-    "left_hip_roll_joint",
-    "left_hip_yaw_joint",
-    "left_knee_joint",
-    "left_ankle_pitch_joint",
-    "left_ankle_roll_joint",
-    "right_hip_pitch_joint",
-    "right_hip_roll_joint",
-    "right_hip_yaw_joint",
-    "right_knee_joint",
-    "right_ankle_pitch_joint",
-    "right_ankle_roll_joint",
-    "waist_yaw_joint",
-    "left_shoulder_pitch_joint",
-    "left_shoulder_roll_joint",
-    "left_shoulder_yaw_joint",
-    "left_elbow_joint",
-    "left_wrist_roll_joint",
-    "right_shoulder_pitch_joint",
-    "right_shoulder_roll_joint",
-    "right_shoulder_yaw_joint",
-    "right_elbow_joint",
-    "right_wrist_roll_joint",
-]
+JOINT_ORDER = list(G1_23_DOF_JOINT_ORDER)

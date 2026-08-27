@@ -1,4 +1,5 @@
 import time
+from os import PathLike
 import numpy as np
 import torch
 
@@ -20,6 +21,7 @@ from ref2act.bridges.mujoco.observation import (
 )
 from ref2act.envs.motion_tracking.observation import build_observation_context
 from ref2act.envs.motion_tracking.types import MotionState
+from ref2act.robots.spec import resolve_robot_spec
 
 mujoco_env_xml = str(scene_asset_path("g1", "scene.xml"))
 
@@ -85,8 +87,11 @@ class MujocoEnv:
         action_mode: str = "absolute",
         observation_builder: MujocoObservationBuilder | None = None,
         action_builder: MujocoActionBuilder | None = None,
+        robot_spec_name: str = "g1_23dof",
+        model_xml: str | PathLike[str] | None = None,
     ):
-        self.mj_model = mujoco.MjModel.from_xml_path(mujoco_env_xml)
+        self.robot_spec = resolve_robot_spec(robot_spec_name)
+        self.mj_model = mujoco.MjModel.from_xml_path(str(model_xml or mujoco_env_xml))
         self.mj_data = mujoco.MjData(self.mj_model)
         self.mj_model.opt.timestep = simulation_dt
         self.mj_viewer = None
@@ -115,8 +120,7 @@ class MujocoEnv:
         self.motion_id = torch.zeros(1, dtype=torch.long)
 
         self.gravity_vector = torch.tensor([0.0, 0.0, -1.0]).float()
-        self.mujoco2isaac = [0, 6, 12, 1, 7, 13, 18, 2, 8, 14, 19, 3, 9, 15, 20, 4, 10, 16, 21, 5, 11, 17, 22]
-        self.isaac2mujoco = [0, 3, 7, 11, 15, 19, 1, 4, 8, 12, 16, 20, 2, 5, 9, 13, 17, 21, 6, 10, 14, 18, 22]
+        self._configure_joint_topology()
 
         self.kp = torch.as_tensor(kp, dtype=torch.float32, device="cpu").clone()
         self.kd = torch.as_tensor(kd, dtype=torch.float32, device="cpu").clone()
@@ -137,6 +141,75 @@ class MujocoEnv:
         self.policy_dt = simulation_dt * decimation
 
         self.n_steps = 0
+
+    def _configure_joint_topology(self) -> None:
+        free_joint_ids = set(np.flatnonzero(self.mj_model.jnt_type == mujoco.mjtJoint.mjJNT_FREE).tolist())
+        movable_joint_ids = [joint_id for joint_id in range(self.mj_model.njnt) if joint_id not in free_joint_ids]
+        unsupported_joint_ids = [
+            joint_id
+            for joint_id in movable_joint_ids
+            if self.mj_model.jnt_type[joint_id]
+            not in (mujoco.mjtJoint.mjJNT_HINGE, mujoco.mjtJoint.mjJNT_SLIDE)
+        ]
+        if unsupported_joint_ids:
+            raise ValueError(
+                "MuJoCo bridge only supports one-DoF hinge/slide policy joints; "
+                f"unsupported joint ids={unsupported_joint_ids}."
+            )
+
+        joint_names = [
+            mujoco.mj_id2name(self.mj_model, mujoco.mjtObj.mjOBJ_JOINT, joint_id)
+            for joint_id in movable_joint_ids
+        ]
+        if any(name is None for name in joint_names):
+            raise ValueError("Every MuJoCo policy joint must have a name.")
+        self.mujoco_joint_names = [str(name) for name in joint_names]
+        self.robot_spec.validate_joint_names(self.mujoco_joint_names)
+
+        self._mujoco_qpos_addresses = np.asarray(
+            [self.mj_model.jnt_qposadr[joint_id] for joint_id in movable_joint_ids],
+            dtype=np.int64,
+        )
+        self._mujoco_qvel_addresses = np.asarray(
+            [self.mj_model.jnt_dofadr[joint_id] for joint_id in movable_joint_ids],
+            dtype=np.int64,
+        )
+        self._mujoco_to_policy = np.asarray(
+            self.robot_spec.policy_order_indices(self.mujoco_joint_names),
+            dtype=np.int64,
+        )
+        self._policy_to_mujoco = np.asarray(
+            self.robot_spec.simulator_order_indices(self.mujoco_joint_names),
+            dtype=np.int64,
+        )
+
+        actuator_joint_ids = [int(joint_id) for joint_id in self.mj_model.actuator_trnid[:, 0]]
+        actuator_joint_names = [
+            mujoco.mj_id2name(self.mj_model, mujoco.mjtObj.mjOBJ_JOINT, joint_id)
+            for joint_id in actuator_joint_ids
+        ]
+        if any(name is None for name in actuator_joint_names):
+            raise ValueError("Every MuJoCo actuator must target a named joint.")
+        self._policy_to_actuator = np.asarray(
+            self.robot_spec.simulator_order_indices([str(name) for name in actuator_joint_names]),
+            dtype=np.int64,
+        )
+
+        motion_joint_names = list(self.motion_lib.joint_names)
+        self.robot_spec.validate_joint_names(motion_joint_names)
+        self._motion_to_policy = np.asarray(
+            self.robot_spec.policy_order_indices(motion_joint_names),
+            dtype=np.int64,
+        )
+
+        # Backward-compatible aliases.  Both now describe the actual loaded
+        # model instead of assuming a particular Isaac articulation order.
+        self.mujoco2isaac = self._mujoco_to_policy.tolist()
+        self.isaac2mujoco = self._policy_to_mujoco.tolist()
+
+    def _motion_joint_tensor_to_policy(self, value: torch.Tensor) -> torch.Tensor:
+        indices = torch.as_tensor(self._motion_to_policy, dtype=torch.long, device=value.device)
+        return value.index_select(-1, indices)
 
     def _resolve_motion_body_index(self, body_name: str, *, role: str) -> int:
         try:
@@ -240,20 +313,19 @@ class MujocoEnv:
         return quat_apply_inverse(anchor_quat_w, anchor_ang_vel_w).float()
 
     def get_joint_pos(self):
-        joint_pos = torch.from_numpy(self.mj_data.qpos[7:]).float()[self.mujoco2isaac]
-        return joint_pos
+        joint_pos = torch.from_numpy(self.mj_data.qpos[self._mujoco_qpos_addresses]).float()
+        return joint_pos[self._mujoco_to_policy]
 
     def get_joint_vel(self):
-        joint_vel = torch.from_numpy(self.mj_data.qvel[6:]).float()[self.mujoco2isaac]
-
-        return joint_vel
+        joint_vel = torch.from_numpy(self.mj_data.qvel[self._mujoco_qvel_addresses]).float()
+        return joint_vel[self._mujoco_to_policy]
 
     def get_motion_command(self, times):
         motion_ids = torch.full(times.shape, int(self.motion_id.item()), dtype=torch.long)
         reference_motion = self.motion_lib.sample_motion(motion_ids=motion_ids, times=times)
 
-        joint_pos = reference_motion["joint_pos"].squeeze(0)
-        joint_vel = reference_motion["joint_vel"].squeeze(0)
+        joint_pos = self._motion_joint_tensor_to_policy(reference_motion["joint_pos"]).squeeze(0)
+        joint_vel = self._motion_joint_tensor_to_policy(reference_motion["joint_vel"]).squeeze(0)
         body_quat = reference_motion["body_quaternions"].squeeze(0)
         body_linear_velocities = reference_motion["body_linear_velocities"].squeeze(0)
         body_angular_velocities = reference_motion["body_angular_velocities"].squeeze(0)
@@ -306,8 +378,8 @@ class MujocoEnv:
             key_ang_vel=empty_pos,
         )
         reference_state = MotionState(
-            joint_pos=reference["joint_pos"],
-            joint_vel=reference["joint_vel"],
+            joint_pos=self._motion_joint_tensor_to_policy(reference["joint_pos"]),
+            joint_vel=self._motion_joint_tensor_to_policy(reference["joint_vel"]),
             anchor_pos=reference["body_positions"][:, self.anchor_body_index],
             anchor_quat=reference["body_quaternions"][:, self.anchor_body_index],
             anchor_lin_vel=reference["body_linear_velocities"][:, self.anchor_body_index],
@@ -343,9 +415,9 @@ class MujocoEnv:
     ) -> tuple[np.ndarray, np.ndarray]:
         self.mj_data.qpos[:7] = 0.0
         self.mj_data.qpos[3] = 1.0
-        self.mj_data.qpos[7:] = joint_positions
+        self.mj_data.qpos[self._mujoco_qpos_addresses] = joint_positions
         self.mj_data.qvel[:6] = 0.0
-        self.mj_data.qvel[6:] = joint_velocities
+        self.mj_data.qvel[self._mujoco_qvel_addresses] = joint_velocities
         mujoco.mj_forward(self.mj_model, self.mj_data)
 
         free_root_pos, free_root_quat = self._get_body_world_pose(self.free_root_body_id)
@@ -394,8 +466,10 @@ class MujocoEnv:
 
         reference_motion = self.motion_lib.sample_motion(motion_ids=self.motion_id, times=self.times)
 
-        joint_positions = reference_motion["joint_pos"].squeeze(0).numpy()[self.isaac2mujoco]
-        joint_velocities = reference_motion["joint_vel"].squeeze(0).numpy()[self.isaac2mujoco]
+        policy_joint_positions = self._motion_joint_tensor_to_policy(reference_motion["joint_pos"]).squeeze(0)
+        policy_joint_velocities = self._motion_joint_tensor_to_policy(reference_motion["joint_vel"]).squeeze(0)
+        joint_positions = policy_joint_positions.numpy()[self._policy_to_mujoco]
+        joint_velocities = policy_joint_velocities.numpy()[self._policy_to_mujoco]
         body_positions = reference_motion["body_positions"].squeeze(0).numpy()
         body_rotations = reference_motion["body_quaternions"].squeeze(0).numpy()
         body_linear_velocities = reference_motion["body_linear_velocities"].squeeze(0).numpy()
@@ -417,9 +491,9 @@ class MujocoEnv:
         )
 
         self.mj_data.qpos[:7] = free_joint_pose
-        self.mj_data.qpos[7:] = joint_positions
+        self.mj_data.qpos[self._mujoco_qpos_addresses] = joint_positions
         self.mj_data.qvel[:6] = free_joint_velocity
-        self.mj_data.qvel[6:] = joint_velocities
+        self.mj_data.qvel[self._mujoco_qvel_addresses] = joint_velocities
 
         mujoco.mj_forward(self.mj_model, self.mj_data)
 
@@ -438,7 +512,7 @@ class MujocoEnv:
         else:
             obs = self.get_obs(advance_time=False)
 
-        self.target_pos = reference_motion["joint_pos"].squeeze(0).clone()
+        self.target_pos = policy_joint_positions.clone()
 
         return obs
 
@@ -450,7 +524,7 @@ class MujocoEnv:
         tau = self.kp * (self.target_pos - joint_pos) - self.kd * joint_vel
 
         tau_clipped = torch.clip(tau, -self.effort_limits, self.effort_limits)
-        tau_clipped = tau_clipped[self.isaac2mujoco]
+        tau_clipped = tau_clipped[self._policy_to_actuator]
 
         self.mj_data.ctrl[:] = tau_clipped.numpy()
 

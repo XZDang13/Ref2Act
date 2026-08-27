@@ -1,13 +1,16 @@
 import types
 
+import mujoco
 import numpy as np
 import torch
 
-from ref2act.bridges.mujoco.env import wxyz_to_xyzw_np, xyzw_to_wxyz_np
+from ref2act.assets import scene_asset_path
+from ref2act.bridges.mujoco.env import MujocoEnv, wxyz_to_xyzw_np, xyzw_to_wxyz_np
 from ref2act.bridges.mujoco.observation import IsaacLabMujocoObservation, default_mujoco_observation_spec
 from ref2act.common.observation_spec import ObservationComposer, ObservationLayout
 from ref2act.envs.motion_tracking.observation import build_observation_context, default_training_observation_spec
 from ref2act.envs.motion_tracking.types import MotionState
+from ref2act.robots.g1.spec import G1_23_DOF_JOINT_ORDER, G1_23_DOF_SPEC
 
 
 def _state(*, joint_offset: float, anchor_pos: tuple[float, float, float], yaw_quat: torch.Tensor) -> MotionState:
@@ -31,6 +34,29 @@ def test_mujoco_quaternion_boundary_round_trip() -> None:
     xyzw = np.asarray([0.1, -0.2, 0.3, 0.9], dtype=np.float64)
     assert np.array_equal(wxyz_to_xyzw_np(xyzw_to_wxyz_np(xyzw)), xyzw)
     assert np.array_equal(xyzw_to_wxyz_np(np.asarray([0.0, 0.0, 0.0, 1.0])), [1.0, 0.0, 0.0, 0.0])
+
+
+def test_mujoco_joint_maps_are_derived_from_names() -> None:
+    env = object.__new__(MujocoEnv)
+    env.mj_model = mujoco.MjModel.from_xml_path(str(scene_asset_path("g1", "scene.xml")))
+    env.mj_data = mujoco.MjData(env.mj_model)
+    env.robot_spec = G1_23_DOF_SPEC
+    env.motion_lib = types.SimpleNamespace(joint_names=list(reversed(G1_23_DOF_JOINT_ORDER)))
+
+    env._configure_joint_topology()
+
+    assert env.mujoco_joint_names == list(G1_23_DOF_JOINT_ORDER)
+    assert env.mujoco2isaac == list(range(23))
+    assert env.isaac2mujoco == list(range(23))
+    assert env._motion_to_policy.tolist() == list(reversed(range(23)))
+
+    env.mj_data.qpos[env._mujoco_qpos_addresses] = np.arange(23, dtype=np.float64)
+    env.mj_data.qvel[env._mujoco_qvel_addresses] = np.arange(23, dtype=np.float64) + 100.0
+    assert torch.equal(env.get_joint_pos(), torch.arange(23, dtype=torch.float32))
+    assert torch.equal(env.get_joint_vel(), torch.arange(23, dtype=torch.float32) + 100.0)
+
+    motion_order = torch.arange(23, dtype=torch.float32).flip(0)
+    assert torch.equal(env._motion_joint_tensor_to_policy(motion_order), torch.arange(23, dtype=torch.float32))
 
 
 def test_mujoco_policy_spec_is_current_107_dim_without_privilege() -> None:

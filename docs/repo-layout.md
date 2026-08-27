@@ -11,6 +11,12 @@ This repository uses a `src/ref2act` package layout. New code should follow thes
 - `src/ref2act/envs/motion_tracking`
   - Isaac Lab runtime logic for the motion-tracking task
   - Keep env orchestration here, including reset-time state application and env-facing visualization helpers
+- `src/ref2act/envs/locomotion`
+  - Task-specific velocity commands, observations, rewards, terrain generators, and the locomotion runtime
+- `src/ref2act/envs/base.py`
+  - Robot-neutral scene, action, reset, and policy/simulator ordering boundary
+- `src/ref2act/robots/spec.py`
+  - Simulator-independent robot topology contract used by all tasks
 - `src/ref2act/robots/g1`
   - G1 articulation/config exports and robot-specific presets/constants
 - `src/ref2act/robots/pi_plus`
@@ -28,7 +34,7 @@ This repository uses a `src/ref2act` package layout. New code should follow thes
 - `ref2act.motion` must stay independent of Isaac Lab and MuJoCo.
 - `ref2act.envs` may depend on Isaac Lab but should depend on `ref2act.motion`, not the reverse.
 - `ref2act.robots` may depend on Isaac Lab and env config types.
-- `ref2act.bridges.mujoco` may depend on MuJoCo and `ref2act.motion`, not on Isaac Lab.
+- `ref2act.bridges.mujoco` may depend on MuJoCo and shared observation contracts. Isaac-specific imports must remain lazy at this boundary.
 - Asset access should go through `ref2act.assets.asset_path`, `robot_asset_path`, or `scene_asset_path`.
 
 ## Tests

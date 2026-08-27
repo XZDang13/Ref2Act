@@ -7,6 +7,7 @@ from ref2act.robots._env_cfg_shared import (
     G1_TORSO_JOINTS,
     JOINT_ORDER,
 )
+from .spec import G1_23_DOF_JOINT_ORDER, G1_23_DOF_SPEC
 
 __all__ = [
     "G1_ACTION_LATENCY_RANGE",
@@ -16,5 +17,6 @@ __all__ = [
     "G1_PUSH_VELOCITY_RANGE",
     "G1_TORSO_JOINTS",
     "JOINT_ORDER",
+    "G1_23_DOF_JOINT_ORDER",
+    "G1_23_DOF_SPEC",
 ]
-

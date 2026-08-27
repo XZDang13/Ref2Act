@@ -63,6 +63,7 @@ def _load_motion_tracking_env_module():
         "isaaclab.utils": sys.modules.get("isaaclab.utils"),
         "isaaclab.utils.configclass": sys.modules.get("isaaclab.utils.configclass"),
         "isaaclab.utils.math": sys.modules.get("isaaclab.utils.math"),
+        "ref2act.envs.base": sys.modules.get("ref2act.envs.base"),
         "ref2act.envs.motion_tracking.action": sys.modules.get("ref2act.envs.motion_tracking.action"),
         "ref2act.envs.motion_tracking.curriculum": sys.modules.get("ref2act.envs.motion_tracking.curriculum"),
         "ref2act.envs.motion_tracking.observation": sys.modules.get("ref2act.envs.motion_tracking.observation"),
@@ -84,6 +85,9 @@ def _load_motion_tracking_env_module():
 
     envs_mod = types.ModuleType("isaaclab.envs")
     envs_mod.DirectRLEnv = type("DirectRLEnv", (), {})
+
+    base_mod = types.ModuleType("ref2act.envs.base")
+    base_mod.LeggedRobotEnv = envs_mod.DirectRLEnv
 
     sensors_mod = types.ModuleType("isaaclab.sensors")
     sensors_mod.ContactSensor = type("ContactSensor", (), {})
@@ -131,6 +135,7 @@ def _load_motion_tracking_env_module():
     sys.modules["isaaclab.sim"] = sim_mod
     sys.modules["isaaclab.utils"] = utils_mod
     sys.modules["isaaclab.utils.math"] = math_mod
+    sys.modules["ref2act.envs.base"] = base_mod
     sys.modules["ref2act.envs.motion_tracking.action"] = action_mod
     sys.modules["ref2act.envs.motion_tracking.curriculum"] = curriculum_mod
     sys.modules["ref2act.envs.motion_tracking.observation"] = observation_mod

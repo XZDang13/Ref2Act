@@ -108,6 +108,7 @@ class ObservationLayout:
     joint_dim: int
     action_dim: int
     key_body_count: int
+    command_dim: int = 0
 
 
 @dataclass(frozen=True)
@@ -167,6 +168,11 @@ class ContextFieldObservationTerm:
 
 
 DEFAULT_OBSERVATION_TERM_REGISTRY: dict[str, ObservationTerm] = {
+    "velocity_command": ContextFieldObservationTerm(
+        "velocity_command",
+        "velocity_command",
+        lambda layout: layout.command_dim,
+    ),
     "target_projected_gravity": ContextFieldObservationTerm(
         "target_projected_gravity",
         "target_projected_gravity",

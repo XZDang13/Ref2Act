@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 import isaaclab.sim as sim_utils
 import torch
-from isaaclab.envs import DirectRLEnv
+from ref2act.envs.base import LeggedRobotEnv
 from isaaclab.sensors import ContactSensor
 
 from ref2act.common.math import quat_mul
@@ -43,7 +43,7 @@ def _resolve_cfg_factory(cfg_factory: str):
     return cfg_cls()
 
 
-class MotionTrackingEnv(DirectRLEnv):
+class MotionTrackingEnv(LeggedRobotEnv):
     cfg: G1MotionTrackingEnvCfg
     _REFERENCE_MOTION_FIELDS = (
         "joint_pos",
@@ -65,17 +65,6 @@ class MotionTrackingEnv(DirectRLEnv):
             cfg = _resolve_cfg_factory(cfg_factory)
         self._derive_observation_spaces(cfg)
         super().__init__(cfg, render_mode, **kwargs)
-
-        # Isaac Lab 3 may expose the DirectRLEnv buffers as Warp/ProxyArray
-        # objects.  The base reset/step implementation performs Torch indexed
-        # writes, so retain their zero-copy Torch views for the whole runtime.
-        self.episode_length_buf = to_torch(self.episode_length_buf)
-        self.reset_terminated = to_torch(self.reset_terminated)
-        self.reset_time_outs = to_torch(self.reset_time_outs)
-        self.reset_buf = to_torch(self.reset_buf)
-
-        self.action_processer = ActionProcessor(self.robot, self.cfg.action)
-        self.action_processor = self.action_processer
 
         motion_file_input = self.cfg.expert_motion_file
         motion_file_count = len(motion_file_input) if isinstance(motion_file_input, (list, tuple)) else 1
@@ -198,6 +187,7 @@ class MotionTrackingEnv(DirectRLEnv):
             device=self.device,
             anchor_body_index=self.anchor_body_index,
             key_body_indices=self.key_body_indices,
+            policy_order_joint_indices=self._policy_order_joint_indices,
         )
 
         reward_spec = self._build_reward_spec(
@@ -442,15 +432,22 @@ class MotionTrackingEnv(DirectRLEnv):
         return SamplingStrategy.Start
 
     def get_joint_params(self):
+        policy_indices = self._policy_order_joint_indices
+        action_offset = self.action_processor.offset
+        if action_offset.ndim > 1:
+            action_offset = action_offset[0]
+        action_scale = self.action_processor.scale
+        if action_scale.ndim > 1:
+            action_scale = action_scale[0]
         return {
-            "joint_names": self.robot.data.joint_names,
-            "joint_effort_limits": to_torch(self.robot.data.joint_effort_limits)[0],
-            "joint_pos_limits": to_torch(self.robot.data.default_joint_limits)[0],
-            "joint_stiffness": to_torch(self.robot.data.default_joint_stiffness)[0],
-            "joint_damping": to_torch(self.robot.data.default_joint_damping)[0],
-            "action_offset": self.action_processer.offset[0],
-            "action_scale": self.action_processer.scale,
-            "action_mode": self.action_processer.action_mode,
+            "joint_names": list(self.robot_spec.joint_order),
+            "joint_effort_limits": to_torch(self.robot.data.joint_effort_limits)[0].index_select(0, policy_indices),
+            "joint_pos_limits": to_torch(self.robot.data.default_joint_limits)[0].index_select(0, policy_indices),
+            "joint_stiffness": to_torch(self.robot.data.default_joint_stiffness)[0].index_select(0, policy_indices),
+            "joint_damping": to_torch(self.robot.data.default_joint_damping)[0].index_select(0, policy_indices),
+            "action_offset": action_offset.index_select(0, policy_indices),
+            "action_scale": action_scale.index_select(0, policy_indices),
+            "action_mode": self.action_processor.action_mode,
         }
 
     def _setup_scene(self):
@@ -482,7 +479,7 @@ class MotionTrackingEnv(DirectRLEnv):
 
     def _pre_physics_step(self, actions: torch.Tensor):
         self._advance_reference_motion()
-        self.action_processer.pre_process_action(actions)
+        self.action_processer.pre_process_action(self._policy_to_sim_order(actions))
 
     def _apply_action(self):
         self.robot.set_joint_position_target(self.action_processer.target_joint_position)
@@ -494,7 +491,7 @@ class MotionTrackingEnv(DirectRLEnv):
             self.robot,
             self.reference_motion,
             self.scene,
-            self.action_processer.applied_action,
+            self._sim_to_policy_order(self.action_processor.applied_action),
         )
 
     def _get_rewards(self) -> torch.Tensor:
@@ -539,6 +536,6 @@ class MotionTrackingEnv(DirectRLEnv):
             self.robot,
             self.reference_motion,
             self.scene,
-            self.action_processer.applied_action,
+            self._sim_to_policy_order(self.action_processor.applied_action),
         )
         self.target_pos = self.reference_motion.joint_pos

@@ -16,4 +16,5 @@ def register_envs() -> None:
             id=env_id,
             entry_point="ref2act.envs.motion_tracking.env:MotionTrackingEnv",
             kwargs={"cfg_factory": cfg_factory},
+            disable_env_checker=True,
         )
