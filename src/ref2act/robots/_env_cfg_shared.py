@@ -284,9 +284,19 @@ class G1MotionTrackingEnvCfg(DirectRLEnvCfg):
         "right_ankle_roll_link",
     ]
 
+    # Bodies that must not carry contact force.  The ankle/toe support assembly
+    # is deliberately excluded so normal foot-ground contact is not penalized.
+    # With the all-body contact sensor below, this captures both self-contact
+    # and unsafe non-foot terrain contact.
     collision_track_body_names = [
-        "left_ankle_roll_link",
-        "right_ankle_roll_link",
+        "pelvis",
+        "torso_link",
+        ".*_hip_.*_link",
+        ".*_knee_link",
+        ".*_shoulder_.*_link",
+        ".*_elbow_link",
+        ".*_wrist_.*|.*_wrist_roll",
+        ".*_rubber_hand_link",
     ]
 
     end_effector_body_names = [
@@ -311,6 +321,7 @@ class G1MotionTrackingEnvCfg(DirectRLEnvCfg):
     training = True
     add_reset_noise = True
     random_start = True
+    reset_root_height_offset = 0.05
 
     sim: SimulationCfg = SimulationCfg(
         dt=1 / 200,
@@ -347,7 +358,16 @@ class G1MotionTrackingEnvCfg(DirectRLEnvCfg):
 
     contact_sensor = ContactSensorCfg(
         class_type="ref2act.nested_contact_sensor:NestedContactSensor",
-        prim_path="/World/envs/env_.*/Robot/.*_ankle_roll_link",
+        # Query only legal support bodies plus bodies whose contact is penalized.
+        # Contact reports are still activated recursively by the custom USD
+        # spawner, but excluding ankle-pitch/toe bodies from this view avoids
+        # transferring force data that neither reward consumes.
+        prim_path=(
+            "/World/envs/env_.*/Robot/"
+            "(pelvis|torso_link|.*_hip_.*_link|.*_knee_link|"
+            ".*_shoulder_.*_link|.*_elbow_link|.*_wrist_.*|"
+            ".*_rubber_hand_link|.*_ankle_roll_link)"
+        ),
         history_length=3,
         track_air_time=True,
         force_threshold=10.0,

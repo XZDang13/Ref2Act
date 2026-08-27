@@ -162,7 +162,7 @@ class MotionSampler:
 
     def get_current_durations(self, env_ids: IndexLike | None = None) -> torch.Tensor:
         env_ids = self._normalize_env_ids(env_ids)
-        return self.motion_lib.get_duration(self.current_motion_ids[env_ids])
+        return self.motion_lib.get_duration(self.current_motion_ids[env_ids], validate=False)
 
     def sample_motion_ids(self, env_ids: IndexLike | None = None) -> torch.Tensor:
         env_ids = self._normalize_env_ids(env_ids)
@@ -606,6 +606,7 @@ class MotionSampler:
             motion_ids=motion_ids,
             times=times,
             position_offsets=position_offsets,
+            validate=False,
         )
 
     def _build_time_source_bins_for_clip(

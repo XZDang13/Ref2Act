@@ -2,6 +2,7 @@ import importlib
 import sys
 import types
 
+import pytest
 import torch
 
 
@@ -116,6 +117,40 @@ def test_anchor_orientation_failure_rule_uses_body_link_quat_world() -> None:
 
     assert torch.equal(terminate, torch.tensor([True]))
     assert torch.equal(time_out, torch.tensor([False]))
+
+
+def test_anchor_orientation_failure_observes_tilt_direction() -> None:
+    termination_mod = _load_termination_module()
+    root_half = 2.0**-0.5
+    robot = types.SimpleNamespace(
+        data=types.SimpleNamespace(
+            # Ninety-degree roll.
+            body_link_quat_w=torch.tensor(
+                [[[root_half, root_half, 0.0, 0.0]]], dtype=torch.float32
+            ),
+            GRAVITY_VEC_W=torch.tensor([[0.0, 0.0, -1.0]], dtype=torch.float32),
+        )
+    )
+    reference_motion = types.SimpleNamespace(
+        body_positions=torch.zeros((1, 1, 3), dtype=torch.float32),
+        # Ninety-degree pitch has the same projected-gravity z component as
+        # the roll above, but a different tilt direction.
+        body_quaternions=torch.tensor(
+            [[[root_half, 0.0, root_half, 0.0]]], dtype=torch.float32
+        ),
+        body_pos_relative=torch.zeros((1, 1, 3), dtype=torch.float32),
+    )
+    context = termination_mod.TerminationContext(
+        episode_length_buf=torch.zeros(1, dtype=torch.long),
+        max_episode_length=torch.full((1,), 100, dtype=torch.long),
+        robot=robot,
+        reference_motion=reference_motion,
+        sampler=_make_sampler(1),
+    )
+
+    error = context.anchor_ori_error(0)
+
+    assert torch.allclose(error, torch.tensor([1.0]), atol=1.0e-6)
 
 
 def test_end_effector_position_rule_supports_full_3d_and_height_only_modes() -> None:
@@ -284,3 +319,104 @@ def test_failure_rules_expose_continuous_errors() -> None:
 
     assert torch.allclose(anchor_error, torch.tensor([0.3]))
     assert torch.allclose(ee_error, torch.tensor([[0.1, 0.4]]))
+
+
+def _make_anchor_recovery_termination(termination_mod, *, step_dt: float = 0.02):
+    recovery = termination_mod.ProbabilisticRecoveryTerminationCfg(
+        enabled=True,
+        grace_period_s=0.5,
+        time_ramp_s=1.0,
+        max_hazard_per_s=2.0,
+        error_weight=0.65,
+        time_weight=0.35,
+        error_exponent=2.0,
+        time_exponent=2.0,
+        recovery_decay=2.0,
+        hard_thresholds={"anchor_position_failure": 0.5},
+    )
+    return termination_mod.Termination(
+        termination_mod.TerminationSpec(
+            timeout_rules=(),
+            failure_rules=(
+                termination_mod.AnchorPositionFailureRuleCfg(
+                    anchor_body_index=0,
+                    threshold=0.25,
+                    height_only=True,
+                ),
+            ),
+            probabilistic_recovery=recovery,
+        ),
+        step_dt=step_dt,
+    )
+
+
+def _anchor_recovery_inputs(error: float):
+    robot = types.SimpleNamespace(
+        data=types.SimpleNamespace(
+            body_link_pos_w=torch.tensor([[[0.0, 0.0, error]]], dtype=torch.float32),
+            body_link_quat_w=torch.tensor([[[0.0, 0.0, 0.0, 1.0]]], dtype=torch.float32),
+            GRAVITY_VEC_W=torch.tensor([[0.0, 0.0, -1.0]], dtype=torch.float32),
+        )
+    )
+    reference_motion = types.SimpleNamespace(
+        body_positions=torch.zeros((1, 1, 3), dtype=torch.float32),
+        body_quaternions=torch.tensor([[[0.0, 0.0, 0.0, 1.0]]], dtype=torch.float32),
+        body_pos_relative=torch.zeros((1, 1, 3), dtype=torch.float32),
+    )
+    episode_length_buf, max_episode_length, sampler = _make_context_inputs()
+    return episode_length_buf, max_episode_length, robot, reference_motion, sampler
+
+
+def test_probabilistic_recovery_guarantees_grace_period(monkeypatch) -> None:
+    termination_mod = _load_termination_module()
+    termination = _make_anchor_recovery_termination(termination_mod)
+    inputs = _anchor_recovery_inputs(0.4)
+    monkeypatch.setattr(torch, "rand_like", lambda value: torch.zeros_like(value))
+
+    for step in range(24):
+        terminated, _ = termination.get_dones(*inputs)
+        assert not terminated.item()
+        assert termination.last_recovery_state["offtrack_entries"].item() == (step == 0)
+        assert termination.last_recovery_state["effective_hazard"].item() == 0.0
+    assert termination.offtrack_time.item() == pytest.approx(0.48, abs=1.0e-5)
+
+    terminated, _ = termination.get_dones(*inputs)
+    assert terminated.item()
+    assert termination.last_diagnostics["probabilistic_terminations"] == 1
+    assert termination.last_recovery_state["probabilistic_hits"].item()
+    assert not termination.last_recovery_state["hard_hits"].item()
+    assert termination.last_recovery_state["severity"].item() > 0.0
+    assert termination.last_recovery_state["hazard"].item() > 0.0
+    assert termination.last_recovery_state["effective_hazard"].item() > 0.0
+    assert termination.offtrack_time.item() == 0.0
+
+
+def test_probabilistic_recovery_hazard_grows_with_error_and_time(monkeypatch) -> None:
+    termination_mod = _load_termination_module()
+    termination = _make_anchor_recovery_termination(termination_mod)
+    monkeypatch.setattr(torch, "rand_like", lambda value: torch.ones_like(value))
+
+    termination.get_dones(*_anchor_recovery_inputs(0.3))
+    low_error_hazard = termination.last_diagnostics["hazard_mean_per_s"]
+    termination.get_dones(*_anchor_recovery_inputs(0.45))
+    high_error_hazard = termination.last_diagnostics["hazard_mean_per_s"]
+    early_probability = termination.last_diagnostics["termination_probability_mean"]
+    for _ in range(50):
+        termination.get_dones(*_anchor_recovery_inputs(0.45))
+    long_offtrack = termination.last_diagnostics["termination_probability_mean"]
+
+    assert high_error_hazard > low_error_hazard
+    assert early_probability == 0.0
+    assert long_offtrack > early_probability
+
+
+def test_probabilistic_recovery_keeps_immediate_hard_termination() -> None:
+    termination_mod = _load_termination_module()
+    termination = _make_anchor_recovery_termination(termination_mod)
+
+    terminated, _ = termination.get_dones(*_anchor_recovery_inputs(0.51))
+
+    assert terminated.item()
+    assert termination.last_diagnostics["hard_terminations"] == 1
+    assert termination.last_recovery_state["hard_hits"].item()
+    assert not termination.last_recovery_state["probabilistic_hits"].item()

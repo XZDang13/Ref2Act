@@ -846,4 +846,38 @@ def test_register_reward_term_extends_composer_without_changing_rewards_class() 
     )
 
     assert torch.allclose(reward, torch.tensor([2.0], dtype=torch.float32))
-    assert rewards.last_metrics["bonus"]["weighted"] == 2.0
+    assert torch.allclose(rewards.last_metrics["bonus"]["weighted"], torch.tensor(2.0))
+
+
+def test_self_collision_penalty_uses_non_support_net_contact_forces() -> None:
+    rewards_mod = _load_rewards_module()
+    rewards = rewards_mod.Rewards(
+        rewards_mod.RewardSpec(
+            dt=1.0,
+            output_mode="sum",
+            terms=(
+                rewards_mod.SelfCollisionPenaltyTermCfg(
+                    weight=-0.1,
+                    body_indices=(1, 2),
+                    force_threshold=10.0,
+                ),
+            ),
+        )
+    )
+    contact_history = torch.zeros((2, 2, 4, 3), dtype=torch.float32)
+    contact_history[0, 0, 1, 0] = 20.0
+    # Body zero represents an allowed support body and must not be penalized.
+    contact_history[1, 0, 0, 0] = 20.0
+
+    reward = rewards.get_task_reward(
+        _make_robot(torch.zeros((2, 4, 3), dtype=torch.float32)),
+        _make_reference_motion(num_envs=2, num_bodies=4),
+        _make_contact_sensor(contact_history),
+        _make_action_model(num_envs=2),
+    )
+
+    assert torch.allclose(reward, torch.tensor([-0.1, 0.0], dtype=torch.float32))
+    assert torch.allclose(
+        rewards.last_result.metrics["self_collision_penalty"]["contact_count"],
+        torch.tensor([1.0, 0.0], dtype=torch.float32),
+    )

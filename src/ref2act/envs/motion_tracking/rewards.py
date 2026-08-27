@@ -775,29 +775,24 @@ class RewardContext:
 
         dtype = foot_positions_xy.dtype
         contact_count = is_contact.sum(dim=1).to(dtype)
-        distance = torch.zeros_like(contact_count)
-        if torch.any(is_contact):
-            contact_rank = torch.cumsum(is_contact.to(torch.int64), dim=1)
-            first_mask = ((contact_rank == 1) & is_contact).to(dtype)
-            second_mask = ((contact_rank == 2) & is_contact).to(dtype)
-            first_support_xy = torch.sum(foot_positions_xy * first_mask.unsqueeze(-1), dim=1)
-            second_support_xy = torch.sum(foot_positions_xy * second_mask.unsqueeze(-1), dim=1)
-            com_xy = self.com_position()[:, :2]
+        contact_rank = torch.cumsum(is_contact.to(torch.int64), dim=1)
+        first_mask = ((contact_rank == 1) & is_contact).to(dtype)
+        second_mask = ((contact_rank == 2) & is_contact).to(dtype)
+        first_support_xy = torch.sum(foot_positions_xy * first_mask.unsqueeze(-1), dim=1)
+        second_support_xy = torch.sum(foot_positions_xy * second_mask.unsqueeze(-1), dim=1)
+        com_xy = self.com_position()[:, :2]
 
-            single_contact = contact_count == 1
-            if torch.any(single_contact):
-                distance[single_contact] = torch.linalg.norm(
-                    com_xy[single_contact] - first_support_xy[single_contact],
-                    dim=-1,
-                )
-
-            multi_contact = contact_count >= 2
-            if torch.any(multi_contact):
-                distance[multi_contact] = _point_to_segment_distance_2d(
-                    com_xy[multi_contact],
-                    first_support_xy[multi_contact],
-                    second_support_xy[multi_contact],
-                )
+        single_distance = torch.linalg.norm(com_xy - first_support_xy, dim=-1)
+        multi_distance = _point_to_segment_distance_2d(
+            com_xy,
+            first_support_xy,
+            second_support_xy,
+        )
+        distance = torch.where(
+            contact_count == 1,
+            single_distance,
+            torch.where(contact_count >= 2, multi_distance, torch.zeros_like(contact_count)),
+        )
 
         error = torch.clamp(distance - support_margin, min=0.0).square()
         result = (error, distance, contact_count)
@@ -910,40 +905,27 @@ class SelfCollisionPenaltyTerm:
     type_name = "self_collision_penalty"
 
     def compute(self, context: RewardContext, spec: SelfCollisionPenaltyTermCfg) -> RewardTermResult:
-        net_contact_forces = context.contact_sensor.data.net_forces_w_history
-        if net_contact_forces is not None:
-            net_contact_forces = to_torch(net_contact_forces)
+        """Penalize contacts on non-support robot bodies.
+
+        The contact sensor is attached to every robot rigid body while
+        ``body_indices`` excludes the feet.  This detects self-collisions through
+        the force received by the involved non-support body and also treats
+        non-foot contacts with the terrain as unsafe.  Unlike the previous
+        implementation, it does not depend on an unavailable many-to-many
+        filtered contact matrix.
+        """
+
+        contact_history = context_contact_history(context.contact_sensor)
+        if contact_history is None:
+            return _weighted_result(context._zeros(), spec.weight)
         if len(spec.body_indices) == 0:
-            if net_contact_forces is not None:
-                raw = torch.zeros(net_contact_forces.shape[0], device=net_contact_forces.device)
-            else:
-                net_contact_forces = context.contact_sensor.data.net_forces_w
-                if net_contact_forces is not None:
-                    net_contact_forces = to_torch(net_contact_forces)
-                num_envs = 0 if net_contact_forces is None else net_contact_forces.shape[0]
-                device = context.robot.device if net_contact_forces is None else net_contact_forces.device
-                raw = torch.zeros(num_envs, device=device)
-            return _weighted_result(raw, spec.weight)
+            return _weighted_result(torch.zeros(contact_history.shape[0], device=contact_history.device), spec.weight)
 
-        if net_contact_forces is None:
-            net_contact_forces = context.contact_sensor.data.net_forces_w
-            if net_contact_forces is not None:
-                net_contact_forces = to_torch(net_contact_forces)
-            num_envs = 0 if net_contact_forces is None else net_contact_forces.shape[0]
-            device = context.robot.device if net_contact_forces is None else net_contact_forces.device
-            return _weighted_result(torch.zeros(num_envs, device=device), spec.weight)
-
-        filtered_contact_forces = context.contact_sensor.data.force_matrix_w_history
-        if filtered_contact_forces is None:
-            raw = torch.zeros(net_contact_forces.shape[0], device=net_contact_forces.device)
-            return _weighted_result(raw, spec.weight)
-
-        filtered_contact_forces = to_torch(filtered_contact_forces)
-
-        contact_magnitudes = torch.norm(filtered_contact_forces[:, :, spec.body_indices], dim=-1)
-        is_contact = contact_magnitudes.amax(dim=1).amax(dim=-1) > spec.force_threshold
-        raw = torch.sum(is_contact, dim=1)
-        return _weighted_result(raw, spec.weight)
+        tracked_forces = contact_history[:, :, spec.body_indices]
+        contact_magnitudes = torch.linalg.vector_norm(tracked_forces, dim=-1)
+        is_contact = contact_magnitudes.amax(dim=1) > spec.force_threshold
+        raw = is_contact.to(dtype=tracked_forces.dtype).sum(dim=1)
+        return _weighted_result(raw, spec.weight, metrics={"contact_count": raw})
 
 
 class FootSlipPenaltyTerm:
@@ -1313,7 +1295,7 @@ class Rewards:
     def __init__(self, spec: RewardSpec):
         self.spec = spec
         self.last_result: RewardComputation | None = None
-        self.last_metrics: dict[str, dict[str, float]] = {}
+        self.last_metrics: dict[str, dict[str, torch.Tensor]] = {}
 
     def get_task_reward(
         self,
@@ -1356,8 +1338,12 @@ class Rewards:
             components=component_map,
             metrics=metrics_map,
         )
+        # Keep scalar summaries on device.  Converting every metric with
+        # ``.item()`` here serializes the CUDA stream dozens of times per
+        # environment step.  Callers should accumulate these tensors and only
+        # transfer them to the host at their logging interval.
         self.last_metrics = {
-            term_id: {name: float(value.mean().item()) for name, value in metrics.items()}
+            term_id: {name: value.mean().detach() for name, value in metrics.items()}
             for term_id, metrics in metrics_map.items()
         }
 

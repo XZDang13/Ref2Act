@@ -119,6 +119,8 @@ def test_packed_cache_invalidates_when_sidecar_changes(tmp_path: Path, monkeypat
     monkeypatch.setenv("REF2ACT_MOTION_PACK_CACHE_DIR", str(cache_dir))
     directory = _write_motion(tmp_path / "motion", anchors=[(1, 0.1)])
     first = MotionLib(directory, compact_after_packing=True)
+    assert first.packed_cache_path is not None
+    assert first.packed_cache_path.is_file()
     cache_files_before = set(cache_dir.iterdir())
     sidecar = directory / "reset_anchors.json"
     sidecar.write_text(json.dumps({"enabled": True, "anchors": [{"frame": 2, "time_s": 0.2}]}))

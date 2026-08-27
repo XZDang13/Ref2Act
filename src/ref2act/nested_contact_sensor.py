@@ -5,6 +5,7 @@ import re
 import torch
 import warp as wp
 
+from isaaclab.cloner.cloner_utils import iter_clone_plan_matches
 from isaaclab.sensors.contact_sensor import BaseContactSensor
 from isaaclab.sim.utils.queries import get_all_matching_child_prims, resolve_matching_prims_from_source
 from isaaclab_physx.physics import PhysxManager as SimulationManager
@@ -55,35 +56,39 @@ class NestedContactSensor(ContactSensor):
                 f"Sensor at path '{self.cfg.prim_path}' could not find nested bodies with contact reporter API."
             )
 
-        # A list of concrete body patterns is returned by PhysX in pattern-major
-        # order (all environments for the first body, then the second body).
-        # ContactSensor buffers require environment-major ordering, so use one
-        # structural glob instead.  Keep every path component: a recursive
-        # wildcard also asks PhysX to probe invalid descendants such as
-        # ``.../ankle/ankle`` and produces noisy errors.
-        path_parts = [prim.GetPath().pathString.split("/") for prim in prims]
-        depths = {len(parts) for parts in path_parts}
-        if len(depths) != 1:
-            raise RuntimeError("Nested contact bodies must have equal USD path depth for environment-major layout.")
-        glob_parts = []
-        for components in zip(*path_parts):
-            if len(set(components)) == 1:
-                component = components[0]
-                if component == "env_0":
-                    component = "env_*"
-            else:
-                common_suffix = components[0]
-                for component in components[1:]:
-                    while common_suffix and not component.endswith(common_suffix):
-                        common_suffix = common_suffix[1:]
-                component = f"*{common_suffix}" if common_suffix else "*"
-            glob_parts.append(component)
-        body_glob = "/".join(glob_parts)
+        # Keep the view environment-major, as required by ContactSensor's buffer
+        # reshapes, while avoiding PhysX globs.  PhysX's ``*`` also spans path
+        # separators, so a glob ending in ``*_ankle_roll_link`` additionally
+        # probes the identically named visual child below each ankle rigid body.
+        # That child has neither a rigid-body nor a contact-report API.
+        template_root_path = asset_prim.GetPath().pathString
+        relative_body_paths = [prim.GetPath().pathString[len(template_root_path) :] for prim in prims]
+        if self._parent_prims:
+            instance_root_paths = [prim.GetPath().pathString for prim in self._parent_prims]
+        elif self._clone_plan is not None:
+            instance_root_paths_by_env = {}
+            for source_root, destination_template, source_path, env_ids in iter_clone_plan_matches(
+                self._clone_plan, parent_expr
+            ):
+                source_suffix = source_path[len(source_root) :]
+                for env_id in env_ids:
+                    instance_root_paths_by_env[env_id] = destination_template.format(env_id) + source_suffix
+            if set(instance_root_paths_by_env) != set(range(self._num_envs)):
+                raise RuntimeError(f"Failed to resolve nested contact roots for all {self._num_envs} environments.")
+            instance_root_paths = [instance_root_paths_by_env[env_id] for env_id in range(self._num_envs)]
+        else:
+            raise RuntimeError(f"Failed to resolve nested contact roots at '{parent_expr}'.")
+        body_paths = [
+            instance_root_path + relative_path
+            for instance_root_path in instance_root_paths
+            for relative_path in relative_body_paths
+        ]
         filter_patterns = [expr.replace(".*", "*") for expr in self.cfg.filter_prim_paths_expr]
-        self._body_physx_view = self._physics_sim_view.create_rigid_body_view(body_glob)
+        contact_filter_patterns = [filter_patterns] * len(body_paths) if filter_patterns else []
+        self._body_physx_view = self._physics_sim_view.create_rigid_body_view(body_paths)
         self._contact_view = self._physics_sim_view.create_rigid_contact_view(
-            body_glob,
-            filter_patterns=filter_patterns,
+            body_paths,
+            filter_patterns=contact_filter_patterns,
             max_contact_data_count=self.cfg.max_contact_data_count_per_prim * len(prims) * self._num_envs,
         )
         self._num_sensors = self.body_physx_view.count // self._num_envs

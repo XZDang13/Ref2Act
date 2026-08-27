@@ -23,7 +23,9 @@ DAMPING_7520_22 = 2.0 * DAMPING_RATIO * ARMATURE_7520_22 * NATURAL_FREQ  # 6.308
 DAMPING_4010 = 2.0 * DAMPING_RATIO * ARMATURE_4010 * NATURAL_FREQ  # 1.06814150219
 
 G1_CFG = ArticulationCfg(
+    class_type="ref2act.direct_leaf_articulation:DirectLeafArticulation",
     spawn=sim_utils.UsdFileCfg(
+        func="ref2act.nested_contact_usd:spawn_usd_with_nested_contact_reports",
         usd_path=str(
             robot_asset_path(
                 "g1",
@@ -31,10 +33,8 @@ G1_CFG = ArticulationCfg(
                 "g1_23dof.usda",
             )
         ),
-        # The nested G1 USD authors PhysxContactReportAPI on the two ankle
-        # bodies explicitly.  Isaac's generic activation helper assumes a
-        # flat rigid-body hierarchy and produces invalid duplicated paths for
-        # this asset.
+        # The custom spawner activates all nested rigid bodies before cloning.
+        # Keep IsaacLab's shallow generic activation disabled.
         activate_contact_sensors=False,
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
             disable_gravity=False,

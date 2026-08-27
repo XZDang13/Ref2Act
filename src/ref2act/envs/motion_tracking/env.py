@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING
 
 import isaaclab.sim as sim_utils
 import torch
-from isaaclab.assets import Articulation
 from isaaclab.envs import DirectRLEnv
 from isaaclab.sensors import ContactSensor
 
@@ -210,7 +209,10 @@ class MotionTrackingEnv(DirectRLEnv):
 
         viewer_enabled = getattr(self.cfg, "reference_motion_viewer_enabled", True)
         self.reference_motion_viewer = ReferenceMotionViewer(self.key_body_indices) if viewer_enabled else None
-        self.termination_model = Termination(self._build_termination_spec())
+        self.termination_model = Termination(
+            self._build_termination_spec(),
+            step_dt=self.step_dt,
+        )
         self.termination_curriculum = TerminationThresholdCurriculum(
             self.termination_model,
             getattr(self.cfg, "termination_curriculum", None),
@@ -394,7 +396,7 @@ class MotionTrackingEnv(DirectRLEnv):
 
         root_state = to_torch(self.robot.data.default_root_state)[env_ids].clone()
         root_state[:, 0:3] = root_pos
-        root_state[:, 2] += 0.05
+        root_state[:, 2] += float(self.cfg.reset_root_height_offset)
         root_state[:, 3:7] = root_quat
         root_state[:, 7:10] = root_linear_vel
         root_state[:, 10:13] = root_angular_vel
@@ -452,7 +454,11 @@ class MotionTrackingEnv(DirectRLEnv):
         }
 
     def _setup_scene(self):
-        self.robot = Articulation(self.cfg.robot)
+        articulation_type = self.cfg.robot.class_type
+        if isinstance(articulation_type, str):
+            module_name, _, attr_name = articulation_type.partition(":")
+            articulation_type = getattr(import_module(module_name), attr_name)
+        self.robot = articulation_type(self.cfg.robot)
         self.scene.articulations["robot"] = self.robot
 
         contact_sensor_type = self.cfg.contact_sensor.class_type

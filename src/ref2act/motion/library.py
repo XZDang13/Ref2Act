@@ -350,6 +350,12 @@ class MotionLib:
             digest.update(str(mtime_ns).encode("ascii"))
         return Path(cache_dir).expanduser().resolve() / f"motionlib_{digest.hexdigest()[:24]}.pt"
 
+    @property
+    def packed_cache_path(self) -> Path | None:
+        """Resolved fingerprinted cache path for this ordered motion set."""
+
+        return self._packed_cache_path()
+
     def _clip_cache_payload(self, clip: MotionClip) -> dict[str, object]:
         return {
             "motion_id": int(clip.motion_id),
@@ -720,11 +726,12 @@ class MotionLib:
             raise IndexError(f"motion_id out of range: {motion_id}")
         return self.clips[motion_id]
 
-    def get_duration(self, motion_ids: torch.Tensor) -> torch.Tensor:
+    def get_duration(self, motion_ids: torch.Tensor, *, validate: bool = True) -> torch.Tensor:
         motion_ids = torch.as_tensor(motion_ids, dtype=torch.long, device=self.device)
         if motion_ids.numel() == 0:
             return torch.empty_like(motion_ids, dtype=torch.float32)
-        self._validate_motion_ids(motion_ids)
+        if validate:
+            self._validate_motion_ids(motion_ids)
         return self.motion_durations[motion_ids]
 
     def _validate_motion_ids(self, motion_ids: torch.Tensor) -> None:
@@ -944,6 +951,8 @@ class MotionLib:
         motion_ids: torch.Tensor,
         times: torch.Tensor,
         position_offsets: torch.Tensor | None = None,
+        *,
+        validate: bool = True,
     ) -> dict[str, torch.Tensor]:
         motion_ids = torch.as_tensor(motion_ids, dtype=torch.long, device=self.device).reshape(-1)
         times = torch.as_tensor(times, dtype=torch.float32, device=self.device).reshape(-1)
@@ -953,7 +962,8 @@ class MotionLib:
             position_offsets = torch.as_tensor(position_offsets, dtype=torch.float32, device=self.device)
             if position_offsets.shape[0] != times.shape[0]:
                 raise ValueError("position_offsets must have the same batch size as motion_ids and times.")
-        self._validate_motion_ids(motion_ids)
+        if validate:
+            self._validate_motion_ids(motion_ids)
 
         if self._packed_sampling_enabled:
             return self._sample_motion_packed(
