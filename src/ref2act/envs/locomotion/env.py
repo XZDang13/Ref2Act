@@ -1,19 +1,85 @@
 from __future__ import annotations
 
+import math
+
 import torch
 
-from ref2act.common.math import quat_apply_inverse
+from ref2act.common.math import quat_apply_inverse, yaw_quat
 from ref2act.common.observation_spec import ObservationLayout
 from ref2act.envs.base import LeggedRobotEnv
 from ref2act.isaac_compat import to_torch
 
 from .commands import UniformVelocityCommandGenerator
 from .observation import LocomotionObservation
-from .rewards import LocomotionRewardInputs, compute_locomotion_reward_terms
+from .rewards import (
+    LocomotionRewardInputs,
+    compute_feet_air_time_reward,
+    compute_feet_air_time_positive_biped_reward,
+    compute_feet_gait_reward,
+    compute_foot_clearance_reward,
+    compute_locomotion_reward_terms,
+)
+
+
+def compute_locomotion_termination(
+    *,
+    terrain_relative_base_height: torch.Tensor,
+    upright_projection: torch.Tensor,
+    illegal_contact: torch.Tensor,
+    minimum_base_height: float,
+    minimum_upright_projection: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Return termination masks using terrain-relative height."""
+
+    fallen = terrain_relative_base_height < float(minimum_base_height)
+    tilted = upright_projection < float(minimum_upright_projection)
+    terminated = fallen | tilted | illegal_contact
+    return fallen, tilted, terminated
 
 
 class LocomotionEnv(LeggedRobotEnv):
     """Blind velocity-command locomotion with no reference-motion dependency."""
+
+    def _setup_scene(self) -> None:
+        """Build the locomotion scene without co-locating generated terrains.
+
+        IsaacLab's default curriculum-origin assignment reuses a small terrain
+        grid across thousands of environments.  The nested G1 collision model
+        then puts many robots at exactly the same world pose.  Explicit USD
+        collision groups prevent the resulting contacts, but the overlapping
+        broad phase remains prohibitively expensive.  Generated locomotion
+        terrains therefore allocate one physical patch per environment.
+        """
+
+        terrain_generator = getattr(self.cfg.terrain, "terrain_generator", None)
+        unique_origins = bool(
+            terrain_generator is not None
+            and getattr(self.cfg, "unique_terrain_origins", False)
+        )
+        if unique_origins:
+            num_envs = int(self.scene.cfg.num_envs)
+            num_cols = min(64, num_envs)
+            terrain_generator.num_cols = num_cols
+            terrain_generator.num_rows = math.ceil(num_envs / num_cols)
+
+        super()._setup_scene()
+
+        if unique_origins:
+            num_envs = int(self.scene.cfg.num_envs)
+            num_cols = int(terrain_generator.num_cols)
+            env_ids = torch.arange(num_envs, device=self.device, dtype=torch.long)
+            terrain_levels = torch.div(env_ids, num_cols, rounding_mode="floor")
+            terrain_types = torch.remainder(env_ids, num_cols)
+            self.terrain.terrain_levels = terrain_levels
+            self.terrain.terrain_types = terrain_types
+            self.terrain.max_terrain_level = int(terrain_generator.num_rows)
+            self.terrain.env_origins = self.terrain.terrain_origins[
+                terrain_levels, terrain_types
+            ].clone()
+        elif self.scene.cfg.filter_collisions and "physx" in self.scene.physics_backend:
+            self.scene.filter_collisions(
+                global_prim_paths=[self.cfg.terrain.prim_path]
+            )
 
     def __init__(self, cfg=None, render_mode=None, cfg_factory: str | None = None, **kwargs):
         if cfg is None and cfg_factory is not None:
@@ -39,6 +105,9 @@ class LocomotionEnv(LeggedRobotEnv):
             step_dt=self.step_dt,
             device=self.device,
         )
+        self._command_curriculum_linear_sum = torch.zeros((), device=self.device)
+        self._command_curriculum_yaw_sum = torch.zeros((), device=self.device)
+        self._command_curriculum_steps = 0
         self.observation_model = LocomotionObservation(
             spec=self.cfg.observation,
             layout=layout,
@@ -48,6 +117,62 @@ class LocomotionEnv(LeggedRobotEnv):
             policy_order_joint_indices=self._policy_order_joint_indices,
         )
         self._terrain_success = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
+        foot_sensor_ids, foot_sensor_names = self.contact_sensor.find_bodies(
+            list(self.robot_spec.foot_bodies), preserve_order=True
+        )
+        if len(foot_sensor_ids) != len(self.robot_spec.foot_bodies):
+            raise RuntimeError(
+                "Locomotion contact sensor must contain every configured foot; got "
+                f"{foot_sensor_names}."
+            )
+        self._foot_contact_sensor_indices = torch.tensor(
+            foot_sensor_ids, dtype=torch.long, device=self.device
+        )
+        foot_body_ids, _ = self.robot.find_bodies(
+            list(self.robot_spec.foot_bodies), preserve_order=True
+        )
+        self._foot_body_indices = torch.tensor(
+            foot_body_ids, dtype=torch.long, device=self.device
+        )
+        all_contact_ids, _ = self.contact_sensor.find_bodies(".*", preserve_order=True)
+        foot_sensor_id_set = set(foot_sensor_ids)
+        non_foot_ids = [index for index in all_contact_ids if index not in foot_sensor_id_set]
+        if not non_foot_ids:
+            raise RuntimeError("Locomotion contact sensor must expose non-foot bodies.")
+        self._undesired_contact_sensor_indices = torch.tensor(
+            non_foot_ids, dtype=torch.long, device=self.device
+        )
+
+        def joint_indices(config_name: str) -> torch.Tensor:
+            patterns = getattr(self.cfg, config_name)
+            indices, names = self.robot.find_joints(patterns, preserve_order=True)
+            if not indices:
+                raise RuntimeError(f"{config_name} matched no robot joints: {patterns}.")
+            return torch.tensor(indices, dtype=torch.long, device=self.device)
+
+        self._reward_hip_joint_indices = joint_indices("reward_hip_joint_names")
+        self._reward_arm_joint_indices = joint_indices("reward_arm_joint_names")
+        self._reward_torso_joint_indices = joint_indices("reward_torso_joint_names")
+
+        termination_ids, termination_names = self.contact_sensor.find_bodies(
+            self.cfg.termination_body_names, preserve_order=True
+        )
+        if not termination_ids:
+            raise RuntimeError(
+                "termination_body_names matched no contact-sensor bodies: "
+                f"{self.cfg.termination_body_names}."
+            )
+        self._termination_contact_sensor_indices = torch.tensor(
+            termination_ids, dtype=torch.long, device=self.device
+        )
+        knee_ids, _ = self.contact_sensor.find_bodies(".*_knee_link")
+        hand_ids, _ = self.contact_sensor.find_bodies(".*_rubber_hand_link")
+        self._diagnostic_knee_contact_indices = torch.tensor(
+            knee_ids, dtype=torch.long, device=self.device
+        )
+        self._diagnostic_hand_contact_indices = torch.tensor(
+            hand_ids, dtype=torch.long, device=self.device
+        )
 
     @staticmethod
     def _derive_observation_spaces(cfg) -> None:
@@ -91,23 +216,255 @@ class LocomotionEnv(LeggedRobotEnv):
             self._sim_to_policy_order(self.action_processor.applied_action),
         )
 
-    def _get_rewards(self) -> torch.Tensor:
+    def _feet_air_time_reward(self, *, command_gate: bool) -> torch.Tensor:
+        """Legacy completed-flight signal retained only for task-free exploration."""
+
+        first_contact = to_torch(self.contact_sensor.compute_first_contact(self.step_dt))[
+            :, self._foot_contact_sensor_indices
+        ]
+        last_air_time = to_torch(self.contact_sensor.data.last_air_time)[
+            :, self._foot_contact_sensor_indices
+        ]
+        reward = compute_feet_air_time_reward(
+            last_air_time,
+            first_contact,
+            threshold=float(self.cfg.rewards.feet_air_time_threshold),
+            maximum=float(self.cfg.rewards.feet_air_time_maximum),
+        )
+        if command_gate:
+            reward *= (
+                torch.linalg.vector_norm(self.command_generator.commands[:, :2], dim=-1)
+                > 0.1
+            )
+        return reward
+
+    def _feet_air_time_positive_biped_reward(self) -> torch.Tensor:
+        current_air_time = to_torch(self.contact_sensor.data.current_air_time)[
+            :, self._foot_contact_sensor_indices
+        ]
+        current_contact_time = to_torch(self.contact_sensor.data.current_contact_time)[
+            :, self._foot_contact_sensor_indices
+        ]
+        contact_count = torch.sum(current_contact_time > 0.0, dim=-1)
+        log = self.extras.setdefault("log", {})
+        log["Gait/single_stance_fraction"] = (contact_count == 1).float().mean().detach()
+        log["Gait/double_support_fraction"] = (contact_count == 2).float().mean().detach()
+        log["Gait/flight_fraction"] = (contact_count == 0).float().mean().detach()
+        log["Gait/current_air_time_mean"] = current_air_time.mean().detach()
+        contact_history = to_torch(self.contact_sensor.data.net_forces_w_history)
+
+        def support_fraction(indices: torch.Tensor) -> torch.Tensor:
+            if indices.numel() == 0:
+                return torch.zeros((), device=self.device)
+            forces = torch.linalg.vector_norm(
+                contact_history[:, :, indices], dim=-1
+            ).amax(dim=(1, 2))
+            return (forces > 1.0).float().mean()
+
+        log["Gait/knee_support_fraction"] = support_fraction(
+            self._diagnostic_knee_contact_indices
+        ).detach()
+        log["Gait/hand_support_fraction"] = support_fraction(
+            self._diagnostic_hand_contact_indices
+        ).detach()
+        return compute_feet_air_time_positive_biped_reward(
+            current_air_time,
+            current_contact_time,
+            self.command_generator.commands,
+            threshold=float(self.cfg.rewards.feet_air_time_threshold),
+        )
+
+    def _feet_slide_penalty(self) -> torch.Tensor:
+        contact_history = to_torch(self.contact_sensor.data.net_forces_w_history)
+        contacts = (
+            torch.linalg.vector_norm(
+                contact_history[:, :, self._foot_contact_sensor_indices], dim=-1
+            ).amax(dim=1)
+            > 1.0
+        )
+        foot_velocity_xy = to_torch(self.robot.data.body_link_lin_vel_w)[
+            :, self._foot_body_indices, :2
+        ]
+        return torch.sum(
+            torch.linalg.vector_norm(foot_velocity_xy, dim=-1) * contacts, dim=-1
+        )
+
+    def _feet_gait_reward(self) -> torch.Tensor:
+        current_contact_time = to_torch(self.contact_sensor.data.current_contact_time)[
+            :, self._foot_contact_sensor_indices
+        ]
+        return compute_feet_gait_reward(
+            current_contact_time,
+            self.command_generator.commands,
+            self.episode_length_buf,
+            step_dt=float(self.step_dt),
+            period=float(self.cfg.rewards.gait_period),
+            offsets=tuple(self.cfg.rewards.gait_offsets),
+            stance_threshold=float(self.cfg.rewards.gait_stance_threshold),
+        )
+
+    def _terrain_ground_height_at(self, query_xy: torch.Tensor) -> torch.Tensor:
+        """Return nearest sampled terrain height for each world-frame XY query."""
+
+        if query_xy.ndim not in (2, 3) or query_xy.shape[0] != self.num_envs:
+            raise ValueError("query_xy must have shape [env, 2] or [env, query, 2].")
+        squeeze_query = query_xy.ndim == 2
+        queries = query_xy.unsqueeze(1) if squeeze_query else query_xy
+        origin_height = to_torch(self.scene.env_origins)[:, 2].unsqueeze(-1)
+        height_sensor = self.scene.sensors.get("base_height_sensor")
+        if height_sensor is None:
+            result = origin_height.expand(-1, queries.shape[1])
+            return result[:, 0] if squeeze_query else result
+
+        ray_hits = to_torch(height_sensor.data.ray_hits_w)
+        valid = torch.isfinite(ray_hits[..., 2])
+        distance_sq = torch.sum(
+            (queries.unsqueeze(2) - ray_hits[:, None, :, :2]).square(), dim=-1
+        )
+        distance_sq = torch.where(valid[:, None, :], distance_sq, torch.inf)
+        nearest = torch.argmin(distance_sq, dim=-1)
+        hit_height = torch.gather(
+            ray_hits[..., 2], dim=1, index=nearest
+        )
+        has_hit = valid.any(dim=-1, keepdim=True)
+        result = torch.where(has_hit, hit_height, origin_height.expand_as(hit_height))
+        return result[:, 0] if squeeze_query else result
+
+    def _feet_clearance_reward(self) -> torch.Tensor:
+        foot_position_w = to_torch(self.robot.data.body_link_pos_w)[
+            :, self._foot_body_indices
+        ]
+        ground_height = self._terrain_ground_height_at(foot_position_w[..., :2])
+        foot_clearance = foot_position_w[..., 2] - ground_height
+        foot_velocity_xy = to_torch(self.robot.data.body_link_lin_vel_w)[
+            :, self._foot_body_indices, :2
+        ]
+        return compute_foot_clearance_reward(
+            foot_clearance,
+            foot_velocity_xy,
+            target_height=float(self.cfg.rewards.feet_clearance_target),
+            std=float(self.cfg.rewards.feet_clearance_std),
+            tanh_mult=float(self.cfg.rewards.feet_clearance_tanh_mult),
+        )
+
+    def _undesired_contact_penalty(self) -> torch.Tensor:
+        contact_history = to_torch(self.contact_sensor.data.net_forces_w_history)
+        magnitudes = torch.linalg.vector_norm(
+            contact_history[:, :, self._undesired_contact_sensor_indices], dim=-1
+        )
+        contacts = magnitudes.amax(dim=1) > float(
+            self.cfg.rewards.undesired_contact_force_threshold
+        )
+        return contacts.to(dtype=contact_history.dtype).sum(dim=-1)
+
+    def _joint_deviation_l1(self, indices: torch.Tensor) -> torch.Tensor:
+        joint_pos = to_torch(self.robot.data.joint_pos)[:, indices]
+        default_joint_pos = to_torch(self.robot.data.default_joint_pos)[:, indices]
+        return torch.sum(torch.abs(joint_pos - default_joint_pos), dim=-1)
+
+    def _terrain_relative_base_height(self) -> torch.Tensor:
+        """Return pelvis height above the local ground directly below it."""
+
+        base_position_w = to_torch(self.robot.data.body_link_pos_w)[
+            :, self.root_body_index
+        ]
+        ground_height_w = self._terrain_ground_height_at(base_position_w[:, :2])
+        return base_position_w[:, 2] - ground_height_w
+
+    def _joint_position_limit_penalty(self) -> torch.Tensor:
+        joint_pos = to_torch(self.robot.data.joint_pos)
+        limits = to_torch(self.robot.data.soft_joint_pos_limits)
+        below = -(joint_pos - limits[:, :, 0]).clamp(max=0.0)
+        above = (joint_pos - limits[:, :, 1]).clamp(min=0.0)
+        return torch.sum(below + above, dim=-1)
+
+    def _locomotion_reward_terms(self) -> dict[str, torch.Tensor]:
+        """Return Unitree-style locomotion terms using DirectRLEnv state."""
+
+        anchor_quat_w = to_torch(self.robot.data.body_link_quat_w)[
+            :, self.anchor_body_index
+        ]
+        anchor_lin_vel_w = to_torch(self.robot.data.body_link_lin_vel_w)[
+            :, self.anchor_body_index
+        ]
         base_lin_vel_b, base_ang_vel_b, projected_gravity_b = self._anchor_state_b()
-        terms = compute_locomotion_reward_terms(
+        base_lin_vel_yaw = quat_apply_inverse(yaw_quat(anchor_quat_w), anchor_lin_vel_w)
+        terminated = getattr(self, "reset_terminated", None)
+        if terminated is None:
+            terminated = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
+        return compute_locomotion_reward_terms(
             LocomotionRewardInputs(
                 commands=self.command_generator.commands,
                 base_linear_velocity_b=base_lin_vel_b,
                 base_angular_velocity_b=base_ang_vel_b,
+                base_linear_velocity_yaw_frame=base_lin_vel_yaw,
                 projected_gravity_b=projected_gravity_b,
-                joint_pos=to_torch(self.robot.data.joint_pos),
-                default_joint_pos=to_torch(self.robot.data.default_joint_pos),
+                base_height=self._terrain_relative_base_height(),
+                joint_velocity=to_torch(self.robot.data.joint_vel),
                 joint_acc=to_torch(self.robot.data.joint_acc),
                 applied_torque=to_torch(self.robot.data.applied_torque),
                 applied_action=self.action_processor.applied_action,
                 previous_applied_action=self.action_processor.previous_applied_action,
+                terminated=terminated,
+                feet_air_time=torch.zeros(self.num_envs, device=self.device),
+                gait=self._feet_gait_reward(),
+                feet_clearance=self._feet_clearance_reward(),
+                feet_slide=self._feet_slide_penalty(),
+                undesired_contacts=self._undesired_contact_penalty(),
+                dof_pos_limits=self._joint_position_limit_penalty(),
+                joint_deviation_hip=self._joint_deviation_l1(
+                    self._reward_hip_joint_indices
+                ),
+                joint_deviation_arms=self._joint_deviation_l1(
+                    self._reward_arm_joint_indices
+                ),
+                joint_deviation_torso=self._joint_deviation_l1(
+                    self._reward_torso_joint_indices
+                ),
             ),
             self.cfg.rewards,
         )
+
+    def _update_command_curriculum(self, terms: dict[str, torch.Tensor]) -> None:
+        cfg = self.cfg.command
+        if not bool(cfg.curriculum_enabled):
+            return
+        linear_weight = float(self.cfg.rewards.track_lin_vel_xy_exp)
+        yaw_weight = float(self.cfg.rewards.track_ang_vel_z_exp)
+        if linear_weight <= 0.0 and yaw_weight <= 0.0:
+            return
+        if linear_weight > 0.0:
+            self._command_curriculum_linear_sum += (
+                terms["track_lin_vel_xy_exp"].mean().detach() / linear_weight
+            )
+        if yaw_weight > 0.0:
+            self._command_curriculum_yaw_sum += (
+                terms["track_ang_vel_z_exp"].mean().detach() / yaw_weight
+            )
+        self._command_curriculum_steps += 1
+        if self._command_curriculum_steps >= int(self.max_episode_length):
+            divisor = float(self._command_curriculum_steps)
+            linear_score = float((self._command_curriculum_linear_sum / divisor).item())
+            yaw_score = float((self._command_curriculum_yaw_sum / divisor).item())
+            self.command_generator.update_curriculum(
+                linear_score=linear_score,
+                yaw_score=yaw_score,
+            )
+            self._command_curriculum_linear_sum.zero_()
+            self._command_curriculum_yaw_sum.zero_()
+            self._command_curriculum_steps = 0
+            log = self.extras.setdefault("log", {})
+            log["Curriculum/linear_tracking_score"] = linear_score
+            log["Curriculum/yaw_tracking_score"] = yaw_score
+
+        log = self.extras.setdefault("log", {})
+        log["Curriculum/lin_vel_x_max"] = self.command_generator.current_linear_x_range[1]
+        log["Curriculum/lin_vel_y_max"] = self.command_generator.current_linear_y_range[1]
+        log["Curriculum/yaw_rate_max"] = self.command_generator.current_yaw_rate_range[1]
+
+    def _get_rewards(self) -> torch.Tensor:
+        terms = self._locomotion_reward_terms()
+        self._update_command_curriculum(terms)
         log = self.extras.setdefault("log", {})
         for name, value in terms.items():
             log[f"Reward/{name}"] = value.mean().detach()
@@ -115,10 +472,27 @@ class LocomotionEnv(LeggedRobotEnv):
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         _, _, projected_gravity_b = self._anchor_state_b()
-        base_height = to_torch(self.robot.data.body_link_pos_w)[:, self.root_body_index, 2]
-        fallen = base_height < float(self.cfg.minimum_base_height)
-        tilted = -projected_gravity_b[:, 2] < float(self.cfg.minimum_upright_projection)
-        terminated = fallen | tilted
+        contact_force_history = to_torch(self.contact_sensor.data.net_forces_w_history)
+        base_contact_force = torch.linalg.vector_norm(
+            contact_force_history[:, :, self._termination_contact_sensor_indices], dim=-1
+        ).amax(dim=(1, 2))
+        base_contact = base_contact_force > float(
+            self.cfg.illegal_contact_force_threshold
+        )
+        fallen, tilted, terminated = compute_locomotion_termination(
+            terrain_relative_base_height=self._terrain_relative_base_height(),
+            upright_projection=-projected_gravity_b[:, 2],
+            illegal_contact=torch.zeros_like(base_contact),
+            minimum_base_height=float(self.cfg.minimum_base_height),
+            minimum_upright_projection=float(self.cfg.minimum_upright_projection),
+        )
+        log = self.extras.setdefault("log", {})
+        log["Termination/fallen"] = fallen.float().mean().detach()
+        log["Termination/tilted"] = tilted.float().mean().detach()
+        log["Termination/base_contact"] = base_contact.float().mean().detach()
+        log["State/pelvis_height_mean"] = (
+            self._terrain_relative_base_height().mean().detach()
+        )
         self._terrain_success.zero_()
         boundary = getattr(self.cfg, "terrain_out_of_bounds_distance", None)
         if boundary is not None:
@@ -154,4 +528,4 @@ class LocomotionEnv(LeggedRobotEnv):
         )
 
 
-__all__ = ["LocomotionEnv"]
+__all__ = ["LocomotionEnv", "compute_locomotion_termination"]

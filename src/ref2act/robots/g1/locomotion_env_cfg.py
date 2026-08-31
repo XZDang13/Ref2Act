@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import math
+
 import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg
 from isaaclab.envs import DirectRLEnvCfg
 from isaaclab.scene import InteractiveSceneCfg
-from isaaclab.sensors import ContactSensorCfg
+from isaaclab.sensors import ContactSensorCfg, RayCasterCfg, patterns
 from isaaclab.sim import SimulationCfg
 from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils.configclass import configclass
@@ -17,6 +19,31 @@ from ref2act.envs.motion_tracking.action import ActionSpec
 from ref2act.robots._articulation_shared import G1_CFG
 from ref2act.robots._env_cfg_shared import G1TrainingEventCfg
 from ref2act.robots._g1_spec import G1_23_DOF_SPEC
+
+
+def _base_height_sensor_cfg() -> RayCasterCfg:
+    """Create the local terrain grid used only by generated-terrain rewards."""
+
+    return RayCasterCfg(
+        class_type="ref2act.direct_leaf_ray_caster:DirectLeafRayCaster",
+        # This sensor is instantiated directly by LeggedRobotEnv rather than
+        # through InteractiveSceneCfg, so use the resolved global regex.
+        prim_path="/World/envs/env_.*/Robot/Geometry/pelvis",
+        spawn=None,
+        mesh_prim_paths=["/World/ground"],
+        update_period=0.0,
+        offset=RayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 2.0)),
+        ray_alignment="yaw",
+        pattern_cfg=patterns.GridPatternCfg(
+            # A small local grid supports terrain-relative pelvis and swing-foot
+            # heights without exposing terrain perception to the policy.
+            resolution=0.3,
+            size=(0.6, 0.6),
+            direction=(0.0, 0.0, -1.0),
+        ),
+        max_distance=5.0,
+        debug_vis=False,
+    )
 
 
 @configclass
@@ -46,11 +73,29 @@ class G1FlatLocomotionEnvCfg(DirectRLEnvCfg):
     command = VelocityCommandCfg()
     rewards = LocomotionRewardCfg()
 
+    # Flat terrain uses the environment origin as ground height. Generated
+    # terrains override this with one downward ray per environment so the
+    # reward follows the local slope/uneven surface without entering policy
+    # observations.
+    base_height_sensor: RayCasterCfg | None = None
+
     joint_position_reset_noise = 0.05
-    minimum_base_height = 0.42
-    minimum_upright_projection = 0.35
+    minimum_base_height = 0.20
+    minimum_upright_projection = math.cos(0.8)
+    illegal_contact_force_threshold = 1.0
+    unique_terrain_origins = True
     terrain_curriculum = False
     terrain_out_of_bounds_distance = None
+
+    # IsaacLab G1FlatEnvCfg reward entity selections, adapted only where the
+    # 23-DoF model uses different joint names (waist/elbows/wrists).
+    reward_hip_joint_names = [".*_hip_yaw_joint", ".*_hip_roll_joint"]
+    reward_arm_joint_names = [
+        ".*_shoulder_.*_joint",
+        ".*_elbow_joint",
+    ]
+    reward_torso_joint_names = ["waist_yaw_joint"]
+    termination_body_names = ["torso_link"]
 
     sim: SimulationCfg = SimulationCfg(
         dt=1 / 200,
@@ -83,6 +128,7 @@ class G1FlatLocomotionEnvCfg(DirectRLEnvCfg):
     )
     events: G1TrainingEventCfg = G1TrainingEventCfg()
     robot: ArticulationCfg = G1_CFG.replace(prim_path="/World/envs/env_.*/Robot")
+    robot.spawn.articulation_props.enabled_self_collisions = False
 
     contact_sensor = ContactSensorCfg(
         class_type="ref2act.nested_contact_sensor:NestedContactSensor",
@@ -90,38 +136,43 @@ class G1FlatLocomotionEnvCfg(DirectRLEnvCfg):
             "/World/envs/env_.*/Robot/"
             "(pelvis|torso_link|.*_hip_.*_link|.*_knee_link|"
             ".*_shoulder_.*_link|.*_elbow_link|.*_wrist_.*|"
-            ".*_rubber_hand_link|.*_ankle_roll_link)"
+            ".*_rubber_hand_link|.*_ankle_pitch_link|.*_ankle_roll_link)"
         ),
         history_length=3,
         track_air_time=True,
-        force_threshold=10.0,
+        # Match IsaacLab G1FlatEnvCfg. The backend default is used for
+        # air/contact mode tracking; termination has its own explicit 1 N test.
+        force_threshold=None,
     )
 
 
 @configclass
 class G1SlopeLocomotionEnvCfg(G1FlatLocomotionEnvCfg):
-    """G1 blind locomotion on continuous uphill and downhill terrain."""
+    """G1 blind locomotion over a static distribution of slope difficulties."""
 
     terrain = make_locomotion_terrain_cfg(mode="slope")
-    terrain_curriculum = True
+    base_height_sensor = _base_height_sensor_cfg()
+    terrain_curriculum = False
     terrain_out_of_bounds_distance = 3.25
 
 
 @configclass
 class G1UnevenLocomotionEnvCfg(G1FlatLocomotionEnvCfg):
-    """G1 blind locomotion on smooth uneven terrain."""
+    """G1 blind locomotion over a static distribution of uneven terrain."""
 
     terrain = make_locomotion_terrain_cfg(mode="uneven")
-    terrain_curriculum = True
+    base_height_sensor = _base_height_sensor_cfg()
+    terrain_curriculum = False
     terrain_out_of_bounds_distance = 3.25
 
 
 @configclass
 class G1MixedTerrainLocomotionEnvCfg(G1FlatLocomotionEnvCfg):
-    """G1 blind locomotion on a flat/slope/uneven curriculum."""
+    """G1 blind locomotion over unique flat/slope/uneven patches."""
 
     terrain = make_locomotion_terrain_cfg(mode="mixed")
-    terrain_curriculum = True
+    base_height_sensor = _base_height_sensor_cfg()
+    terrain_curriculum = False
     terrain_out_of_bounds_distance = 3.25
 
 

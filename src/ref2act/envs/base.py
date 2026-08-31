@@ -93,6 +93,15 @@ class LeggedRobotEnv(DirectRLEnv):
         self.contact_sensor = contact_sensor_type(self.cfg.contact_sensor)
         self.scene.sensors["contact_sensor"] = self.contact_sensor
 
+        base_height_sensor_cfg = getattr(self.cfg, "base_height_sensor", None)
+        if base_height_sensor_cfg is not None:
+            base_height_sensor_type = base_height_sensor_cfg.class_type
+            if isinstance(base_height_sensor_type, str):
+                module_name, _, attr_name = base_height_sensor_type.partition(":")
+                base_height_sensor_type = getattr(import_module(module_name), attr_name)
+            self.base_height_sensor = base_height_sensor_type(base_height_sensor_cfg)
+            self.scene.sensors["base_height_sensor"] = self.base_height_sensor
+
         self.cfg.terrain.num_envs = self.scene.cfg.num_envs
         self.cfg.terrain.env_spacing = self.scene.cfg.env_spacing
         self.terrain = self.cfg.terrain.class_type(self.cfg.terrain)
