@@ -10,15 +10,22 @@ from ref2act.common.observation_spec import ObservationLayout
 from ref2act.envs.locomotion.commands import UniformVelocityCommandGenerator, VelocityCommandCfg
 from ref2act.envs.base import LeggedRobotEnv
 from ref2act.envs.locomotion.env import LocomotionEnv, compute_locomotion_termination
-from ref2act.envs.locomotion.observation import default_locomotion_observation_spec
+from ref2act.envs.locomotion.observation import (
+    compute_locomotion_velocity_feedback,
+    default_locomotion_observation_spec,
+)
 from ref2act.envs.locomotion.rewards import (
     LocomotionRewardCfg,
     LocomotionRewardInputs,
     compute_feet_air_time_reward,
     compute_feet_air_time_positive_biped_reward,
+    compute_feet_phase_reward,
     compute_feet_gait_reward,
     compute_foot_clearance_reward,
+    compute_locomotion_gait_phase,
+    compute_locomotion_phase_features,
     compute_locomotion_reward_terms,
+    expected_foot_height_from_phase,
 )
 from ref2act.envs.locomotion.terrain import (
     Ref2ActSlopeTerrainCfg,
@@ -40,10 +47,40 @@ def test_locomotion_observation_contract_matches_shared_g1_proprioception() -> N
         ObservationLayout(joint_dim=23, action_dim=23, key_body_count=0, command_dim=3)
     )
     assert description.group_dims == {
+        "command": 7,
+        "feedback": 3,
+        "robot": 78,
+        "privilege": 88,
+    }
+    collection_description = default_locomotion_observation_spec(
+        add_noise=False,
+        include_gait_phase=False,
+        include_velocity_feedback=False,
+    ).describe(
+        ObservationLayout(joint_dim=23, action_dim=23, key_body_count=0, command_dim=3)
+    )
+    assert collection_description.group_dims == {
         "command": 3,
         "robot": 78,
         "privilege": 84,
     }
+
+
+def test_locomotion_velocity_feedback_matches_commanded_axes() -> None:
+    half_angle = torch.tensor(torch.pi / 4.0)
+    feedback = compute_locomotion_velocity_feedback(
+        torch.tensor(
+            [[0.0, 0.0, 0.0, 1.0], [0.0, 0.0, torch.sin(half_angle), torch.cos(half_angle)]]
+        ),
+        torch.tensor([[0.4, -0.2, 3.0], [0.0, 1.0, -4.0]]),
+        torch.tensor([[1.0, 2.0, -0.3], [0.0, 0.0, 2.0]]),
+    )
+    torch.testing.assert_close(
+        feedback,
+        torch.tensor([[0.4, -0.2, -0.3], [1.0, 0.0, 2.0]]),
+        atol=1.0e-6,
+        rtol=1.0e-6,
+    )
 
 
 def test_velocity_command_generator_samples_in_range_and_resamples() -> None:
@@ -98,6 +135,10 @@ def _reward_inputs(*, command_error: float) -> LocomotionRewardInputs:
         previous_applied_action=torch.zeros(batch, joints),
         terminated=torch.zeros(batch, dtype=torch.bool),
         feet_air_time=torch.zeros(batch),
+        feet_phase=torch.ones(batch),
+        pose=torch.zeros(batch),
+        close_feet_xy=torch.zeros(batch),
+        feet_orientation=torch.zeros(batch),
         gait=torch.zeros(batch),
         feet_clearance=torch.ones(batch),
         feet_slide=torch.zeros(batch),
@@ -115,6 +156,26 @@ def test_locomotion_reward_prefers_matching_velocity() -> None:
     mismatching = compute_locomotion_reward_terms(_reward_inputs(command_error=1.0), cfg)
     assert torch.all(matching["track_lin_vel_xy_exp"] > mismatching["track_lin_vel_xy_exp"])
     assert torch.allclose(matching["flat_orientation_l2"], torch.zeros(3))
+
+
+def test_locomotion_reward_tightens_lateral_but_keeps_holosoma_yaw_basin() -> None:
+    cfg = LocomotionRewardCfg()
+    inputs = _reward_inputs(command_error=0.0)
+    lateral_commands = inputs.commands.clone()
+    lateral_commands[:, 1] = 0.3
+    lateral = compute_locomotion_reward_terms(
+        LocomotionRewardInputs(**{**inputs.__dict__, "commands": lateral_commands}), cfg
+    )
+    yaw_commands = inputs.commands.clone()
+    yaw_commands[:, 2] = 0.2
+    yaw = compute_locomotion_reward_terms(
+        LocomotionRewardInputs(**{**inputs.__dict__, "commands": yaw_commands}), cfg
+    )
+    assert torch.all(lateral["track_lin_vel_xy_exp"] < 0.25)
+    expected_yaw = cfg.track_ang_vel_z_exp * torch.exp(torch.tensor(-(0.2**2) / 0.25))
+    torch.testing.assert_close(
+        yaw["track_ang_vel_z_exp"], expected_yaw.expand_as(yaw["track_ang_vel_z_exp"])
+    )
 
 
 def test_feet_air_time_rewards_only_bounded_completed_flights() -> None:
@@ -157,6 +218,44 @@ def test_feet_gait_rewards_alternating_contacts_and_yaw_commands() -> None:
         stance_threshold=0.55,
     )
     assert torch.allclose(reward, torch.tensor([2.0, 2.0, 0.0]))
+
+
+def test_observable_locomotion_phase_is_alternating_and_stands_grounded() -> None:
+    phase = compute_locomotion_gait_phase(
+        episode_step=torch.tensor([0, 25, 0]),
+        phase_offset=torch.zeros(3),
+        commands=torch.tensor(
+            [[0.5, 0.0, 0.0], [0.5, 0.0, 0.0], [0.0, 0.0, 0.0]]
+        ),
+        step_dt=0.02,
+        period=1.0,
+        offsets=(0.0, 0.5),
+    )
+    assert torch.allclose(
+        torch.cos(phase[:2, 1] - phase[:2, 0]),
+        -torch.ones(2),
+        atol=1e-6,
+    )
+    assert torch.allclose(phase[2], torch.full((2,), torch.pi))
+    features = compute_locomotion_phase_features(phase)
+    assert features.shape == (3, 4)
+    assert torch.allclose(features[2], torch.tensor([0.0, -1.0, 0.0, -1.0]), atol=1e-6)
+
+
+def test_feet_phase_reward_tracks_cubic_bezier_height_target() -> None:
+    phase = torch.tensor([[-torch.pi, 0.0], [0.0, -torch.pi]])
+    expected = expected_foot_height_from_phase(phase, swing_height=0.09)
+    assert torch.allclose(expected, torch.tensor([[0.0, 0.09], [0.09, 0.0]]))
+    target = expected
+    reward = compute_feet_phase_reward(
+        torch.cat((target[:1], torch.zeros((1, 2))), dim=0),
+        phase,
+        stance_height=0.0,
+        swing_height=0.09,
+        tracking_sigma=0.008,
+    )
+    assert reward[0] == pytest.approx(1.0)
+    assert reward[1] < reward[0]
 
 
 def test_foot_clearance_only_shapes_horizontally_moving_feet() -> None:
@@ -202,14 +301,24 @@ def test_g1_flat_locomotion_config_and_registry_contract() -> None:
     assert cfg.command.curriculum_enabled
     assert cfg.command.resampling_time_range_s == (10.0, 10.0)
     assert cfg.rewards.termination_penalty == 0.0
-    assert cfg.rewards.track_ang_vel_z_exp == 0.5
-    assert cfg.rewards.alive == 0.15
+    assert cfg.rewards.track_lin_vel_xy_exp == 2.0
+    assert cfg.rewards.track_ang_vel_z_exp == 1.5
+    assert cfg.rewards.alive == 1.0
     assert cfg.rewards.base_height_l2 == -10.0
     assert cfg.rewards.base_height_target == 0.76
     assert cfg.rewards.feet_air_time == 0.0
-    assert cfg.rewards.gait == 0.5
-    assert cfg.rewards.feet_clearance == 1.0
-    assert cfg.rewards.undesired_contacts == -1.0
+    assert cfg.rewards.feet_phase == 5.0
+    assert cfg.rewards.gait == 0.0
+    assert cfg.rewards.feet_clearance == 0.0
+    assert cfg.rewards.pose == -0.05
+    assert cfg.rewards.close_feet_xy == -1.0
+    assert cfg.rewards.feet_orientation == -5.0
+    assert cfg.rewards.linear_velocity_std == pytest.approx(0.5)
+    assert cfg.rewards.lateral_velocity_std == pytest.approx(0.2)
+    assert cfg.rewards.yaw_rate_std == pytest.approx(0.5)
+    assert cfg.rewards.feet_contact_point_offset == pytest.approx((0.0, 0.0, -0.037))
+    assert cfg.rewards.feet_stance_height == 0.0
+    assert cfg.rewards.action_rate_l2 == -0.05
     assert cfg.minimum_base_height == 0.2
     assert cfg.minimum_upright_projection == pytest.approx(np.cos(0.8))
     spec = gym.spec("G1FlatLocomotion-v0")
@@ -285,7 +394,8 @@ def test_generated_locomotion_assigns_one_unique_origin_per_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     num_envs = 70
-    terrain_origins = torch.arange(2 * 64 * 3, dtype=torch.float32).reshape(2, 64, 3)
+    terrain_origins = torch.arange(4 * 66 * 3, dtype=torch.float32).reshape(4, 66, 3)
+    calls: list[list[str]] = []
 
     class _Scene:
         physics_backend = "physx"
@@ -293,7 +403,7 @@ def test_generated_locomotion_assigns_one_unique_origin_per_environment(
 
         @staticmethod
         def filter_collisions(*, global_prim_paths: list[str]) -> None:
-            raise AssertionError(f"unique origins must not need collision groups: {global_prim_paths}")
+            calls.append(global_prim_paths)
 
     generator = type("GeneratorCfg", (), {"num_rows": 8, "num_cols": 20})()
     terrain_cfg = type(
@@ -309,17 +419,28 @@ def test_generated_locomotion_assigns_one_unique_origin_per_environment(
     env.cfg = type(
         "EnvCfg",
         (),
-        {"terrain": terrain_cfg, "unique_terrain_origins": True},
+        {
+            "terrain": terrain_cfg,
+            "unique_terrain_origins": True,
+            "terrain_guard_tiles": 1,
+        },
     )()
     env.terrain = type("Terrain", (), {"terrain_origins": terrain_origins})()
 
     LocomotionEnv._setup_scene(env)
 
-    assert generator.num_rows == 2
-    assert generator.num_cols == 64
-    assert torch.equal(env.terrain.terrain_levels, torch.cat((torch.zeros(64), torch.ones(6))).long())
-    assert torch.equal(env.terrain.terrain_types, torch.cat((torch.arange(64), torch.arange(6))))
+    assert generator.num_rows == 4
+    assert generator.num_cols == 66
+    assert torch.equal(
+        env.terrain.terrain_levels,
+        torch.cat((torch.ones(64), torch.full((6,), 2))).long(),
+    )
+    assert torch.equal(
+        env.terrain.terrain_types,
+        torch.cat((torch.arange(1, 65), torch.arange(1, 7))),
+    )
     assert torch.unique(env.terrain.env_origins, dim=0).shape[0] == num_envs
+    assert calls == [["/World/ground"]]
 
 
 def test_ref2act_slope_is_continuous_and_supports_both_directions() -> None:
@@ -387,5 +508,7 @@ def test_locomotion_terrain_modes_and_registrations() -> None:
     for cfg, env_id in configs_and_ids:
         assert cfg.terrain.terrain_type == "generator"
         assert cfg.unique_terrain_origins
+        assert cfg.terrain_guard_tiles == 1
         assert not cfg.terrain_curriculum
+        assert cfg.terrain_out_of_bounds_distance is None
         assert gym.spec(env_id).entry_point == "ref2act.envs.locomotion.env:LocomotionEnv"

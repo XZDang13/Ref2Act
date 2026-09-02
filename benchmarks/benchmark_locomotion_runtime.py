@@ -94,13 +94,7 @@ def main() -> None:
     if args.disable_collision_filter:
         cfg.scene.filter_collisions = False
     cfg.sim.device = args.device or "cuda:0"
-    explicit_collision_filter = bool(
-        cfg.scene.filter_collisions
-        and not (
-            getattr(cfg.terrain, "terrain_generator", None) is not None
-            and getattr(cfg, "unique_terrain_origins", False)
-        )
-    )
+    explicit_collision_filter = bool(cfg.scene.filter_collisions)
 
     env = gym.make(env_ids[args.terrain], cfg=cfg)
     try:

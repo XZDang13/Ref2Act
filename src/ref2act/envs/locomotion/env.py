@@ -4,7 +4,7 @@ import math
 
 import torch
 
-from ref2act.common.math import quat_apply_inverse, yaw_quat
+from ref2act.common.math import quat_apply, quat_apply_inverse, yaw_quat
 from ref2act.common.observation_spec import ObservationLayout
 from ref2act.envs.base import LeggedRobotEnv
 from ref2act.isaac_compat import to_torch
@@ -15,8 +15,11 @@ from .rewards import (
     LocomotionRewardInputs,
     compute_feet_air_time_reward,
     compute_feet_air_time_positive_biped_reward,
+    compute_feet_phase_reward,
     compute_feet_gait_reward,
     compute_foot_clearance_reward,
+    compute_locomotion_gait_phase,
+    compute_locomotion_phase_features,
     compute_locomotion_reward_terms,
 )
 
@@ -41,14 +44,15 @@ class LocomotionEnv(LeggedRobotEnv):
     """Blind velocity-command locomotion with no reference-motion dependency."""
 
     def _setup_scene(self) -> None:
-        """Build the locomotion scene without co-locating generated terrains.
+        """Build the locomotion scene with isolated robots and traversable terrain.
 
         IsaacLab's default curriculum-origin assignment reuses a small terrain
         grid across thousands of environments.  The nested G1 collision model
         then puts many robots at exactly the same world pose.  Explicit USD
-        collision groups prevent the resulting contacts, but the overlapping
+        collision groups prevent cross-environment contacts, but the overlapping
         broad phase remains prohibitively expensive.  Generated locomotion
-        terrains therefore allocate one physical patch per environment.
+        terrains therefore allocate one physical patch per environment, plus a
+        guard ring that lets edge environments traverse beyond their spawn tile.
         """
 
         terrain_generator = getattr(self.cfg.terrain, "terrain_generator", None)
@@ -56,27 +60,38 @@ class LocomotionEnv(LeggedRobotEnv):
             terrain_generator is not None
             and getattr(self.cfg, "unique_terrain_origins", False)
         )
+        logical_num_cols = 0
+        logical_num_rows = 0
+        guard_tiles = 0
         if unique_origins:
             num_envs = int(self.scene.cfg.num_envs)
-            num_cols = min(64, num_envs)
-            terrain_generator.num_cols = num_cols
-            terrain_generator.num_rows = math.ceil(num_envs / num_cols)
+            logical_num_cols = min(64, num_envs)
+            logical_num_rows = math.ceil(num_envs / logical_num_cols)
+            guard_tiles = max(0, int(getattr(self.cfg, "terrain_guard_tiles", 1)))
+            terrain_generator.num_cols = logical_num_cols + 2 * guard_tiles
+            terrain_generator.num_rows = logical_num_rows + 2 * guard_tiles
 
         super()._setup_scene()
 
         if unique_origins:
             num_envs = int(self.scene.cfg.num_envs)
-            num_cols = int(terrain_generator.num_cols)
             env_ids = torch.arange(num_envs, device=self.device, dtype=torch.long)
-            terrain_levels = torch.div(env_ids, num_cols, rounding_mode="floor")
-            terrain_types = torch.remainder(env_ids, num_cols)
+            terrain_levels = (
+                torch.div(env_ids, logical_num_cols, rounding_mode="floor")
+                + guard_tiles
+            )
+            terrain_types = torch.remainder(env_ids, logical_num_cols) + guard_tiles
             self.terrain.terrain_levels = terrain_levels
             self.terrain.terrain_types = terrain_types
             self.terrain.max_terrain_level = int(terrain_generator.num_rows)
             self.terrain.env_origins = self.terrain.terrain_origins[
                 terrain_levels, terrain_types
             ].clone()
-        elif self.scene.cfg.filter_collisions and "physx" in self.scene.physics_backend:
+
+        # Unique physical origins avoid broad-phase overlap at reset, but robots
+        # are free to cross tiles during locomotion.  They must therefore still
+        # be isolated from robots belonging to other vector environments.
+        if self.scene.cfg.filter_collisions and "physx" in self.scene.physics_backend:
             self.scene.filter_collisions(
                 global_prim_paths=[self.cfg.terrain.prim_path]
             )
@@ -108,6 +123,7 @@ class LocomotionEnv(LeggedRobotEnv):
         self._command_curriculum_linear_sum = torch.zeros((), device=self.device)
         self._command_curriculum_yaw_sum = torch.zeros((), device=self.device)
         self._command_curriculum_steps = 0
+        self._gait_phase_offset = torch.zeros(self.num_envs, device=self.device)
         self.observation_model = LocomotionObservation(
             spec=self.cfg.observation,
             layout=layout,
@@ -213,8 +229,23 @@ class LocomotionEnv(LeggedRobotEnv):
         return self.observation_model.get_default_observation(
             self.robot,
             self.command_generator.commands,
+            self._gait_phase_features(),
             self._sim_to_policy_order(self.action_processor.applied_action),
         )
+
+    def _gait_phase(self) -> torch.Tensor:
+        return compute_locomotion_gait_phase(
+            self.episode_length_buf,
+            self._gait_phase_offset,
+            self.command_generator.commands,
+            step_dt=float(self.step_dt),
+            period=float(self.cfg.rewards.gait_period),
+            offsets=tuple(self.cfg.rewards.gait_offsets),
+            stand_phase=float(self.cfg.rewards.gait_stand_phase),
+        )
+
+    def _gait_phase_features(self) -> torch.Tensor:
+        return compute_locomotion_phase_features(self._gait_phase())
 
     def _feet_air_time_reward(self, *, command_gate: bool) -> torch.Tensor:
         """Legacy completed-flight signal retained only for task-free exploration."""
@@ -331,9 +362,7 @@ class LocomotionEnv(LeggedRobotEnv):
         return result[:, 0] if squeeze_query else result
 
     def _feet_clearance_reward(self) -> torch.Tensor:
-        foot_position_w = to_torch(self.robot.data.body_link_pos_w)[
-            :, self._foot_body_indices
-        ]
+        foot_position_w = self._foot_contact_point_position_w()
         ground_height = self._terrain_ground_height_at(foot_position_w[..., :2])
         foot_clearance = foot_position_w[..., 2] - ground_height
         foot_velocity_xy = to_torch(self.robot.data.body_link_lin_vel_w)[
@@ -346,6 +375,80 @@ class LocomotionEnv(LeggedRobotEnv):
             std=float(self.cfg.rewards.feet_clearance_std),
             tanh_mult=float(self.cfg.rewards.feet_clearance_tanh_mult),
         )
+
+    def _feet_phase_reward(self) -> torch.Tensor:
+        foot_position_w = self._foot_contact_point_position_w()
+        ground_height = self._terrain_ground_height_at(foot_position_w[..., :2])
+        foot_height = foot_position_w[..., 2] - ground_height
+        return compute_feet_phase_reward(
+            foot_height,
+            self._gait_phase(),
+            stance_height=float(self.cfg.rewards.feet_stance_height),
+            swing_height=float(self.cfg.rewards.feet_phase_swing_height),
+            tracking_sigma=float(self.cfg.rewards.feet_phase_tracking_sigma),
+        )
+
+    def _foot_contact_point_position_w(self) -> torch.Tensor:
+        """Return the virtual sole-center points used by HoloSoma's G1 reward."""
+
+        foot_position_w = to_torch(self.robot.data.body_link_pos_w)[
+            :, self._foot_body_indices
+        ]
+        foot_quat_w = to_torch(self.robot.data.body_link_quat_w)[
+            :, self._foot_body_indices
+        ]
+        local_offset = torch.as_tensor(
+            self.cfg.rewards.feet_contact_point_offset,
+            dtype=foot_position_w.dtype,
+            device=foot_position_w.device,
+        ).view(1, 1, 3).expand_as(foot_position_w)
+        return foot_position_w + quat_apply(
+            foot_quat_w.reshape(-1, 4), local_offset.reshape(-1, 3)
+        ).reshape_as(foot_position_w)
+
+    def _pose_penalty(self) -> torch.Tensor:
+        joint_pos = self._sim_to_policy_order(to_torch(self.robot.data.joint_pos))
+        default_joint_pos = self._sim_to_policy_order(
+            to_torch(self.robot.data.default_joint_pos)
+        )
+        weights = torch.as_tensor(
+            self.cfg.rewards.pose_weights,
+            device=self.device,
+            dtype=joint_pos.dtype,
+        )
+        if weights.shape != (self.robot_spec.action_dim,):
+            raise ValueError(
+                "Locomotion pose_weights must match the policy joint order: "
+                f"expected {self.robot_spec.action_dim}, got {weights.numel()}."
+            )
+        return torch.sum((joint_pos - default_joint_pos).square() * weights, dim=-1)
+
+    def _close_feet_xy_penalty(self) -> torch.Tensor:
+        foot_position_w = to_torch(self.robot.data.body_link_pos_w)[
+            :, self._foot_body_indices
+        ]
+        anchor_quat_w = to_torch(self.robot.data.body_link_quat_w)[
+            :, self.anchor_body_index
+        ]
+        foot_delta_yaw = quat_apply_inverse(
+            yaw_quat(anchor_quat_w),
+            foot_position_w[:, 0] - foot_position_w[:, 1],
+        )
+        return (
+            torch.abs(foot_delta_yaw[:, 1])
+            < float(self.cfg.rewards.close_feet_threshold)
+        ).to(foot_position_w.dtype)
+
+    def _feet_orientation_penalty(self) -> torch.Tensor:
+        foot_quat_w = to_torch(self.robot.data.body_link_quat_w)[
+            :, self._foot_body_indices
+        ]
+        gravity_w = to_torch(self.robot.data.GRAVITY_VEC_W)
+        gravity_w = gravity_w[:, None, :].expand(-1, foot_quat_w.shape[1], -1)
+        projected = quat_apply_inverse(
+            foot_quat_w.reshape(-1, 4), gravity_w.reshape(-1, 3)
+        ).reshape(self.num_envs, foot_quat_w.shape[1], 3)
+        return torch.linalg.vector_norm(projected[..., :2], dim=-1).sum(dim=-1)
 
     def _undesired_contact_penalty(self) -> torch.Tensor:
         contact_history = to_torch(self.contact_sensor.data.net_forces_w_history)
@@ -379,7 +482,7 @@ class LocomotionEnv(LeggedRobotEnv):
         return torch.sum(below + above, dim=-1)
 
     def _locomotion_reward_terms(self) -> dict[str, torch.Tensor]:
-        """Return Unitree-style locomotion terms using DirectRLEnv state."""
+        """Return the compact observable-phase locomotion objective."""
 
         anchor_quat_w = to_torch(self.robot.data.body_link_quat_w)[
             :, self.anchor_body_index
@@ -392,6 +495,8 @@ class LocomotionEnv(LeggedRobotEnv):
         terminated = getattr(self, "reset_terminated", None)
         if terminated is None:
             terminated = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
+        zero = torch.zeros(self.num_envs, device=self.device)
+        rewards_cfg = self.cfg.rewards
         return compute_locomotion_reward_terms(
             LocomotionRewardInputs(
                 commands=self.command_generator.commands,
@@ -407,22 +512,56 @@ class LocomotionEnv(LeggedRobotEnv):
                 previous_applied_action=self.action_processor.previous_applied_action,
                 terminated=terminated,
                 feet_air_time=torch.zeros(self.num_envs, device=self.device),
-                gait=self._feet_gait_reward(),
-                feet_clearance=self._feet_clearance_reward(),
-                feet_slide=self._feet_slide_penalty(),
-                undesired_contacts=self._undesired_contact_penalty(),
-                dof_pos_limits=self._joint_position_limit_penalty(),
-                joint_deviation_hip=self._joint_deviation_l1(
-                    self._reward_hip_joint_indices
+                feet_phase=(
+                    self._feet_phase_reward() if rewards_cfg.feet_phase != 0.0 else zero
                 ),
-                joint_deviation_arms=self._joint_deviation_l1(
-                    self._reward_arm_joint_indices
+                pose=self._pose_penalty() if rewards_cfg.pose != 0.0 else zero,
+                close_feet_xy=(
+                    self._close_feet_xy_penalty()
+                    if rewards_cfg.close_feet_xy != 0.0
+                    else zero
                 ),
-                joint_deviation_torso=self._joint_deviation_l1(
-                    self._reward_torso_joint_indices
+                feet_orientation=(
+                    self._feet_orientation_penalty()
+                    if rewards_cfg.feet_orientation != 0.0
+                    else zero
+                ),
+                gait=self._feet_gait_reward() if rewards_cfg.gait != 0.0 else zero,
+                feet_clearance=(
+                    self._feet_clearance_reward()
+                    if rewards_cfg.feet_clearance != 0.0
+                    else zero
+                ),
+                feet_slide=(
+                    self._feet_slide_penalty() if rewards_cfg.feet_slide != 0.0 else zero
+                ),
+                undesired_contacts=(
+                    self._undesired_contact_penalty()
+                    if rewards_cfg.undesired_contacts != 0.0
+                    else zero
+                ),
+                dof_pos_limits=(
+                    self._joint_position_limit_penalty()
+                    if rewards_cfg.dof_pos_limits != 0.0
+                    else zero
+                ),
+                joint_deviation_hip=(
+                    self._joint_deviation_l1(self._reward_hip_joint_indices)
+                    if rewards_cfg.joint_deviation_hip != 0.0
+                    else zero
+                ),
+                joint_deviation_arms=(
+                    self._joint_deviation_l1(self._reward_arm_joint_indices)
+                    if rewards_cfg.joint_deviation_arms != 0.0
+                    else zero
+                ),
+                joint_deviation_torso=(
+                    self._joint_deviation_l1(self._reward_torso_joint_indices)
+                    if rewards_cfg.joint_deviation_torso != 0.0
+                    else zero
                 ),
             ),
-            self.cfg.rewards,
+            rewards_cfg,
         )
 
     def _update_command_curriculum(self, terms: dict[str, torch.Tensor]) -> None:
@@ -468,6 +607,33 @@ class LocomotionEnv(LeggedRobotEnv):
         log = self.extras.setdefault("log", {})
         for name, value in terms.items():
             log[f"Reward/{name}"] = value.mean().detach()
+
+        # Keep the three commanded axes visible independently.  The reward has
+        # intentionally different longitudinal/lateral bandwidths, so the
+        # combined XY term alone cannot reveal a policy that only tracks x.
+        anchor_quat_w = to_torch(self.robot.data.body_link_quat_w)[
+            :, self.anchor_body_index
+        ]
+        anchor_lin_vel_w = to_torch(self.robot.data.body_link_lin_vel_w)[
+            :, self.anchor_body_index
+        ]
+        anchor_lin_vel_yaw = quat_apply_inverse(
+            yaw_quat(anchor_quat_w), anchor_lin_vel_w
+        )
+        anchor_ang_vel_b = quat_apply_inverse(
+            anchor_quat_w,
+            to_torch(self.robot.data.body_link_ang_vel_w)[:, self.anchor_body_index],
+        )
+        commands = self.command_generator.commands
+        log["Tracking/lin_vel_x_abs_error"] = (
+            commands[:, 0] - anchor_lin_vel_yaw[:, 0]
+        ).abs().mean().detach()
+        log["Tracking/lin_vel_y_abs_error"] = (
+            commands[:, 1] - anchor_lin_vel_yaw[:, 1]
+        ).abs().mean().detach()
+        log["Tracking/yaw_rate_abs_error"] = (
+            commands[:, 2] - anchor_ang_vel_b[:, 2]
+        ).abs().mean().detach()
         return torch.stack(tuple(terms.values()), dim=-1).sum(dim=-1) * self.step_dt
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
@@ -482,7 +648,7 @@ class LocomotionEnv(LeggedRobotEnv):
         fallen, tilted, terminated = compute_locomotion_termination(
             terrain_relative_base_height=self._terrain_relative_base_height(),
             upright_projection=-projected_gravity_b[:, 2],
-            illegal_contact=torch.zeros_like(base_contact),
+            illegal_contact=base_contact,
             minimum_base_height=float(self.cfg.minimum_base_height),
             minimum_upright_projection=float(self.cfg.minimum_upright_projection),
         )
@@ -520,10 +686,17 @@ class LocomotionEnv(LeggedRobotEnv):
             joint_position_noise=float(self.cfg.joint_position_reset_noise),
         )
         self.command_generator.reset(env_ids)
+        if bool(self.cfg.rewards.gait_randomize_phase):
+            self._gait_phase_offset[env_ids] = torch.empty(
+                env_ids.numel(), device=self.device
+            ).uniform_(-torch.pi, torch.pi)
+        else:
+            self._gait_phase_offset[env_ids] = 0.0
         self.observation_model.reset(
             env_ids,
             self.robot,
             self.command_generator.commands,
+            self._gait_phase_features(),
             self._sim_to_policy_order(self.action_processor.applied_action),
         )
 

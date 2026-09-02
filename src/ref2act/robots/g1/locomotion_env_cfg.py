@@ -84,6 +84,10 @@ class G1FlatLocomotionEnvCfg(DirectRLEnvCfg):
     minimum_upright_projection = math.cos(0.8)
     illegal_contact_force_threshold = 1.0
     unique_terrain_origins = True
+    # Generated terrains reserve one additional tile on every outer edge.  In
+    # combination with the 10 m importer border this covers the full 20 s
+    # command horizon without reintroducing per-patch resets.
+    terrain_guard_tiles = 1
     terrain_curriculum = False
     terrain_out_of_bounds_distance = None
 
@@ -153,7 +157,7 @@ class G1SlopeLocomotionEnvCfg(G1FlatLocomotionEnvCfg):
     terrain = make_locomotion_terrain_cfg(mode="slope")
     base_height_sensor = _base_height_sensor_cfg()
     terrain_curriculum = False
-    terrain_out_of_bounds_distance = 3.25
+    terrain_out_of_bounds_distance = None
 
 
 @configclass
@@ -163,7 +167,7 @@ class G1UnevenLocomotionEnvCfg(G1FlatLocomotionEnvCfg):
     terrain = make_locomotion_terrain_cfg(mode="uneven")
     base_height_sensor = _base_height_sensor_cfg()
     terrain_curriculum = False
-    terrain_out_of_bounds_distance = 3.25
+    terrain_out_of_bounds_distance = None
 
 
 @configclass
@@ -173,7 +177,7 @@ class G1MixedTerrainLocomotionEnvCfg(G1FlatLocomotionEnvCfg):
     terrain = make_locomotion_terrain_cfg(mode="mixed")
     base_height_sensor = _base_height_sensor_cfg()
     terrain_curriculum = False
-    terrain_out_of_bounds_distance = 3.25
+    terrain_out_of_bounds_distance = None
 
 
 __all__ = [

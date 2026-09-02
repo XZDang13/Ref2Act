@@ -173,6 +173,11 @@ DEFAULT_OBSERVATION_TERM_REGISTRY: dict[str, ObservationTerm] = {
         "velocity_command",
         lambda layout: layout.command_dim,
     ),
+    "locomotion_phase": ContextFieldObservationTerm(
+        "locomotion_phase",
+        "locomotion_phase",
+        lambda layout: 4,
+    ),
     "target_projected_gravity": ContextFieldObservationTerm(
         "target_projected_gravity",
         "target_projected_gravity",
@@ -221,6 +226,11 @@ DEFAULT_OBSERVATION_TERM_REGISTRY: dict[str, ObservationTerm] = {
     "anchor_lin_vel_b": ContextFieldObservationTerm(
         "anchor_lin_vel_b",
         "anchor_lin_vel_b",
+        lambda layout: 3,
+    ),
+    "locomotion_velocity_feedback": ContextFieldObservationTerm(
+        "locomotion_velocity_feedback",
+        "locomotion_velocity_feedback",
         lambda layout: 3,
     ),
     "anchor_ang_vel_b": ContextFieldObservationTerm(
