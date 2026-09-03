@@ -8,6 +8,11 @@ import torch
 import ref2act  # noqa: F401
 from ref2act.common.observation_spec import ObservationLayout
 from ref2act.envs.locomotion.commands import UniformVelocityCommandGenerator, VelocityCommandCfg
+from ref2act.envs.locomotion.commands import (
+    LOCOMOTION_COMMAND_CATEGORIES,
+    StratifiedVelocityCommandCfg,
+    StratifiedVelocityCommandGenerator,
+)
 from ref2act.envs.base import LeggedRobotEnv
 from ref2act.envs.locomotion.env import LocomotionEnv, compute_locomotion_termination
 from ref2act.envs.locomotion.observation import (
@@ -26,6 +31,12 @@ from ref2act.envs.locomotion.rewards import (
     compute_locomotion_phase_features,
     compute_locomotion_reward_terms,
     expected_foot_height_from_phase,
+)
+from ref2act.envs.locomotion.task_rewards import (
+    FlatLocomotionRewardCfg,
+    FlatLocomotionRewardInputs,
+    compute_flat_locomotion_reward_terms,
+    phase_gait_targets,
 )
 from ref2act.envs.locomotion.terrain import (
     Ref2ActSlopeTerrainCfg,
@@ -114,6 +125,205 @@ def test_velocity_command_curriculum_expands_only_successful_axes() -> None:
     assert generator.current_linear_x_range == (-0.2, 0.2)
     assert generator.current_linear_y_range == (-0.2, 0.2)
     assert generator.current_yaw_rate_range == (-0.1, 0.1)
+
+
+def test_stratified_commands_have_explicit_modes_and_no_tiny_motion() -> None:
+    torch.manual_seed(7)
+    generator = StratifiedVelocityCommandGenerator(
+        cfg=StratifiedVelocityCommandCfg(),
+        num_envs=20000,
+        step_dt=0.02,
+        device="cpu",
+    )
+    generator.reset()
+    assert generator.category_names == LOCOMOTION_COMMAND_CATEGORIES
+    moving = generator.category_ids != 0
+    assert torch.all(torch.linalg.vector_norm(generator.commands[moving], dim=-1) >= 0.15)
+    fractions = torch.bincount(generator.category_ids, minlength=5).float() / 20000
+    torch.testing.assert_close(
+        fractions,
+        torch.tensor(generator.cfg.category_fractions),
+        atol=0.015,
+        rtol=0.0,
+    )
+
+
+def test_flat_tracking_reward_is_positive_and_category_normalized() -> None:
+    batch = 4
+    command = torch.tensor(
+        [
+            [0.6, 0.0, 0.0],
+            [0.0, 0.3, 0.0],
+            [0.0, 0.0, 0.5],
+            [0.6, 0.3, 0.5],
+        ]
+    )
+    zeros3 = torch.zeros(batch, 3)
+    common = dict(
+        commands=command,
+        base_linear_velocity_b=zeros3,
+        base_angular_velocity_b=zeros3,
+        projected_gravity_b=torch.tensor([[0.0, 0.0, -1.0]]).repeat(batch, 1),
+        base_height=torch.full((batch,), 0.76),
+        gait_phase=torch.full((batch, 2), torch.pi),
+        feet_height=torch.zeros(batch, 2),
+        feet_contact=torch.ones(batch, 2, dtype=torch.bool),
+        joint_acc=torch.zeros(batch, 12),
+        applied_torque=torch.zeros(batch, 12),
+        action=torch.zeros(batch, 23),
+        previous_action=torch.zeros(batch, 23),
+        terminated=torch.zeros(batch, dtype=torch.bool),
+        feet_air_time=torch.zeros(batch),
+        feet_slide=torch.zeros(batch),
+        dof_pos_limits=torch.zeros(batch),
+    )
+    stationary = compute_flat_locomotion_reward_terms(
+        FlatLocomotionRewardInputs(
+            **common,
+            base_linear_velocity_yaw_frame=zeros3,
+        ),
+        FlatLocomotionRewardCfg(),
+    )
+    matching = compute_flat_locomotion_reward_terms(
+        FlatLocomotionRewardInputs(
+            **{
+                **common,
+                "base_linear_velocity_yaw_frame": torch.tensor(
+                    [
+                        [0.6, 0.0, 0.0],
+                        [0.0, 0.3, 0.0],
+                        [0.0, 0.0, 0.0],
+                        [0.6, 0.3, 0.0],
+                    ]
+                ),
+                "base_angular_velocity_b": torch.tensor(
+                    [
+                        [0.0, 0.0, 0.0],
+                        [0.0, 0.0, 0.0],
+                        [0.0, 0.0, 0.5],
+                        [0.0, 0.0, 0.5],
+                    ]
+                ),
+            }
+        ),
+        FlatLocomotionRewardCfg(),
+    )
+    assert torch.all(stationary["track_command_exp"] > 0.0)
+    assert torch.all(matching["track_command_exp"] > stationary["track_command_exp"])
+    torch.testing.assert_close(
+        matching["track_command_exp"],
+        torch.full((batch,), FlatLocomotionRewardCfg().track_command_exp),
+    )
+    torch.testing.assert_close(matching["stand_still_exp"], torch.zeros(batch))
+
+
+def test_flat_tracking_uses_explicit_stand_reward_and_penalizes_inactive_drift() -> None:
+    batch = 2
+    zeros3 = torch.zeros(batch, 3)
+    common = dict(
+        commands=torch.tensor([[0.0, 0.0, 0.0], [0.6, 0.0, 0.0]]),
+        base_linear_velocity_b=zeros3,
+        base_angular_velocity_b=zeros3,
+        projected_gravity_b=torch.tensor([[0.0, 0.0, -1.0]]).repeat(batch, 1),
+        base_height=torch.full((batch,), 0.76),
+        gait_phase=torch.full((batch, 2), torch.pi),
+        feet_height=torch.zeros(batch, 2),
+        feet_contact=torch.ones(batch, 2, dtype=torch.bool),
+        joint_acc=torch.zeros(batch, 12),
+        applied_torque=torch.zeros(batch, 12),
+        action=torch.zeros(batch, 23),
+        previous_action=torch.zeros(batch, 23),
+        terminated=torch.zeros(batch, dtype=torch.bool),
+        feet_air_time=torch.zeros(batch),
+        feet_slide=torch.zeros(batch),
+        dof_pos_limits=torch.zeros(batch),
+    )
+    terms = compute_flat_locomotion_reward_terms(
+        FlatLocomotionRewardInputs(
+            **common,
+            base_linear_velocity_yaw_frame=torch.tensor(
+                [[0.0, 0.0, 0.0], [0.6, 0.3, 0.0]]
+            ),
+        ),
+        FlatLocomotionRewardCfg(),
+    )
+    assert terms["stand_still_exp"][0] == pytest.approx(2.0)
+    assert terms["stand_still_exp"][1] == pytest.approx(0.0)
+    assert terms["inactive_command_axes"][0] == pytest.approx(0.0)
+    assert terms["inactive_command_axes"][1] == pytest.approx(
+        FlatLocomotionRewardCfg().inactive_command_axes
+        * (1.0 - np.exp(-1.0))
+        / 2.0
+    )
+
+
+def test_flat_phase_targets_encode_alternating_support_without_target_flight() -> None:
+    phase = torch.tensor(
+        [[0.0, -torch.pi], [-torch.pi, 0.0], [torch.pi, torch.pi]]
+    )
+    height, contact = phase_gait_targets(
+        phase, stance_ratio=0.55, swing_height=0.09
+    )
+    torch.testing.assert_close(
+        height,
+        torch.tensor([[0.09, 0.0], [0.0, 0.09], [0.0, 0.0]]),
+    )
+    assert torch.equal(
+        contact,
+        torch.tensor([[False, True], [True, False], [True, True]]),
+    )
+    assert torch.all(contact.any(dim=-1))
+
+
+def test_flat_gait_reward_prefers_phase_match_and_penalizes_moving_flight() -> None:
+    cfg = FlatLocomotionRewardCfg()
+    batch = 3
+    inputs = FlatLocomotionRewardInputs(
+        commands=torch.tensor(
+            [[0.6, 0.0, 0.0], [0.6, 0.0, 0.0], [0.6, 0.0, 0.0]]
+        ),
+        base_linear_velocity_b=torch.zeros(batch, 3),
+        base_angular_velocity_b=torch.zeros(batch, 3),
+        base_linear_velocity_yaw_frame=torch.tensor(
+            [[0.6, 0.0, 0.0], [0.6, 0.0, 0.0], [0.6, 0.0, 0.0]]
+        ),
+        projected_gravity_b=torch.tensor([[0.0, 0.0, -1.0]]).repeat(batch, 1),
+        base_height=torch.tensor([0.76, 0.66, 0.76]),
+        gait_phase=torch.tensor(
+            [[0.0, -torch.pi], [0.0, -torch.pi], [0.0, -torch.pi]]
+        ),
+        feet_height=torch.tensor([[0.09, 0.0], [0.0, 0.0], [0.0, 0.0]]),
+        feet_contact=torch.tensor(
+            [[False, True], [True, True], [False, False]]
+        ),
+        joint_acc=torch.zeros(batch, 12),
+        applied_torque=torch.zeros(batch, 12),
+        action=torch.zeros(batch, 23),
+        previous_action=torch.zeros(batch, 23),
+        terminated=torch.zeros(batch, dtype=torch.bool),
+        feet_air_time=torch.zeros(batch),
+        feet_slide=torch.zeros(batch),
+        dof_pos_limits=torch.zeros(batch),
+    )
+    terms = compute_flat_locomotion_reward_terms(inputs, cfg)
+    assert terms["swing_contact_penalty"][0] == pytest.approx(0.0)
+    assert terms["swing_contact_penalty"][1] == pytest.approx(
+        cfg.swing_contact_penalty
+    )
+    assert terms["unexpected_double_support_penalty"][1] == pytest.approx(
+        cfg.unexpected_double_support_penalty
+    )
+    assert terms["stance_missing_contact_penalty"][2] == pytest.approx(
+        cfg.stance_missing_contact_penalty
+    )
+    assert terms["swing_foot_under_clearance_penalty"][0] == pytest.approx(0.0)
+    assert terms["swing_foot_under_clearance_penalty"][1] == pytest.approx(
+        cfg.swing_foot_under_clearance_penalty
+    )
+    assert terms["moving_flight"][0] == pytest.approx(0.0)
+    assert terms["moving_flight"][2] == pytest.approx(cfg.moving_flight)
+    assert terms["base_height_l2"][0] == pytest.approx(0.0)
+    assert terms["base_height_l2"][1] == pytest.approx(-0.05)
 
 
 def _reward_inputs(*, command_error: float) -> LocomotionRewardInputs:
@@ -294,31 +504,37 @@ def test_g1_flat_locomotion_config_and_registry_contract() -> None:
     assert ".*_ankle_roll_link" in cfg.contact_sensor.prim_path
     assert cfg.contact_sensor.force_threshold is None
     assert cfg.illegal_contact_force_threshold == 1.0
-    assert cfg.command.linear_x_range == (-0.1, 0.1)
-    assert cfg.command.linear_y_range == (-0.1, 0.1)
-    assert cfg.command.yaw_rate_range == (-0.1, 0.1)
-    assert cfg.command.linear_x_limit == (-0.5, 1.0)
-    assert cfg.command.curriculum_enabled
+    assert cfg.action.mode == "offset"
+    assert cfg.command.linear_x_range == (-0.4, 1.0)
+    assert cfg.command.linear_y_range == (-0.3, 0.3)
+    assert cfg.command.yaw_rate_range == (-0.5, 0.5)
+    assert cfg.command.linear_x_limit == (-0.4, 1.0)
+    assert not cfg.command.curriculum_enabled
     assert cfg.command.resampling_time_range_s == (10.0, 10.0)
-    assert cfg.rewards.termination_penalty == 0.0
-    assert cfg.rewards.track_lin_vel_xy_exp == 2.0
-    assert cfg.rewards.track_ang_vel_z_exp == 1.5
-    assert cfg.rewards.alive == 1.0
-    assert cfg.rewards.base_height_l2 == -10.0
-    assert cfg.rewards.base_height_target == 0.76
-    assert cfg.rewards.feet_air_time == 0.0
-    assert cfg.rewards.feet_phase == 5.0
-    assert cfg.rewards.gait == 0.0
-    assert cfg.rewards.feet_clearance == 0.0
-    assert cfg.rewards.pose == -0.05
-    assert cfg.rewards.close_feet_xy == -1.0
-    assert cfg.rewards.feet_orientation == -5.0
-    assert cfg.rewards.linear_velocity_std == pytest.approx(0.5)
-    assert cfg.rewards.lateral_velocity_std == pytest.approx(0.2)
-    assert cfg.rewards.yaw_rate_std == pytest.approx(0.5)
-    assert cfg.rewards.feet_contact_point_offset == pytest.approx((0.0, 0.0, -0.037))
-    assert cfg.rewards.feet_stance_height == 0.0
-    assert cfg.rewards.action_rate_l2 == -0.05
+    assert isinstance(cfg.rewards, FlatLocomotionRewardCfg)
+    assert cfg.rewards.termination_penalty == -200.0
+    assert cfg.rewards.track_command_exp == 2.0
+    assert cfg.rewards.stand_still_exp == 2.0
+    assert cfg.rewards.inactive_command_axes == -0.3
+    assert cfg.rewards.swing_contact_penalty == -0.25
+    assert cfg.rewards.stance_missing_contact_penalty == -0.25
+    assert cfg.rewards.unexpected_double_support_penalty == -0.25
+    assert cfg.rewards.swing_foot_under_clearance_penalty == -0.25
+    assert cfg.rewards.moving_flight == -0.5
+    assert cfg.rewards.base_height_l2 == -5.0
+    assert cfg.rewards.gait_stance_ratio == pytest.approx(0.55)
+    assert cfg.rewards.feet_air_time == 0.5
+    assert cfg.rewards.linear_velocity_scales == pytest.approx((0.5, 0.3))
+    assert cfg.rewards.yaw_rate_scale == pytest.approx(0.5)
+    assert cfg.rewards.action_rate_l2 == -0.002
+    assert cfg.rewards.ang_vel_xy_l2 == -0.02
+    assert cfg.termination_body_names == [
+        "pelvis", "torso_link", ".*_knee_link", ".*_rubber_hand_link"
+    ]
+    description = cfg.observation.describe(
+        ObservationLayout(joint_dim=23, action_dim=23, key_body_count=0, command_dim=3)
+    )
+    assert description.group_dims == {"command": 7, "robot": 78, "privilege": 88}
     assert cfg.minimum_base_height == 0.2
     assert cfg.minimum_upright_projection == pytest.approx(np.cos(0.8))
     spec = gym.spec("G1FlatLocomotion-v0")

@@ -11,13 +11,13 @@ from isaaclab.sim import SimulationCfg
 from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils.configclass import configclass
 
-from ref2act.envs.locomotion.commands import VelocityCommandCfg
+from ref2act.envs.locomotion.commands import StratifiedVelocityCommandCfg
 from ref2act.envs.locomotion.observation import default_locomotion_observation_spec
-from ref2act.envs.locomotion.rewards import LocomotionRewardCfg
+from ref2act.envs.locomotion.task_rewards import FlatLocomotionRewardCfg
 from ref2act.envs.locomotion.terrain import make_locomotion_terrain_cfg
 from ref2act.envs.motion_tracking.action import ActionSpec
 from ref2act.robots._articulation_shared import G1_CFG
-from ref2act.robots._env_cfg_shared import G1TrainingEventCfg
+from ref2act.robots._env_cfg_shared import G1DomainRandCfg
 from ref2act.robots._g1_spec import G1_23_DOF_SPEC
 
 
@@ -63,15 +63,21 @@ class G1FlatLocomotionEnvCfg(DirectRLEnvCfg):
     action_space = G1_23_DOF_SPEC.action_dim
     state_space = 0
 
-    observation = default_locomotion_observation_spec(add_noise=True)
+    # Actor input is command/phase + robot history supplied by the downstream
+    # PAIR adapter.  Velocity feedback remains available only through history.
+    observation = default_locomotion_observation_spec(
+        add_noise=True,
+        include_gait_phase=True,
+        include_velocity_feedback=False,
+    )
     action = ActionSpec(
-        mode="median",
+        mode="offset",
         buffer_length=1,
         latency_range=None,
         noise_scale=0.025,
     )
-    command = VelocityCommandCfg()
-    rewards = LocomotionRewardCfg()
+    command = StratifiedVelocityCommandCfg()
+    rewards = FlatLocomotionRewardCfg()
 
     # Flat terrain uses the environment origin as ground height. Generated
     # terrains override this with one downward ray per environment so the
@@ -91,15 +97,31 @@ class G1FlatLocomotionEnvCfg(DirectRLEnvCfg):
     terrain_curriculum = False
     terrain_out_of_bounds_distance = None
 
-    # IsaacLab G1FlatEnvCfg reward entity selections, adapted only where the
-    # 23-DoF model uses different joint names (waist/elbows/wrists).
+    # Legacy task-free environments still use these three selections through
+    # LocomotionEnv's compatibility reward path.
     reward_hip_joint_names = [".*_hip_yaw_joint", ".*_hip_roll_joint"]
     reward_arm_joint_names = [
         ".*_shoulder_.*_joint",
         ".*_elbow_joint",
     ]
     reward_torso_joint_names = ["waist_yaw_joint"]
-    termination_body_names = ["torso_link"]
+    reward_leg_joint_names = [
+        ".*_hip_.*_joint",
+        ".*_knee_joint",
+        ".*_ankle_pitch_joint",
+        ".*_ankle_roll_joint",
+    ]
+    reward_ankle_joint_names = [
+        ".*_ankle_pitch_joint",
+        ".*_ankle_roll_joint",
+    ]
+    # Feet are the only legal support surface for nominal locomotion.
+    termination_body_names = [
+        "pelvis",
+        "torso_link",
+        ".*_knee_link",
+        ".*_rubber_hand_link",
+    ]
 
     sim: SimulationCfg = SimulationCfg(
         dt=1 / 200,
@@ -130,7 +152,9 @@ class G1FlatLocomotionEnvCfg(DirectRLEnvCfg):
         env_spacing=4.0,
         replicate_physics=True,
     )
-    events: G1TrainingEventCfg = G1TrainingEventCfg()
+    # Keep startup domain randomization, but do not add interval pushes until
+    # nominal command tracking is established.
+    events: G1DomainRandCfg = G1DomainRandCfg()
     robot: ArticulationCfg = G1_CFG.replace(prim_path="/World/envs/env_.*/Robot")
     robot.spawn.articulation_props.enabled_self_collisions = False
 
