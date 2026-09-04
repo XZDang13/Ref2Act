@@ -156,7 +156,15 @@ class G1FlatLocomotionEnvCfg(DirectRLEnvCfg):
     # nominal command tracking is established.
     events: G1DomainRandCfg = G1DomainRandCfg()
     robot: ArticulationCfg = G1_CFG.replace(prim_path="/World/envs/env_.*/Robot")
-    robot.spawn.articulation_props.enabled_self_collisions = False
+    # Locomotion-only upright reference. Keep the shared motion-tracking G1
+    # defaults intact. Height is measured from this USD pose to the sole point.
+    robot.init_state.joint_pos.update({
+        ".*_hip_pitch_joint": -0.15,
+        ".*_knee_joint": 0.35,
+        ".*_ankle_pitch_joint": -0.20,
+    })
+    robot.init_state.pos = (0.0, 0.0, rewards.base_height_target)
+    robot.spawn.articulation_props.enabled_self_collisions = True
 
     contact_sensor = ContactSensorCfg(
         class_type="ref2act.nested_contact_sensor:NestedContactSensor",

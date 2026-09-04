@@ -46,13 +46,21 @@ def main() -> int:
     try:
         observation, _ = env.reset()
         expected_shapes = {
-            "command": (args.num_envs, 3),
+            "command": (args.num_envs, 7),
             "robot": (args.num_envs, 78),
-            "privilege": (args.num_envs, 84),
+            "privilege": (args.num_envs, 88),
         }
         actual_shapes = {name: tuple(value.shape) for name, value in observation.items()}
         if actual_shapes != expected_shapes:
             raise RuntimeError(f"Unexpected observations: {actual_shapes}")
+        from pxr import PhysxSchema, Usd
+        core = env.unwrapped
+        articulations = [PhysxSchema.PhysxArticulationAPI(prim) for prim in
+                        Usd.PrimRange(core.sim.stage.GetPrimAtPath('/World/envs/env_0/Robot'), Usd.TraverseInstanceProxies())
+                        if prim.HasAPI(PhysxSchema.PhysxArticulationAPI)]
+        assert articulations and all(api.GetEnabledSelfCollisionsAttr().Get() for api in articulations)
+        assert [core.robot.body_names[i] for i in core._knee_body_indices.tolist()] == [
+            "left_knee_link", "right_knee_link"]
 
         for _ in range(args.steps):
             observation, reward, terminated, truncated, _ = env.step(
@@ -61,6 +69,11 @@ def main() -> int:
             tensors = list(observation.values()) + [reward, terminated, truncated]
             if not all(torch.isfinite(value).all().item() for value in tensors):
                 raise RuntimeError("Locomotion smoke produced a non-finite tensor.")
+            terms = core._flat_locomotion_reward_terms()
+            assert "leg_clearance" in terms
+            assert torch.isfinite(terms["leg_clearance"]).all() and (terms["leg_clearance"] <= 0).all()
+            assert "Gait/feet_clearance_violation_fraction" in core.extras["log"]
+            assert "Gait/knees_clearance_violation_fraction" in core.extras["log"]
         print(
             f"locomotion smoke passed: terrain={args.terrain}, "
             f"num_envs={args.num_envs}, steps={args.steps}",

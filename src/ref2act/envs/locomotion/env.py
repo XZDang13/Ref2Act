@@ -27,6 +27,7 @@ from .task_rewards import (
     FlatLocomotionRewardInputs,
     compute_flat_locomotion_reward_terms,
     phase_gait_signals,
+    leg_lateral_separation,
 )
 
 
@@ -160,6 +161,12 @@ class LocomotionEnv(LeggedRobotEnv):
         self._foot_body_indices = torch.tensor(
             foot_body_ids, dtype=torch.long, device=self.device
         )
+        if isinstance(self.cfg.rewards, FlatLocomotionRewardCfg):
+            knee_names = ["left_knee_link", "right_knee_link"]
+            knee_body_ids, found_names = self.robot.find_bodies(knee_names, preserve_order=True)
+            if list(found_names) != knee_names:
+                raise RuntimeError(f"Leg clearance requires ordered left/right knees; got {found_names}.")
+            self._knee_body_indices = torch.tensor(knee_body_ids, dtype=torch.long, device=self.device)
         all_contact_ids, _ = self.contact_sensor.find_bodies(".*", preserve_order=True)
         foot_sensor_id_set = set(foot_sensor_ids)
         non_foot_ids = [index for index in all_contact_ids if index not in foot_sensor_id_set]
@@ -312,6 +319,9 @@ class LocomotionEnv(LeggedRobotEnv):
         log["Gait/hand_support_fraction"] = support_fraction(
             self._diagnostic_hand_contact_indices
         ).detach()
+        # Flat v4 keeps support diagnostics but has no air-time reward.
+        if isinstance(self.cfg.rewards, FlatLocomotionRewardCfg):
+            return torch.zeros(self.num_envs, device=self.device)
         return compute_feet_air_time_positive_biped_reward(
             current_air_time,
             current_contact_time,
@@ -435,7 +445,17 @@ class LocomotionEnv(LeggedRobotEnv):
                 "Locomotion pose_weights must match the policy joint order: "
                 f"expected {self.robot_spec.action_dim}, got {weights.numel()}."
             )
-        return torch.sum((joint_pos - default_joint_pos).square() * weights, dim=-1)
+        # Legacy/task-free reward configs have no deadband; preserve their
+        # original squared pose error. Flat v6 uses per-joint tolerances.
+        tolerances = torch.as_tensor(
+            getattr(self.cfg.rewards, "pose_tolerances", (0.0,) * self.robot_spec.action_dim),
+            device=self.device,
+            dtype=joint_pos.dtype,
+        )
+        if tolerances.shape != weights.shape:
+            raise ValueError("Locomotion pose_tolerances must match the policy joint order.")
+        excess = ((joint_pos - default_joint_pos).abs() - tolerances).clamp(min=0.0)
+        return torch.sum(excess.square() * weights, dim=-1)
 
     def _close_feet_xy_penalty(self) -> torch.Tensor:
         foot_position_w = to_torch(self.robot.data.body_link_pos_w)[
@@ -620,6 +640,11 @@ class LocomotionEnv(LeggedRobotEnv):
             gait_phase=self._gait_phase(),
             feet_height=feet_height,
             feet_contact=current_contact_time > 0.0,
+            leg_lateral_separation=leg_lateral_separation(
+                foot_position_w,
+                to_torch(self.robot.data.body_link_pos_w)[:, self._knee_body_indices],
+                anchor_quat_w,
+            ),
             joint_acc=to_torch(self.robot.data.joint_acc)[
                 :, self._reward_leg_joint_indices
             ],
@@ -629,10 +654,11 @@ class LocomotionEnv(LeggedRobotEnv):
             action=self._policy_action,
             previous_action=self._previous_policy_action,
             terminated=terminated,
-            feet_air_time=self._feet_air_time_positive_biped_reward(),
+            pose=self._pose_penalty(),
             feet_slide=self._feet_slide_penalty(),
             dof_pos_limits=(below + above).sum(-1),
         )
+        self._feet_air_time_positive_biped_reward()  # Support diagnostics only.
         gait = phase_gait_signals(inputs, self.cfg.rewards)
         moving = (
             inputs.commands.abs()
@@ -644,6 +670,12 @@ class LocomotionEnv(LeggedRobotEnv):
             return (value * moving).sum() / moving_count
 
         log = self.extras.setdefault("log", {})
+        for index, name in enumerate(("feet", "knees")):
+            width = inputs.leg_lateral_separation[:, index]
+            minimum = self.cfg.rewards.leg_min_lateral_separation[index]
+            log[f"Gait/{name}_signed_width_mean_m"] = width.mean().detach()
+            log[f"Gait/{name}_clearance_violation_fraction"] = (width < minimum).float().mean().detach()
+            log[f"Gait/{name}_crossing_fraction"] = (width < 0.0).float().mean().detach()
         log["Gait/phase_contact_match_fraction"] = moving_mean(
             gait["phase_contact_match"]
         ).detach()
@@ -656,8 +688,8 @@ class LocomotionEnv(LeggedRobotEnv):
         log["Gait/unexpected_double_support_fraction"] = moving_mean(
             gait["unexpected_double_support_penalty"]
         ).detach()
-        log["Gait/swing_under_clearance_mean"] = moving_mean(
-            gait["swing_foot_under_clearance_penalty"]
+        log["Gait/swing_height_error_mean"] = moving_mean(
+            gait["swing_foot_height_l2"]
         ).detach()
         log["Gait/target_single_stance_fraction"] = (
             gait["target_single_stance"].sum() / moving_count
