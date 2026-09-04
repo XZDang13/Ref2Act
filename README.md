@@ -1,6 +1,6 @@
 # Ref2Act
 
-Ref2Act provides custom legged-robot reinforcement-learning environments for Isaac Lab 3.0. It currently supports G1 23-DoF motion tracking and blind flat-ground velocity locomotion. Motion retargeting is intentionally outside this repository; training and sim2sim consume the current Retargeter output directly.
+Ref2Act provides custom legged-robot reinforcement-learning environments for Isaac Lab 3.0. It currently supports G1 23-DoF motion tracking, blind velocity locomotion, and fixed-reset stand-up. Motion retargeting is intentionally outside this repository; training and sim2sim consume the current Retargeter output directly.
 
 ## Runtime contract
 
@@ -58,8 +58,24 @@ cfg.expert_motion_file = [
 - `G1SlopeLocomotion-v0`: continuous uphill/downhill slope curriculum.
 - `G1UnevenLocomotion-v0`: smooth band-limited uneven-ground curriculum.
 - `G1MixedTerrainLocomotion-v0`: 40% flat, 30% slope, and 30% uneven terrain.
+- `G1FlatStandUp-v0`: fixed-supine G1 stand-up on a plane.
 
 The locomotion policy observation is split into `command=3` and `robot=78`. The 78-dimensional robot group is shared exactly with motion tracking; base linear velocity remains critic-only.
+
+The stand-up environment returns `policy=78` and `critic=87`. Its policy group
+is one current PAIR-compatible frame: orientation-6D, body angular velocity,
+joint position/velocity, and the clamped absolute joint target. The critic adds
+current body linear velocity, root/shoulder height, foot/non-foot support, and
+episode progress. Ref2Act owns the 90% fixed-lying/10% nominal-standing training
+reset mixture, four-second recovery
+horizon, success hold logic, and reward semantics. Its V5 reward couples root,
+shoulder, and upright progress during discovery. Final stand quality is available
+only without assistance, with both feet carrying vertical load and no other-body
+support; contacts have no standalone reward or penalty. Training assistance is
+a per-episode world-up force at the pelvis COM. It is independent of robot state,
+holds for 1.5 seconds, and fades smoothly to zero by 2.5 seconds. Downstream
+trainers may stack policy history and anneal the force envelope without changing
+the native task.
 
 ```python
 import gymnasium as gym
