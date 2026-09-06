@@ -26,8 +26,8 @@ from .task_rewards import (
     FlatLocomotionRewardCfg,
     FlatLocomotionRewardInputs,
     compute_flat_locomotion_reward_terms,
-    phase_gait_signals,
-    leg_lateral_separation,
+    compute_both_feet_air,
+    standing_commands,
 )
 
 
@@ -161,12 +161,6 @@ class LocomotionEnv(LeggedRobotEnv):
         self._foot_body_indices = torch.tensor(
             foot_body_ids, dtype=torch.long, device=self.device
         )
-        if isinstance(self.cfg.rewards, FlatLocomotionRewardCfg):
-            knee_names = ["left_knee_link", "right_knee_link"]
-            knee_body_ids, found_names = self.robot.find_bodies(knee_names, preserve_order=True)
-            if list(found_names) != knee_names:
-                raise RuntimeError(f"Leg clearance requires ordered left/right knees; got {found_names}.")
-            self._knee_body_indices = torch.tensor(knee_body_ids, dtype=torch.long, device=self.device)
         all_contact_ids, _ = self.contact_sensor.find_bodies(".*", preserve_order=True)
         foot_sensor_id_set = set(foot_sensor_ids)
         non_foot_ids = [index for index in all_contact_ids if index not in foot_sensor_id_set]
@@ -188,6 +182,8 @@ class LocomotionEnv(LeggedRobotEnv):
         self._reward_torso_joint_indices = joint_indices("reward_torso_joint_names")
         self._reward_leg_joint_indices = joint_indices("reward_leg_joint_names")
         self._reward_ankle_joint_indices = joint_indices("reward_ankle_joint_names")
+        if isinstance(self.cfg.rewards, FlatLocomotionRewardCfg):
+            self._reward_effort_joint_indices = joint_indices("reward_effort_joint_names")
 
         termination_ids, termination_names = self.contact_sensor.find_bodies(
             self.cfg.termination_body_names, preserve_order=True
@@ -255,7 +251,7 @@ class LocomotionEnv(LeggedRobotEnv):
         )
 
     def _gait_phase(self) -> torch.Tensor:
-        return compute_locomotion_gait_phase(
+        phase = compute_locomotion_gait_phase(
             self.episode_length_buf,
             self._gait_phase_offset,
             self.command_generator.commands,
@@ -264,6 +260,13 @@ class LocomotionEnv(LeggedRobotEnv):
             offsets=tuple(self.cfg.rewards.gait_offsets),
             stand_phase=float(self.cfg.rewards.gait_stand_phase),
         )
+
+        if isinstance(self.cfg.rewards, FlatLocomotionRewardCfg):
+            phase = torch.where(
+                standing_commands(self.command_generator.commands).unsqueeze(-1),
+                float(self.cfg.rewards.gait_stand_phase), phase,
+            )
+        return phase
 
     def _gait_phase_features(self) -> torch.Tensor:
         return compute_locomotion_phase_features(self._gait_phase())
@@ -319,9 +322,6 @@ class LocomotionEnv(LeggedRobotEnv):
         log["Gait/hand_support_fraction"] = support_fraction(
             self._diagnostic_hand_contact_indices
         ).detach()
-        # Flat v4 keeps support diagnostics but has no air-time reward.
-        if isinstance(self.cfg.rewards, FlatLocomotionRewardCfg):
-            return torch.zeros(self.num_envs, device=self.device)
         return compute_feet_air_time_positive_biped_reward(
             current_air_time,
             current_contact_time,
@@ -337,7 +337,12 @@ class LocomotionEnv(LeggedRobotEnv):
             ).amax(dim=1)
             > 1.0
         )
-        foot_velocity_xy = to_torch(self.robot.data.body_link_lin_vel_w)[
+        velocity = (
+            self.robot.data.body_lin_vel_w
+            if isinstance(self.cfg.rewards, FlatLocomotionRewardCfg)
+            else self.robot.data.body_link_lin_vel_w
+        )
+        foot_velocity_xy = to_torch(velocity)[
             :, self._foot_body_indices, :2
         ]
         return torch.sum(
@@ -445,17 +450,7 @@ class LocomotionEnv(LeggedRobotEnv):
                 "Locomotion pose_weights must match the policy joint order: "
                 f"expected {self.robot_spec.action_dim}, got {weights.numel()}."
             )
-        # Legacy/task-free reward configs have no deadband; preserve their
-        # original squared pose error. Flat v6 uses per-joint tolerances.
-        tolerances = torch.as_tensor(
-            getattr(self.cfg.rewards, "pose_tolerances", (0.0,) * self.robot_spec.action_dim),
-            device=self.device,
-            dtype=joint_pos.dtype,
-        )
-        if tolerances.shape != weights.shape:
-            raise ValueError("Locomotion pose_tolerances must match the policy joint order.")
-        excess = ((joint_pos - default_joint_pos).abs() - tolerances).clamp(min=0.0)
-        return torch.sum(excess.square() * weights, dim=-1)
+        return torch.sum((joint_pos - default_joint_pos).square() * weights, dim=-1)
 
     def _close_feet_xy_penalty(self) -> torch.Tensor:
         foot_position_w = to_torch(self.robot.data.body_link_pos_w)[
@@ -508,9 +503,12 @@ class LocomotionEnv(LeggedRobotEnv):
         ground_height_w = self._terrain_ground_height_at(base_position_w[:, :2])
         return base_position_w[:, 2] - ground_height_w
 
-    def _joint_position_limit_penalty(self) -> torch.Tensor:
+    def _joint_position_limit_penalty(self, indices: torch.Tensor | None = None) -> torch.Tensor:
         joint_pos = to_torch(self.robot.data.joint_pos)
         limits = to_torch(self.robot.data.soft_joint_pos_limits)
+        if indices is not None:
+            joint_pos = joint_pos[:, indices]
+            limits = limits[:, indices]
         below = -(joint_pos - limits[:, :, 0]).clamp(max=0.0)
         above = (joint_pos - limits[:, :, 1]).clamp(min=0.0)
         return torch.sum(below + above, dim=-1)
@@ -602,101 +600,34 @@ class LocomotionEnv(LeggedRobotEnv):
         )
 
     def _flat_locomotion_reward_terms(self) -> dict[str, torch.Tensor]:
-        """Evaluate the clean phase-conditioned flat-locomotion task."""
-
-        anchor_quat_w = to_torch(self.robot.data.body_link_quat_w)[
-            :, self.anchor_body_index
-        ]
-        anchor_lin_vel_w = to_torch(self.robot.data.body_link_lin_vel_w)[
-            :, self.anchor_body_index
-        ]
+        """Evaluate the jloganolson G1-23DoF rewards on Ref2Act's mapped joints."""
+        anchor_quat_w = to_torch(self.robot.data.body_link_quat_w)[:, self.anchor_body_index]
+        anchor_lin_vel_w = to_torch(self.robot.data.body_link_lin_vel_w)[:, self.anchor_body_index]
         base_lin_vel_b, base_ang_vel_b, projected_gravity_b = self._anchor_state_b()
-        joint_pos = to_torch(self.robot.data.joint_pos)[:, self._reward_ankle_joint_indices]
-        limits = to_torch(self.robot.data.soft_joint_pos_limits)[
-            :, self._reward_ankle_joint_indices
-        ]
-        below = (limits[:, :, 0] - joint_pos).clamp(min=0.0)
-        above = (joint_pos - limits[:, :, 1]).clamp(min=0.0)
-        foot_position_w = self._foot_contact_point_position_w()
-        ground_height = self._terrain_ground_height_at(foot_position_w[..., :2])
-        feet_height = foot_position_w[..., 2] - ground_height
-        current_contact_time = to_torch(self.contact_sensor.data.current_contact_time)[
-            :, self._foot_contact_sensor_indices
-        ]
-        terminated = getattr(self, "reset_terminated", None)
-        if terminated is None:
-            terminated = torch.zeros(
-                self.num_envs, device=self.device, dtype=torch.bool
-            )
         inputs = FlatLocomotionRewardInputs(
             commands=self.command_generator.commands,
             base_linear_velocity_b=base_lin_vel_b,
             base_angular_velocity_b=base_ang_vel_b,
-            base_linear_velocity_yaw_frame=quat_apply_inverse(
-                yaw_quat(anchor_quat_w), anchor_lin_vel_w
-            ),
+            base_angular_velocity_w=to_torch(self.robot.data.body_link_ang_vel_w)[:, self.anchor_body_index],
+            base_linear_velocity_yaw_frame=quat_apply_inverse(yaw_quat(anchor_quat_w), anchor_lin_vel_w),
             projected_gravity_b=projected_gravity_b,
-            base_height=self._terrain_relative_base_height(),
-            gait_phase=self._gait_phase(),
-            feet_height=feet_height,
-            feet_contact=current_contact_time > 0.0,
-            leg_lateral_separation=leg_lateral_separation(
-                foot_position_w,
-                to_torch(self.robot.data.body_link_pos_w)[:, self._knee_body_indices],
-                anchor_quat_w,
-            ),
-            joint_acc=to_torch(self.robot.data.joint_acc)[
-                :, self._reward_leg_joint_indices
-            ],
-            applied_torque=to_torch(self.robot.data.applied_torque)[
-                :, self._reward_leg_joint_indices
-            ],
             action=self._policy_action,
             previous_action=self._previous_policy_action,
-            terminated=terminated,
-            pose=self._pose_penalty(),
+            terminated=self.reset_terminated,
+            applied_torque=to_torch(self.robot.data.applied_torque)[:, self._reward_effort_joint_indices],
+            joint_acc=to_torch(self.robot.data.joint_acc)[:, self._reward_effort_joint_indices],
+            feet_air_time=self._feet_air_time_positive_biped_reward(),
+            feet_current_air_time=to_torch(self.contact_sensor.data.current_air_time)[:, self._foot_contact_sensor_indices],
             feet_slide=self._feet_slide_penalty(),
-            dof_pos_limits=(below + above).sum(-1),
+            dof_pos_limits=self._joint_position_limit_penalty(self._reward_ankle_joint_indices),
+            joint_deviation_hip=self._joint_deviation_l1(self._reward_hip_joint_indices),
+            joint_deviation_arms=self._joint_deviation_l1(self._reward_arm_joint_indices),
+            joint_deviation_torso=self._joint_deviation_l1(self._reward_torso_joint_indices),
         )
-        self._feet_air_time_positive_biped_reward()  # Support diagnostics only.
-        gait = phase_gait_signals(inputs, self.cfg.rewards)
-        moving = (
-            inputs.commands.abs()
-            > float(self.cfg.rewards.command_activity_threshold)
-        ).any(dim=-1)
-        moving_count = moving.sum().clamp(min=1).to(inputs.commands.dtype)
-
-        def moving_mean(value: torch.Tensor) -> torch.Tensor:
-            return (value * moving).sum() / moving_count
-
         log = self.extras.setdefault("log", {})
-        for index, name in enumerate(("feet", "knees")):
-            width = inputs.leg_lateral_separation[:, index]
-            minimum = self.cfg.rewards.leg_min_lateral_separation[index]
-            log[f"Gait/{name}_signed_width_mean_m"] = width.mean().detach()
-            log[f"Gait/{name}_clearance_violation_fraction"] = (width < minimum).float().mean().detach()
-            log[f"Gait/{name}_crossing_fraction"] = (width < 0.0).float().mean().detach()
-        log["Gait/phase_contact_match_fraction"] = moving_mean(
-            gait["phase_contact_match"]
-        ).detach()
-        log["Gait/swing_contact_violation_fraction"] = moving_mean(
-            gait["swing_contact_penalty"]
-        ).detach()
-        log["Gait/stance_missing_contact_fraction"] = moving_mean(
-            gait["stance_missing_contact_penalty"]
-        ).detach()
-        log["Gait/unexpected_double_support_fraction"] = moving_mean(
-            gait["unexpected_double_support_penalty"]
-        ).detach()
-        log["Gait/swing_height_error_mean"] = moving_mean(
-            gait["swing_foot_height_l2"]
-        ).detach()
-        log["Gait/target_single_stance_fraction"] = (
-            gait["target_single_stance"].sum() / moving_count
-        ).detach()
-        log["Gait/target_double_support_fraction"] = (
-            gait["target_double_support"].sum() / moving_count
-        ).detach()
+        log["Gait/both_feet_air_fraction"] = compute_both_feet_air(inputs.feet_current_air_time).mean().detach()
+        log["Gait/feet_slide_m_per_s"] = inputs.feet_slide.mean().detach()
+        log["Action/raw_rate_l2"] = (inputs.action - inputs.previous_action).square().sum(-1).mean().detach()
         return compute_flat_locomotion_reward_terms(inputs, self.cfg.rewards)
 
     def _update_command_curriculum(self, terms: dict[str, torch.Tensor]) -> None:
@@ -744,7 +675,7 @@ class LocomotionEnv(LeggedRobotEnv):
             log[f"Reward/{name}"] = value.mean().detach()
 
         # Keep the three commanded axes visible independently.  The reward has
-        # intentionally different longitudinal/lateral bandwidths, so the
+        # configurable longitudinal/lateral bandwidths, so the
         # combined XY term alone cannot reveal a policy that only tracks x.
         anchor_quat_w = to_torch(self.robot.data.body_link_quat_w)[
             :, self.anchor_body_index

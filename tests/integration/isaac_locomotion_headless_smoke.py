@@ -59,9 +59,12 @@ def main() -> int:
                         Usd.PrimRange(core.sim.stage.GetPrimAtPath('/World/envs/env_0/Robot'), Usd.TraverseInstanceProxies())
                         if prim.HasAPI(PhysxSchema.PhysxArticulationAPI)]
         assert articulations and all(api.GetEnabledSelfCollisionsAttr().Get() for api in articulations)
-        assert [core.robot.body_names[i] for i in core._knee_body_indices.tolist()] == [
-            "left_knee_link", "right_knee_link"]
 
+        assert len(core._reward_effort_joint_indices) == 12
+        assert len(core._reward_ankle_joint_indices) == 4
+        assert len(core._reward_hip_joint_indices) == 4
+        assert len(core._reward_arm_joint_indices) == 10
+        assert len(core._reward_torso_joint_indices) == 1
         for _ in range(args.steps):
             observation, reward, terminated, truncated, _ = env.step(
                 torch.zeros((args.num_envs, 23), device=env.unwrapped.device)
@@ -70,10 +73,18 @@ def main() -> int:
             if not all(torch.isfinite(value).all().item() for value in tensors):
                 raise RuntimeError("Locomotion smoke produced a non-finite tensor.")
             terms = core._flat_locomotion_reward_terms()
-            assert "leg_clearance" in terms
-            assert torch.isfinite(terms["leg_clearance"]).all() and (terms["leg_clearance"] <= 0).all()
-            assert "Gait/feet_clearance_violation_fraction" in core.extras["log"]
-            assert "Gait/knees_clearance_violation_fraction" in core.extras["log"]
+            from ref2act.envs.locomotion.task_rewards import LOCOMOTION_TASK_REWARD_WEIGHTS
+            assert set(terms) == set(LOCOMOTION_TASK_REWARD_WEIGHTS)
+            assert all(torch.isfinite(value).all() for value in terms.values())
+            assert (terms["feet_air_time"] >= 0).all() and (terms["feet_air_time"] <= 0.600001).all()
+            assert (terms["action_rate_l2"] <= 0).all()
+            from ref2act.isaac_compat import to_torch
+            air = to_torch(core.contact_sensor.data.current_air_time)[:, core._foot_contact_sensor_indices]
+            expected_flight = ((air > 0).sum(-1) == 2).float()
+            torch.testing.assert_close(terms["both_feet_air"], -0.5 * expected_flight)
+            assert "Gait/both_feet_air_fraction" in core.extras["log"]
+            assert "Gait/single_stance_fraction" in core.extras["log"]
+            assert "Curriculum/reward_penalty_scale" not in core.extras["log"]
         print(
             f"locomotion smoke passed: terrain={args.terrain}, "
             f"num_envs={args.num_envs}, steps={args.steps}",
