@@ -883,3 +883,48 @@ def test_locomotion_terrain_modes_and_registrations() -> None:
         assert not cfg.terrain_curriculum
         assert cfg.terrain_out_of_bounds_distance is None
         assert gym.spec(env_id).entry_point == "ref2act.envs.locomotion.env:LocomotionEnv"
+
+
+def test_locomotion_reset_pose_randomizes_selected_envs_and_preserves_defaults() -> None:
+    from ref2act.common.math import quat_from_euler_xyz, quat_mul
+
+    count = 1024
+    cfg = G1FlatLocomotionEnvCfg()
+    assert cfg.reset_pose_range == {"x": (-0.5, 0.5), "y": (-0.5, 0.5), "yaw": (-3.14, 3.14)}
+    defaults = torch.zeros(count, 13)
+    defaults[:, 2] = 0.7841
+    defaults[:, 6] = 1.0
+    origins = torch.zeros(count, 3)
+    origins[:, 0] = torch.arange(count) * 4.0
+    writes = []
+    core = SimpleNamespace(
+        cfg=cfg,
+        robot=SimpleNamespace(data=SimpleNamespace(default_root_state=defaults),
+                              write_root_link_pose_to_sim_index=lambda **kw: writes.append(kw)),
+        scene=SimpleNamespace(env_origins=origins),
+    )
+    env_ids = torch.arange(1, count, 2)
+    torch.manual_seed(107)
+    LocomotionEnv._randomize_reset_pose(core, env_ids)
+    pose = writes[-1]["root_pose"]
+    torch.testing.assert_close(writes[-1]["env_ids"], env_ids)
+    offsets = pose[:, :2] - origins[env_ids, :2]
+    assert (offsets.abs() <= 0.5001).all()
+    assert (offsets.amin(0) < -0.4).all() and (offsets.amax(0) > 0.4).all()
+    yaw = 2.0 * torch.atan2(pose[:, 5], pose[:, 6])
+    assert (yaw.abs() <= 3.14).all() and yaw.min() < -2.8 and yaw.max() > 2.8
+    torch.testing.assert_close(pose[:, 2], defaults[env_ids, 2])
+    torch.testing.assert_close(pose[:, 3:5], torch.zeros_like(pose[:, 3:5]))
+    torch.testing.assert_close(pose[:, 3:7].norm(dim=-1), torch.ones(len(env_ids)))
+    assert (defaults[:, :2] == 0).all() and (defaults[:, 6] == 1).all()
+
+    first = pose.clone()
+    LocomotionEnv._randomize_reset_pose(core, env_ids)
+    assert not torch.equal(first, writes[-1]["root_pose"])
+    # Fixed global yaw also composes correctly with a tilted default pose.
+    nominal = quat_from_euler_xyz(torch.full((count,), 0.2), torch.full((count,), -0.1), torch.zeros(count))
+    defaults[:, 3:7] = nominal
+    cfg.reset_pose_range = {"yaw": (0.5, 0.5)}
+    LocomotionEnv._randomize_reset_pose(core, env_ids)
+    delta = quat_from_euler_xyz(torch.zeros(len(env_ids)), torch.zeros(len(env_ids)), torch.full((len(env_ids),), 0.5))
+    torch.testing.assert_close(writes[-1]["root_pose"][:, 3:7], quat_mul(delta, nominal[env_ids]))

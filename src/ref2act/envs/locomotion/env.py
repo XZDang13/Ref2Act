@@ -4,7 +4,7 @@ import math
 
 import torch
 
-from ref2act.common.math import quat_apply, quat_apply_inverse, yaw_quat
+from ref2act.common.math import quat_apply, quat_apply_inverse, quat_from_euler_xyz, quat_mul, yaw_quat
 from ref2act.common.observation_spec import ObservationLayout
 from ref2act.envs.base import LeggedRobotEnv
 from ref2act.isaac_compat import to_torch
@@ -835,6 +835,23 @@ class LocomotionEnv(LeggedRobotEnv):
         move_down = self.reset_terminated[env_ids] & valid_episode
         self.terrain.update_env_origins(env_ids, move_up=move_up, move_down=move_down)
 
+    def _randomize_reset_pose(self, env_ids: torch.Tensor) -> None:
+        """Randomize locomotion spawn pose before command/observation reset."""
+        pose_range = getattr(self.cfg, "reset_pose_range", {})
+        if not pose_range or env_ids.numel() == 0:
+            return
+        root_pose = to_torch(self.robot.data.default_root_state)[env_ids, :7].clone()
+        root_pose[:, :3] += to_torch(self.scene.env_origins)[env_ids]
+        for axis, name in enumerate(("x", "y")):
+            low, high = pose_range.get(name, (0.0, 0.0))
+            root_pose[:, axis] += torch.empty_like(root_pose[:, axis]).uniform_(low, high)
+        low, high = pose_range.get("yaw", (0.0, 0.0))
+        yaw = torch.empty_like(root_pose[:, 0]).uniform_(low, high)
+        zero = torch.zeros_like(yaw)
+        # Global yaw preserves the nominal roll/pitch of the default pose.
+        root_pose[:, 3:7] = quat_mul(quat_from_euler_xyz(zero, zero, yaw), root_pose[:, 3:7])
+        self.robot.write_root_link_pose_to_sim_index(root_pose=root_pose, env_ids=env_ids)
+
     def _reset_idx(self, env_ids: torch.Tensor | None) -> None:
         normalized_env_ids = self._normalize_env_ids(env_ids)
         self._update_terrain_curriculum(normalized_env_ids)
@@ -842,6 +859,7 @@ class LocomotionEnv(LeggedRobotEnv):
             normalized_env_ids,
             joint_position_noise=float(self.cfg.joint_position_reset_noise),
         )
+        self._randomize_reset_pose(env_ids)
         self.command_generator.reset(env_ids)
         if hasattr(self, "_policy_action"):
             self._policy_action[env_ids] = 0.0

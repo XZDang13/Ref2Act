@@ -86,6 +86,12 @@ class G1FlatLocomotionEnvCfg(DirectRLEnvCfg):
     base_height_sensor: RayCasterCfg | None = None
 
     joint_position_reset_noise = 0.05
+    # World-frame spawn offsets and heading; velocity reset stays at default.
+    reset_pose_range = {
+        "x": (-0.5, 0.5),
+        "y": (-0.5, 0.5),
+        "yaw": (-3.14, 3.14),
+    }
     minimum_base_height = 0.20
     minimum_upright_projection = math.cos(0.8)
     illegal_contact_force_threshold = 1.0
