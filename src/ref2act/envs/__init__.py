@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-__all__ = ["LeggedRobotEnv", "LocomotionEnv", "MotionTrackingEnv", "StandUpEnv"]
+__all__ = ["LeggedRobotEnv", "LocomotionEnv", "MotionTrackingEnv"]
 
 
 def __getattr__(name: str):
@@ -16,8 +16,4 @@ def __getattr__(name: str):
         from .locomotion.env import LocomotionEnv
 
         return LocomotionEnv
-    if name == "StandUpEnv":
-        from .stand_up.env import StandUpEnv
-
-        return StandUpEnv
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

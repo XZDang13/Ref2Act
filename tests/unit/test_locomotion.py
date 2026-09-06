@@ -40,8 +40,9 @@ from ref2act.envs.locomotion.task_rewards import (
     FlatLocomotionRewardInputs,
     compute_flat_locomotion_reward_terms,
     command_tracking,
-    compute_both_feet_air,
-    LOCOMOTION_TASK_REWARD_WEIGHTS,
+    leg_lateral_separation,
+    leg_clearance_penalty,
+    phase_gait_targets,
 )
 from ref2act.envs.locomotion.terrain import (
     Ref2ActSlopeTerrainCfg,
@@ -153,120 +154,324 @@ def test_stratified_commands_have_explicit_modes_and_no_tiny_motion() -> None:
     )
 
 
-def _flat_inputs(batch: int = 3) -> FlatLocomotionRewardInputs:
-    return FlatLocomotionRewardInputs(
-        commands=torch.zeros(batch, 3),
-        base_linear_velocity_b=torch.zeros(batch, 3),
-        base_angular_velocity_b=torch.zeros(batch, 3),
-        base_angular_velocity_w=torch.zeros(batch, 3),
-        base_linear_velocity_yaw_frame=torch.zeros(batch, 3),
+def test_leg_clearance_cost_is_one_sided_signed_and_differentiable() -> None:
+    cfg = FlatLocomotionRewardCfg()
+    minimum = torch.tensor(cfg.leg_min_lateral_separation)
+    separation = torch.stack([minimum * 3, minimum, minimum * 0.5, minimum * 0, -minimum])
+    separation.requires_grad_()
+    cost = leg_clearance_penalty(separation, cfg.leg_min_lateral_separation)
+    torch.testing.assert_close(cost, torch.tensor([0.0, 0.0, 0.5, 2.0, 8.0]))
+    cost.sum().backward()
+    assert torch.isfinite(separation.grad).all()
+    assert torch.all(separation.grad[2:] < 0)
+    torch.testing.assert_close(separation.grad[:2], torch.zeros(2, 2))
+    for invalid in ((0.0, 0.09), (-0.1, 0.09), (float("nan"), 0.09), (0.1,)):
+        with pytest.raises(ValueError, match="leg_min_lateral_separation"):
+            FlatLocomotionRewardCfg(leg_min_lateral_separation=invalid)
+
+
+def test_leg_lateral_separation_is_yaw_translation_and_mirror_invariant() -> None:
+    from ref2act.common.math import quat_apply
+
+    feet = torch.tensor([[[0.3, 0.12, 0.1], [-0.2, -0.10, 0.0]]])
+    knees = torch.tensor([[[-0.1, 0.13, 0.3], [0.2, -0.11, 0.4]]])
+    identity = torch.tensor([[0.0, 0.0, 0.0, 1.0]])  # Ref2Act / IsaacLab 3: xyzw
+    expected = torch.tensor([[0.22, 0.24]])
+    torch.testing.assert_close(leg_lateral_separation(feet, knees, identity), expected)
+    yaw = torch.tensor([[0.0, 0.0, np.sin(0.7), np.cos(0.7)]], dtype=torch.float32)
+    rotated = [quat_apply(yaw.expand(2, -1), p[0]).unsqueeze(0) + 5.0 for p in (feet, knees)]
+    torch.testing.assert_close(leg_lateral_separation(*rotated, yaw), expected)
+    mirrored = [p.flip(1) * torch.tensor([1.0, -1.0, 1.0]) for p in (feet, knees)]
+    torch.testing.assert_close(leg_lateral_separation(*mirrored, identity), expected)
+    shifted = [p + torch.tensor([[[1.0, 0.0, -0.3], [-1.0, 0.0, 0.2]]]) for p in (feet, knees)]
+    torch.testing.assert_close(leg_lateral_separation(*shifted, identity), expected)
+    # Fully crossing must retain the negative sign, not become a safe width.
+    torch.testing.assert_close(leg_lateral_separation(feet.flip(1), knees.flip(1), identity), -expected)
+
+
+def test_flat_tracking_reward_is_positive_and_category_normalized() -> None:
+    batch = 4
+    command = torch.tensor(
+        [
+            [0.6, 0.0, 0.0],
+            [0.0, 0.3, 0.0],
+            [0.0, 0.0, 0.5],
+            [0.6, 0.3, 0.5],
+        ]
+    )
+    zeros3 = torch.zeros(batch, 3)
+    common = dict(
+        commands=command,
+        base_linear_velocity_b=zeros3,
+        base_angular_velocity_b=zeros3,
         projected_gravity_b=torch.tensor([[0.0, 0.0, -1.0]]).repeat(batch, 1),
-        action=torch.zeros(batch, 23), previous_action=torch.zeros(batch, 23),
+        base_height=torch.full((batch,), FlatLocomotionRewardCfg().base_height_target),
+        gait_phase=torch.full((batch, 2), torch.pi),
+        feet_height=torch.zeros(batch, 2),
+        feet_contact=torch.ones(batch, 2, dtype=torch.bool),
+        leg_lateral_separation=torch.full((batch, 2), 0.237),
+        joint_acc=torch.zeros(batch, 12),
+        applied_torque=torch.zeros(batch, 12),
+        action=torch.zeros(batch, 23),
+        previous_action=torch.zeros(batch, 23),
         terminated=torch.zeros(batch, dtype=torch.bool),
-        applied_torque=torch.zeros(batch, 12), joint_acc=torch.zeros(batch, 12),
-        feet_air_time=torch.zeros(batch), feet_slide=torch.zeros(batch),
-        feet_current_air_time=torch.zeros(batch, 2),
-        dof_pos_limits=torch.zeros(batch), joint_deviation_hip=torch.zeros(batch),
-        joint_deviation_arms=torch.zeros(batch), joint_deviation_torso=torch.zeros(batch),
+        pose=torch.zeros(batch),
+        feet_slide=torch.zeros(batch),
+        dof_pos_limits=torch.zeros(batch),
+    )
+    stationary = compute_flat_locomotion_reward_terms(
+        FlatLocomotionRewardInputs(
+            **common,
+            base_linear_velocity_yaw_frame=zeros3,
+        ),
+        FlatLocomotionRewardCfg(),
+    )
+    matching = compute_flat_locomotion_reward_terms(
+        FlatLocomotionRewardInputs(
+            **{
+                **common,
+                "base_linear_velocity_yaw_frame": torch.tensor(
+                    [
+                        [0.6, 0.0, 0.0],
+                        [0.0, 0.3, 0.0],
+                        [0.0, 0.0, 0.0],
+                        [0.6, 0.3, 0.0],
+                    ]
+                ),
+                "base_angular_velocity_b": torch.tensor(
+                    [
+                        [0.0, 0.0, 0.0],
+                        [0.0, 0.0, 0.0],
+                        [0.0, 0.0, 0.5],
+                        [0.0, 0.0, 0.5],
+                    ]
+                ),
+            }
+        ),
+        FlatLocomotionRewardCfg(),
+    )
+    stationary_score = stationary["track_lin_vel_xy_exp"] + stationary["track_ang_vel_z_exp"]
+    matching_score = matching["track_lin_vel_xy_exp"] + matching["track_ang_vel_z_exp"]
+    assert torch.all(stationary_score > 0.0)
+    assert torch.all(matching_score > stationary_score)
+    torch.testing.assert_close(
+        matching_score, torch.full((batch,), 2.0),
     )
 
 
-def test_flat_tracking_uses_world_yaw_and_penalizes_sideways_drift() -> None:
+def test_flat_tracking_includes_stand_and_zero_command_axes() -> None:
+    batch = 2
+    zeros3 = torch.zeros(batch, 3)
+    common = dict(
+        commands=torch.tensor([[0.0, 0.0, 0.0], [0.6, 0.0, 0.0]]),
+        base_linear_velocity_b=zeros3,
+        base_angular_velocity_b=zeros3,
+        projected_gravity_b=torch.tensor([[0.0, 0.0, -1.0]]).repeat(batch, 1),
+        base_height=torch.full((batch,), FlatLocomotionRewardCfg().base_height_target),
+        gait_phase=torch.full((batch, 2), torch.pi),
+        feet_height=torch.zeros(batch, 2),
+        feet_contact=torch.ones(batch, 2, dtype=torch.bool),
+        leg_lateral_separation=torch.full((batch, 2), 0.237),
+        joint_acc=torch.zeros(batch, 12),
+        applied_torque=torch.zeros(batch, 12),
+        action=torch.zeros(batch, 23),
+        previous_action=torch.zeros(batch, 23),
+        terminated=torch.zeros(batch, dtype=torch.bool),
+        pose=torch.zeros(batch),
+        feet_slide=torch.zeros(batch),
+        dof_pos_limits=torch.zeros(batch),
+    )
+    terms = compute_flat_locomotion_reward_terms(
+        FlatLocomotionRewardInputs(
+            **common,
+            base_linear_velocity_yaw_frame=torch.tensor(
+                [[0.0, 0.0, 0.0], [0.6, 0.3, 0.0]]
+            ),
+        ),
+        FlatLocomotionRewardCfg(),
+    )
+    assert terms["track_lin_vel_xy_exp"][0] == pytest.approx(1.0)
+    assert terms["track_lin_vel_xy_exp"][1] == pytest.approx(np.exp(-1.0))
+    torch.testing.assert_close(terms["track_ang_vel_z_exp"], torch.ones(batch))
+    assert "inactive_command_axes" not in terms
+    # The safety cost also applies at stand, without command/phase gating.
+    crossed = compute_flat_locomotion_reward_terms(
+        FlatLocomotionRewardInputs(**{
+            **common,
+            "base_linear_velocity_yaw_frame": torch.tensor([[0.0, 0.0, 0.0], [0.6, 0.3, 0.0]]),
+            "leg_lateral_separation": -torch.tensor(FlatLocomotionRewardCfg().leg_min_lateral_separation).repeat(batch, 1),
+        }),
+        FlatLocomotionRewardCfg(),
+    )
+    torch.testing.assert_close(crossed["leg_clearance"], torch.full((batch,), -4.0))
+    for name in terms:
+        if name != "leg_clearance":
+            torch.testing.assert_close(crossed[name], terms[name])
+
+
+def test_flat_phase_targets_encode_alternating_support_without_target_flight() -> None:
+    phase = torch.tensor(
+        [[0.0, -torch.pi], [-torch.pi, 0.0], [torch.pi, torch.pi]]
+    )
+    height, contact = phase_gait_targets(
+        phase, stance_ratio=0.55, swing_height=0.09
+    )
+    torch.testing.assert_close(
+        height,
+        torch.tensor([[0.09, 0.0], [0.0, 0.09], [0.0, 0.0]]),
+    )
+    assert torch.equal(
+        contact,
+        torch.tensor([[False, True], [True, False], [True, True]]),
+    )
+    assert torch.all(contact.any(dim=-1))
+
+
+def test_flat_gait_reward_prefers_phase_match_and_penalizes_moving_flight() -> None:
     cfg = FlatLocomotionRewardCfg()
-    inputs = replace(_flat_inputs(),
-        commands=torch.tensor([[0., 0., 0.], [0.6, 0., 0.], [0., 0., 0.5]]),
-        base_linear_velocity_yaw_frame=torch.tensor([[0., 0., 0.], [0.6, 0.5, 0.], [0., 0., 0.]]),
-        # Deliberately different body/world yaw: tracking must use world yaw.
-        base_angular_velocity_b=torch.tensor([[0., 0., 1.], [0., 0., 1.], [0., 0., 0.5]]))
+    batch = 3
+    inputs = FlatLocomotionRewardInputs(
+        commands=torch.tensor(
+            [[0.6, 0.0, 0.0], [0.6, 0.0, 0.0], [0.6, 0.0, 0.0]]
+        ),
+        base_linear_velocity_b=torch.zeros(batch, 3),
+        base_angular_velocity_b=torch.zeros(batch, 3),
+        base_linear_velocity_yaw_frame=torch.tensor(
+            [[0.6, 0.0, 0.0], [0.6, 0.0, 0.0], [0.6, 0.0, 0.0]]
+        ),
+        projected_gravity_b=torch.tensor([[0.0, 0.0, -1.0]]).repeat(batch, 1),
+        base_height=torch.tensor([cfg.base_height_target, cfg.base_height_target - 0.1, cfg.base_height_target]),
+        gait_phase=torch.tensor(
+            [[0.0, -torch.pi], [0.0, -torch.pi], [0.0, -torch.pi]]
+        ),
+        feet_height=torch.tensor([[0.09, 0.0], [0.0, 0.0], [0.0, 0.0]]),
+        feet_contact=torch.tensor(
+            [[False, True], [True, True], [False, False]]
+        ),
+        leg_lateral_separation=torch.full((batch, 2), 0.237),
+        joint_acc=torch.zeros(batch, 12),
+        applied_torque=torch.zeros(batch, 12),
+        action=torch.zeros(batch, 23),
+        previous_action=torch.zeros(batch, 23),
+        terminated=torch.zeros(batch, dtype=torch.bool),
+        pose=torch.zeros(batch),
+        feet_slide=torch.zeros(batch),
+        dof_pos_limits=torch.zeros(batch),
+    )
     terms = compute_flat_locomotion_reward_terms(inputs, cfg)
-    torch.testing.assert_close(terms['track_lin_vel_xy_exp'], torch.tensor([1., 1. / np.e, 1.]))
-    torch.testing.assert_close(terms['track_ang_vel_z_exp'], torch.tensor([2., 2., 2. / np.e]))
-    assert set(terms) == set(LOCOMOTION_TASK_REWARD_WEIGHTS)
-    assert sum(terms.values())[0] == pytest.approx(3.)
-    matched = replace(inputs, base_linear_velocity_yaw_frame=inputs.commands * torch.tensor([1., 1., 0.]),
-                      base_angular_velocity_w=inputs.commands * torch.tensor([0., 0., 1.]))
-    result = compute_flat_locomotion_reward_terms(matched, cfg)
-    torch.testing.assert_close(result['track_lin_vel_xy_exp'] + result['track_ang_vel_z_exp'], torch.full((3,), 3.))
+    assert terms["swing_contact_penalty"][0] == pytest.approx(0.0)
+    assert terms["swing_contact_penalty"][1] == pytest.approx(
+        cfg.swing_contact_penalty
+    )
+    assert "unexpected_double_support_penalty" not in terms
+    assert terms["stance_missing_contact_penalty"][2] == pytest.approx(
+        cfg.stance_missing_contact_penalty
+    )
+    assert terms["swing_foot_height_l2"][0] == pytest.approx(0.0)
+    assert terms["swing_foot_height_l2"][1] == pytest.approx(
+        cfg.swing_foot_height_l2
+    )
+    assert "moving_flight" not in terms
+    assert "feet_air_time" not in terms
+    assert terms["base_height_l2"][0] == pytest.approx(0.0)
+    assert terms["base_height_l2"][1] == pytest.approx(-0.2)
+
+    # Over-lifting must no longer be indistinguishable from the target.
+    too_high = replace(inputs, feet_height=torch.tensor([[0.25, 0.0]]).repeat(batch, 1))
+    high_terms = compute_flat_locomotion_reward_terms(too_high, cfg)
+    assert high_terms["swing_foot_height_l2"][0] == pytest.approx(-0.5 * (0.16 / 0.09) ** 2)
+    assert sum(high_terms.values())[0] < sum(terms.values())[0]
+
+    # Stand ignores stale moving phase; grounded feet satisfy the objective.
+    standing = replace(inputs, commands=torch.zeros(batch, 3),
+                       feet_height=torch.zeros(batch, 2),
+                       feet_contact=torch.ones(batch, 2, dtype=torch.bool))
+    stand_terms = compute_flat_locomotion_reward_terms(standing, cfg)
+    for name in ("swing_contact_penalty", "stance_missing_contact_penalty", "swing_foot_height_l2"):
+        torch.testing.assert_close(stand_terms[name], torch.zeros(batch))
+
+    # Static wrong posture still costs reward when action rate is zero.
+    wrong_pose = compute_flat_locomotion_reward_terms(replace(inputs, pose=torch.ones(batch)), cfg)
+    torch.testing.assert_close(wrong_pose["pose"], torch.full((batch,), -0.5))
+    torch.testing.assert_close(wrong_pose["action_rate_l2"], torch.zeros(batch))
 
 
-def test_flat_phase_observation_is_preserved_without_phase_reward() -> None:
-    cfg = FlatLocomotionRewardCfg()
-    commands = torch.tensor([[0.008, 0., 0.008], [0., 0., 0.02], [0.02, 0., 0.]])
-    env = SimpleNamespace(episode_length_buf=torch.ones(3), _gait_phase_offset=torch.zeros(3),
-                          command_generator=SimpleNamespace(commands=commands), step_dt=0.02,
-                          cfg=SimpleNamespace(rewards=cfg))
-    phase = LocomotionEnv._gait_phase(env)
-    torch.testing.assert_close(phase[0], torch.full((2,), torch.pi))
-    torch.testing.assert_close(torch.cos(phase[1:, 0]), -torch.cos(phase[1:, 1]))
-    assert 'feet_phase' not in compute_flat_locomotion_reward_terms(_flat_inputs(), cfg)
+def test_flat_tracking_drift_and_yaw_have_fixed_weight() -> None:
+    command = torch.tensor([[0.0, 0.3, 0.0], [0.6, 0.15, 0.25], [0.0, 0.0, 0.25]])
+    measured = torch.tensor([[0.25, 0.3, -0.4], [0.6, 0.15, -0.25], [0.0, 0.0, -0.25]])
+    linear, yaw = command_tracking(command, measured, torch.tensor([0.5, 0.3, 0.5]))
+    assert (linear + yaw)[0] == pytest.approx(np.exp(-0.25) + np.exp(-0.64))
+    assert yaw[1] == pytest.approx(np.exp(-1.0))
+    assert yaw[2] == pytest.approx(yaw[1])
 
 
-def test_flat_raw_action_rate_and_failure_reward_are_not_clipped_or_double_scaled() -> None:
-    cfg = FlatLocomotionRewardCfg()
-    inputs = replace(_flat_inputs(), action=torch.ones(3, 23), previous_action=-torch.ones(3, 23),
-                     terminated=torch.tensor([False, True, False]))
-    terms = compute_flat_locomotion_reward_terms(inputs, cfg)
-    torch.testing.assert_close(terms['action_rate_l2'], torch.full((3,), -0.92))
-    torch.testing.assert_close(terms['termination_penalty'], torch.tensor([0., -200., 0.]))
-    data = SimpleNamespace(body_link_quat_w=torch.tensor([0., 0., 0., 1.]).expand(3, 1, -1),
-                           body_link_lin_vel_w=torch.zeros(3, 1, 3), body_link_ang_vel_w=torch.zeros(3, 1, 3))
-    env = SimpleNamespace(_locomotion_reward_terms=lambda: terms, _update_command_curriculum=lambda terms: None,
-                          extras={}, robot=SimpleNamespace(data=data), anchor_body_index=0,
-                          command_generator=SimpleNamespace(commands=inputs.commands), step_dt=0.02)
-    actual = LocomotionEnv._get_rewards(env)
-    torch.testing.assert_close(actual, torch.tensor([2.08, -197.92, 2.08]) * 0.02)
-    assert actual[1] < 0
-
-
-def test_flat_air_time_gate_cap_and_contact_modes() -> None:
-    commands = torch.tensor([[0., 0., 0.5], [0.1, 0., 0.], [0., 0.3, 0.],
-                             [0.5, 0., 0.], [0.5, 0., 0.], [0.5, 0., 0.]])
-    air = torch.tensor([[0., 0.8]] * 4 + [[0., 0.], [0.5, 0.6]])
-    contact = torch.tensor([[0.6, 0.]] * 4 + [[0.3, 0.4], [0., 0.]])
-    reward = compute_feet_air_time_positive_biped_reward(air, contact, commands, threshold=FlatLocomotionRewardCfg().feet_air_time_threshold)
-    terms = compute_flat_locomotion_reward_terms(replace(_flat_inputs(6), commands=commands, feet_air_time=reward), FlatLocomotionRewardCfg())
-    torch.testing.assert_close(terms['feet_air_time'], torch.tensor([0., 0., 0.1, 0.1, 0., 0.]))
-
-
-
-def test_both_feet_air_uses_contact_timers_without_command_gate() -> None:
-    # Stand, pure turn and translation are penalized equally during flight.
-    # Zero timers at reset, either single-support side, and double support are not flight.
-    air = torch.tensor([[0.1, 0.2], [0.2, 0.1], [0.1, 0.1], [0., 0.], [0., 0.2], [0.2, 0.]])
-    inputs = replace(_flat_inputs(6), feet_current_air_time=air,
-                     commands=torch.tensor([[0., 0., 0.], [0., 0., 0.5], [0.5, 0., 0.],
-                                            [0., 0., 0.], [0.5, 0., 0.], [0.5, 0., 0.]]))
-    terms = compute_flat_locomotion_reward_terms(inputs, FlatLocomotionRewardCfg())
-    torch.testing.assert_close(terms['both_feet_air'], torch.tensor([-0.5, -0.5, -0.5, 0., 0., 0.]))
-    torch.testing.assert_close(terms['both_feet_air'] * 0.02, torch.tensor([-0.01, -0.01, -0.01, 0., 0., 0.]))
-    torch.testing.assert_close(compute_both_feet_air(air), torch.tensor([1., 1., 1., 0., 0., 0.]))
-
-
-def test_flat_joint_groups_select_only_intended_dofs() -> None:
-    import re
+def test_flat_pose_weights_cover_all_joints_in_policy_order() -> None:
     from ref2act.robots._g1_spec import G1_23_DOF_JOINT_ORDER
-    cfg = G1FlatLocomotionEnvCfg()
-    # Simulator order differs from the PAIR order; all selections use simulator indices.
-    names = list(reversed(G1_23_DOF_JOINT_ORDER))
-    def selected(patterns):
-        return torch.tensor([i for i, name in enumerate(names) if any(re.fullmatch(p, name) for p in patterns)])
-    effort = selected(cfg.reward_effort_joint_names)
-    ankle = selected(cfg.reward_ankle_joint_names)
-    assert len(effort) == 12 and len(ankle) == 4
-    assert all('hip' in names[i] or 'knee' in names[i] or 'ankle' in names[i] for i in effort)
-    default = torch.zeros(23, 23)
-    data = SimpleNamespace(joint_pos=0.2 * torch.eye(23), default_joint_pos=default,
-                           soft_joint_pos_limits=torch.tensor([-0.1, 0.1]).expand(23, 23, 2))
-    env = SimpleNamespace(robot=SimpleNamespace(data=data))
-    expected_limit = torch.zeros(23)
-    expected_limit[ankle] = 0.1
-    torch.testing.assert_close(LocomotionEnv._joint_position_limit_penalty(env, ankle), expected_limit)
-    for patterns, count in ((cfg.reward_hip_joint_names, 4), (cfg.reward_arm_joint_names, 10), (cfg.reward_torso_joint_names, 1)):
-        indices = selected(patterns)
-        assert len(indices) == count
-        expected = torch.zeros(23)
-        expected[indices] = 0.2
-        torch.testing.assert_close(LocomotionEnv._joint_deviation_l1(env, indices), expected)
+
+    cfg = FlatLocomotionRewardCfg()
+    weights = dict(zip(G1_23_DOF_JOINT_ORDER, cfg.pose_weights, strict=True))
+    assert all(weight > 0.0 for weight in weights.values())
+    tolerances = dict(zip(G1_23_DOF_JOINT_ORDER, cfg.pose_tolerances, strict=True))
+    for side in ("left", "right"):
+        assert weights[f"{side}_hip_pitch_joint"] == 0.1
+        assert weights[f"{side}_hip_roll_joint"] == 1.0
+        assert weights[f"{side}_hip_yaw_joint"] == 1.0
+        assert tolerances[f"{side}_knee_joint"] == 0.5
+        assert tolerances[f"{side}_hip_roll_joint"] == 0.1
+        assert weights[f"{side}_shoulder_pitch_joint"] == 0.25
+        assert weights[f"{side}_elbow_joint"] == 0.25
+        assert weights[f"{side}_wrist_roll_joint"] == 1.0
+    assert weights["waist_yaw_joint"] == 1.0
+
+    # Exercise the actual environment helper with a non-policy simulation order.
+    permutation = torch.arange(22, -1, -1)
+    default = torch.full((23, 23), 0.2)
+    data = SimpleNamespace(joint_pos=(default + torch.eye(23))[:, permutation],
+                           default_joint_pos=default[:, permutation])
+    env = SimpleNamespace(robot=SimpleNamespace(data=data), cfg=SimpleNamespace(rewards=cfg),
+                          robot_spec=SimpleNamespace(action_dim=23), device="cpu",
+                          _sim_to_policy_order=lambda x: x[:, permutation])
+    expected = torch.tensor(cfg.pose_weights) * (1.0 - torch.tensor(cfg.pose_tolerances)).square()
+    torch.testing.assert_close(LocomotionEnv._pose_penalty(env), expected)
+
+
+@pytest.mark.parametrize("sign", [-1.0, 1.0])
+def test_flat_pose_deadband_and_excess_cost_for_every_joint(sign) -> None:
+    cfg = FlatLocomotionRewardCfg()
+    tolerance = torch.tensor(cfg.pose_tolerances)
+    data = SimpleNamespace(joint_pos=torch.zeros(23, 23), default_joint_pos=torch.zeros(23, 23))
+    env = SimpleNamespace(robot=SimpleNamespace(data=data), cfg=SimpleNamespace(rewards=cfg),
+                          robot_spec=SimpleNamespace(action_dim=23), device="cpu",
+                          _sim_to_policy_order=lambda x: x)
+    for factor in (0.0, 0.5, 1.0):
+        data.joint_pos = torch.diag(sign * factor * tolerance)
+        torch.testing.assert_close(LocomotionEnv._pose_penalty(env), torch.zeros(23))
+    data.joint_pos = torch.diag(sign * (tolerance + 0.2)).requires_grad_()
+    penalty = LocomotionEnv._pose_penalty(env)
+    torch.testing.assert_close(penalty, torch.tensor(cfg.pose_weights) * 0.2**2)
+    penalty.sum().backward()
+    assert torch.isfinite(data.joint_pos.grad).all()
+    assert torch.all(sign * data.joint_pos.grad.diag() > 0.0)
+    larger = torch.diag(sign * (tolerance + 0.4))
+    data.joint_pos = larger
+    torch.testing.assert_close(LocomotionEnv._pose_penalty(env), 4.0 * penalty.detach())
+
+
+def test_legacy_pose_without_tolerances_keeps_squared_error() -> None:
+    cfg = SimpleNamespace(pose_weights=(1.0,) * 23)
+    data = SimpleNamespace(joint_pos=torch.full((2, 23), 0.5),
+                           default_joint_pos=torch.full((2, 23), 0.2))
+    env = SimpleNamespace(robot=SimpleNamespace(data=data), cfg=SimpleNamespace(rewards=cfg),
+                          robot_spec=SimpleNamespace(action_dim=23), device="cpu",
+                          _sim_to_policy_order=lambda x: x)
+    torch.testing.assert_close(LocomotionEnv._pose_penalty(env), torch.full((2,), 23 * 0.3**2))
+
+
+@pytest.mark.parametrize("field", ["pose_weights", "pose_tolerances"])
+@pytest.mark.parametrize("values", [(0.1,) * 22, (-0.1,) * 23, (float("nan"),) * 23, (float("inf"),) * 23])
+def test_flat_pose_rejects_invalid_configuration(field, values) -> None:
+    with pytest.raises(ValueError, match=field):
+        FlatLocomotionRewardCfg(**{field: values})
 
 
 def _reward_inputs(*, command_error: float) -> LocomotionRewardInputs:
@@ -455,24 +660,29 @@ def test_g1_flat_locomotion_config_and_registry_contract() -> None:
     assert not cfg.command.curriculum_enabled
     assert cfg.command.resampling_time_range_s == (10.0, 10.0)
     assert isinstance(cfg.rewards, FlatLocomotionRewardCfg)
-    assert cfg.rewards.track_lin_vel_xy_exp == 1.0
-    assert cfg.rewards.track_ang_vel_z_exp == 2.0
-    assert cfg.rewards.feet_air_time == 0.25
-    assert cfg.rewards.both_feet_air == -0.5
     assert cfg.rewards.termination_penalty == -200.0
-    assert cfg.rewards.contract()["source"] == "Ref2Act jloganolson G1-23DoF locomotion reward"
-    assert cfg.rewards.linear_velocity_scales == pytest.approx((0.5, 0.5))
+    assert cfg.rewards.track_lin_vel_xy_exp == 1.0
+    assert cfg.rewards.track_ang_vel_z_exp == 1.0
+    assert cfg.rewards.pose == -0.5
+    assert cfg.rewards.swing_contact_penalty == -0.5
+    assert cfg.rewards.stance_missing_contact_penalty == -0.25
+    assert cfg.rewards.swing_foot_height_l2 == -0.5
+    assert cfg.rewards.base_height_l2 == -20.0
+    assert cfg.rewards.gait_stance_ratio == pytest.approx(0.55)
+    assert "feet_air_time" not in cfg.rewards.contract()["weights"]
+    assert cfg.rewards.contract()["source"] == "Ref2Act flat locomotion v8"
+    assert cfg.rewards.contract()["pose_tolerances"] == list(cfg.rewards.pose_tolerances)
+    assert cfg.rewards.linear_velocity_scales == pytest.approx((0.5, 0.3))
     assert cfg.rewards.yaw_rate_scale == pytest.approx(0.5)
-    assert cfg.rewards.action_rate_l2 == -0.01
-    assert not hasattr(cfg.rewards, "penalty_curriculum")
-    assert cfg.robot.init_state.pos[2] == 0.7841
+    assert cfg.rewards.action_rate_l2 == -0.002
+    assert cfg.robot.init_state.pos[2] == cfg.rewards.base_height_target == 0.7841
     assert cfg.robot.init_state.joint_pos[".*_hip_pitch_joint"] == -0.15
     assert cfg.robot.init_state.joint_pos[".*_knee_joint"] == 0.35
     assert cfg.robot.init_state.joint_pos[".*_ankle_pitch_joint"] == -0.20
     from ref2act.robots._articulation_shared import G1_CFG
     assert G1_CFG.init_state.joint_pos[".*_knee_joint"] == 0.669
     assert G1_CFG.init_state.pos[2] == 0.76
-    assert cfg.rewards.ang_vel_xy_l2 == -0.05
+    assert cfg.rewards.ang_vel_xy_l2 == -0.02
     assert cfg.termination_body_names == [
         "pelvis", "torso_link", ".*_knee_link", ".*_rubber_hand_link"
     ]
@@ -673,3 +883,48 @@ def test_locomotion_terrain_modes_and_registrations() -> None:
         assert not cfg.terrain_curriculum
         assert cfg.terrain_out_of_bounds_distance is None
         assert gym.spec(env_id).entry_point == "ref2act.envs.locomotion.env:LocomotionEnv"
+
+
+def test_locomotion_reset_pose_randomizes_selected_envs_and_preserves_defaults() -> None:
+    from ref2act.common.math import quat_from_euler_xyz, quat_mul
+
+    count = 1024
+    cfg = G1FlatLocomotionEnvCfg()
+    assert cfg.reset_pose_range == {"x": (-0.5, 0.5), "y": (-0.5, 0.5), "yaw": (-3.14, 3.14)}
+    defaults = torch.zeros(count, 13)
+    defaults[:, 2] = 0.7841
+    defaults[:, 6] = 1.0
+    origins = torch.zeros(count, 3)
+    origins[:, 0] = torch.arange(count) * 4.0
+    writes = []
+    core = SimpleNamespace(
+        cfg=cfg,
+        robot=SimpleNamespace(data=SimpleNamespace(default_root_state=defaults),
+                              write_root_link_pose_to_sim_index=lambda **kw: writes.append(kw)),
+        scene=SimpleNamespace(env_origins=origins),
+    )
+    env_ids = torch.arange(1, count, 2)
+    torch.manual_seed(107)
+    LocomotionEnv._randomize_reset_pose(core, env_ids)
+    pose = writes[-1]["root_pose"]
+    torch.testing.assert_close(writes[-1]["env_ids"], env_ids)
+    offsets = pose[:, :2] - origins[env_ids, :2]
+    assert (offsets.abs() <= 0.5001).all()
+    assert (offsets.amin(0) < -0.4).all() and (offsets.amax(0) > 0.4).all()
+    yaw = 2.0 * torch.atan2(pose[:, 5], pose[:, 6])
+    assert (yaw.abs() <= 3.14).all() and yaw.min() < -2.8 and yaw.max() > 2.8
+    torch.testing.assert_close(pose[:, 2], defaults[env_ids, 2])
+    torch.testing.assert_close(pose[:, 3:5], torch.zeros_like(pose[:, 3:5]))
+    torch.testing.assert_close(pose[:, 3:7].norm(dim=-1), torch.ones(len(env_ids)))
+    assert (defaults[:, :2] == 0).all() and (defaults[:, 6] == 1).all()
+
+    first = pose.clone()
+    LocomotionEnv._randomize_reset_pose(core, env_ids)
+    assert not torch.equal(first, writes[-1]["root_pose"])
+    # Fixed global yaw also composes correctly with a tilted default pose.
+    nominal = quat_from_euler_xyz(torch.full((count,), 0.2), torch.full((count,), -0.1), torch.zeros(count))
+    defaults[:, 3:7] = nominal
+    cfg.reset_pose_range = {"yaw": (0.5, 0.5)}
+    LocomotionEnv._randomize_reset_pose(core, env_ids)
+    delta = quat_from_euler_xyz(torch.zeros(len(env_ids)), torch.zeros(len(env_ids)), torch.full((len(env_ids),), 0.5))
+    torch.testing.assert_close(writes[-1]["root_pose"][:, 3:7], quat_mul(delta, nominal[env_ids]))

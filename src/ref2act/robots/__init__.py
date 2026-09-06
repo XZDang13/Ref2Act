@@ -4,7 +4,6 @@ from .spec import RobotSpec, resolve_robot_spec
 
 __all__ = [
     "G1FlatLocomotionEnvCfg",
-    "G1FlatStandUpEnvCfg",
     "G1MixedTerrainLocomotionEnvCfg",
     "G1MotionTrackingEnvCfg",
     "G1MotionTrackingRoughEnvCfg",
@@ -18,7 +17,6 @@ __all__ = [
 def __getattr__(name: str):
     if name in {
         "G1FlatLocomotionEnvCfg",
-        "G1FlatStandUpEnvCfg",
         "G1MixedTerrainLocomotionEnvCfg",
         "G1MotionTrackingEnvCfg",
         "G1MotionTrackingRoughEnvCfg",

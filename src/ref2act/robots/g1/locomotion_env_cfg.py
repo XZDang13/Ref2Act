@@ -86,6 +86,12 @@ class G1FlatLocomotionEnvCfg(DirectRLEnvCfg):
     base_height_sensor: RayCasterCfg | None = None
 
     joint_position_reset_noise = 0.05
+    # World-frame spawn offsets and heading; velocity reset stays at default.
+    reset_pose_range = {
+        "x": (-0.5, 0.5),
+        "y": (-0.5, 0.5),
+        "yaw": (-3.14, 3.14),
+    }
     minimum_base_height = 0.20
     minimum_upright_projection = math.cos(0.8)
     illegal_contact_force_threshold = 1.0
@@ -97,15 +103,12 @@ class G1FlatLocomotionEnvCfg(DirectRLEnvCfg):
     terrain_curriculum = False
     terrain_out_of_bounds_distance = None
 
-    # jloganolson G1-23DoF reward groups, including ankle effort and wrist pose.
-    reward_effort_joint_names = [
-        ".*_hip_.*_joint", ".*_knee_joint", ".*_ankle_pitch_joint", ".*_ankle_roll_joint"
-    ]
+    # Legacy task-free environments still use these three selections through
+    # LocomotionEnv's compatibility reward path.
     reward_hip_joint_names = [".*_hip_yaw_joint", ".*_hip_roll_joint"]
     reward_arm_joint_names = [
         ".*_shoulder_.*_joint",
         ".*_elbow_joint",
-        ".*_wrist_roll_joint",
     ]
     reward_torso_joint_names = ["waist_yaw_joint"]
     reward_leg_joint_names = [
@@ -166,7 +169,7 @@ class G1FlatLocomotionEnvCfg(DirectRLEnvCfg):
         ".*_knee_joint": 0.35,
         ".*_ankle_pitch_joint": -0.20,
     })
-    robot.init_state.pos = (0.0, 0.0, 0.7841)
+    robot.init_state.pos = (0.0, 0.0, rewards.base_height_target)
     robot.spawn.articulation_props.enabled_self_collisions = True
 
     contact_sensor = ContactSensorCfg(
