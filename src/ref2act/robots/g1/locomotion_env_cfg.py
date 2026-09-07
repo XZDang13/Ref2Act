@@ -77,7 +77,8 @@ class G1FlatLocomotionEnvCfg(DirectRLEnvCfg):
         noise_scale=0.025,
     )
     command = StratifiedVelocityCommandCfg()
-    rewards = FlatLocomotionRewardCfg()
+    # Gait-period ablation against the default 1.0 s locomotion baseline.
+    rewards = FlatLocomotionRewardCfg(gait_period=0.8)
 
     # Flat terrain uses the environment origin as ground height. Generated
     # terrains override this with one downward ray per environment so the
