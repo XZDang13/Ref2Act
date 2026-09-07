@@ -11,6 +11,7 @@ from isaaclab.sim import SimulationCfg
 from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils.configclass import configclass
 
+from ref2act.envs.locomotion.gait import CommandGaitCfg
 from ref2act.envs.locomotion.commands import StratifiedVelocityCommandCfg
 from ref2act.envs.locomotion.observation import default_locomotion_observation_spec
 from ref2act.envs.locomotion.task_rewards import FlatLocomotionRewardCfg
@@ -77,8 +78,8 @@ class G1FlatLocomotionEnvCfg(DirectRLEnvCfg):
         noise_scale=0.025,
     )
     command = StratifiedVelocityCommandCfg()
-    # Gait-period ablation against the default 1.0 s locomotion baseline.
-    rewards = FlatLocomotionRewardCfg(gait_period=0.8)
+    # Command-only schedule; retain 0.8 s as the fixed-clock fallback.
+    rewards = FlatLocomotionRewardCfg(gait_period=0.8, gait_schedule=CommandGaitCfg())
 
     # Flat terrain uses the environment origin as ground height. Generated
     # terrains override this with one downward ray per environment so the

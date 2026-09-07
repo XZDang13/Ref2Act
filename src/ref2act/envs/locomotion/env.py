@@ -131,6 +131,13 @@ class LocomotionEnv(LeggedRobotEnv):
         self._command_curriculum_yaw_sum = torch.zeros((), device=self.device)
         self._command_curriculum_steps = 0
         self._gait_phase_offset = torch.zeros(self.num_envs, device=self.device)
+        from ref2act.envs.locomotion.gait import CommandGaitClock
+        schedule = getattr(self.cfg.rewards, "gait_schedule", None)
+        self._adaptive_gait = None if schedule is None else CommandGaitClock(
+            schedule, self.num_envs, self.device, step_dt=float(self.step_dt),
+            stance_ratio=self.cfg.rewards.gait_stance_ratio,
+            offsets=self.cfg.rewards.gait_offsets,
+        )
         self._policy_action = torch.zeros(
             (self.num_envs, self.robot_spec.action_dim), device=self.device
         )
@@ -242,6 +249,8 @@ class LocomotionEnv(LeggedRobotEnv):
 
     def _pre_physics_step(self, actions: torch.Tensor) -> None:
         self.command_generator.step()
+        if getattr(self, "_adaptive_gait", None) is not None:
+            self._adaptive_gait.advance(self.command_generator.commands)
         self._previous_policy_action.copy_(self._policy_action)
         self._policy_action.copy_(actions)
         self.action_processor.pre_process_action(self._policy_to_sim_order(actions))
@@ -255,6 +264,8 @@ class LocomotionEnv(LeggedRobotEnv):
         )
 
     def _gait_phase(self) -> torch.Tensor:
+        if getattr(self, "_adaptive_gait", None) is not None:
+            return self._adaptive_gait.phase()
         return compute_locomotion_gait_phase(
             self.episode_length_buf,
             self._gait_phase_offset,
@@ -737,6 +748,12 @@ class LocomotionEnv(LeggedRobotEnv):
         log["Curriculum/yaw_rate_max"] = self.command_generator.current_yaw_rate_range[1]
 
     def _get_rewards(self) -> torch.Tensor:
+        if getattr(self, "_adaptive_gait", None) is not None:
+            clock = self._adaptive_gait
+            gait_log = self.extras.setdefault("log", {})
+            gait_log["Gait/frequency_hz_mean"] = clock.frequency.mean().detach()
+            gait_log["Gait/target_frequency_hz_mean"] = clock.target.mean().detach()
+            gait_log["Gait/clock_advancing_fraction"] = clock.advancing.float().mean().detach()
         terms = self._locomotion_reward_terms()
         self._update_command_curriculum(terms)
         log = self.extras.setdefault("log", {})
@@ -870,6 +887,8 @@ class LocomotionEnv(LeggedRobotEnv):
             ).uniform_(-torch.pi, torch.pi)
         else:
             self._gait_phase_offset[env_ids] = 0.0
+        if getattr(self, "_adaptive_gait", None) is not None:
+            self._adaptive_gait.reset(env_ids, self.command_generator.commands, self._gait_phase_offset)
         self.observation_model.reset(
             env_ids,
             self.robot,

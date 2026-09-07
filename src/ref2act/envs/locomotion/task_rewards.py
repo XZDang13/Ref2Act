@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 import math
 
 import torch
+
+from ref2act.envs.locomotion.gait import CommandGaitCfg
 
 from ref2act.common.math import quat_apply_inverse, yaw_quat
 
@@ -77,6 +79,7 @@ class FlatLocomotionRewardCfg:
     # USD FK: hip/knee/ankle pitch = -0.15/0.35/-0.20 rad; level soles.
     base_height_target: float = 0.7841
     gait_period: float = 1.0
+    gait_schedule: CommandGaitCfg | None = None
     gait_offsets: tuple[float, float] = (0.0, 0.5)
     gait_randomize_phase: bool = True
     gait_stand_phase: float = torch.pi
@@ -99,6 +102,11 @@ class FlatLocomotionRewardCfg:
             values = getattr(self, name)
             if len(values) != 23 or any(not math.isfinite(v) or v < 0.0 for v in values):
                 raise ValueError(f"{name} must contain 23 finite non-negative values in policy order.")
+        if self.gait_schedule is not None:
+            if not isinstance(self.gait_schedule, CommandGaitCfg):
+                raise ValueError("gait_schedule must be CommandGaitCfg or None.")
+            if self.gait_stance_ratio <= .5 or tuple(self.gait_offsets) != (0., .5):
+                raise ValueError("Adaptive gait requires alternating feet and double support.")
         if self.gait_period <= 0.0:
             raise ValueError("gait_period must be positive.")
         if len(self.gait_offsets) != 2:
@@ -109,6 +117,21 @@ class FlatLocomotionRewardCfg:
             raise ValueError("gait_swing_height must be positive.")
         if len(self.feet_contact_point_offset) != 3:
             raise ValueError("feet_contact_point_offset must be a 3-vector.")
+
+    @classmethod
+    def from_contract(cls, contract: dict) -> "FlatLocomotionRewardCfg":
+        """Restore recorded reward and clock semantics, including old fixed clocks."""
+        defaults = cls()
+        values = dict(contract.get("weights", {}))
+        for field in fields(cls):
+            if field.name in contract:
+                value = contract[field.name]
+                if isinstance(getattr(defaults, field.name), tuple):
+                    value = tuple(value)
+                values[field.name] = value
+        schedule = contract.get("gait_schedule")
+        values["gait_schedule"] = None if schedule is None else CommandGaitCfg(**schedule)
+        return cls(**values)
 
     def contract(self) -> dict[str, object]:
         values = asdict(self)
@@ -127,6 +150,7 @@ class FlatLocomotionRewardCfg:
             "leg_clearance_objective": "sum(relu(1-signed_y_left_minus_right/min_separation_m)^2), feet then knees, pelvis yaw frame",
             "base_height_target": self.base_height_target,
             "gait_period": self.gait_period,
+            **({"gait_schedule": asdict(self.gait_schedule)} if self.gait_schedule is not None else {}),
             "gait_offsets": list(self.gait_offsets),
             "gait_randomize_phase": self.gait_randomize_phase,
             "gait_stand_phase": self.gait_stand_phase,
@@ -241,7 +265,11 @@ def phase_gait_signals(
     actual_contact = inputs.feet_contact.bool()
     dtype = inputs.commands.dtype
     moving = (inputs.commands.abs() > float(cfg.command_activity_threshold)).any(dim=-1)
-    # Stand requires grounded feet even if a caller supplies a stale phase.
+    if cfg.gait_schedule is not None:
+        # During a stop request, finish the swing indicated by the shared clock.
+        # Once parked in double support, zero commands require grounded feet.
+        moving = (inputs.commands.norm(dim=-1) >= cfg.gait_schedule.stand_threshold) | ~target_contact.all(-1)
+    # Fixed clocks retain the legacy immediate standing gate.
     target_contact = target_contact | ~moving.unsqueeze(-1)
     target_swing = ~target_contact
     target_foot_height = target_foot_height * moving.unsqueeze(-1)
