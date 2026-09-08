@@ -78,8 +78,11 @@ class G1FlatLocomotionEnvCfg(DirectRLEnvCfg):
         noise_scale=0.025,
     )
     command = StratifiedVelocityCommandCfg()
-    # Command-only schedule; retain 0.8 s as the fixed-clock fallback.
-    rewards = FlatLocomotionRewardCfg(gait_period=0.8, gait_schedule=CommandGaitCfg())
+    # Isolate the integrated clock and grounded stops at a fixed 1.25 Hz.
+    rewards = FlatLocomotionRewardCfg(
+        gait_period=0.8,
+        gait_schedule=CommandGaitCfg(min_frequency=1.25, max_frequency=1.25),
+    )
 
     # Flat terrain uses the environment origin as ground height. Generated
     # terrains override this with one downward ray per environment so the
