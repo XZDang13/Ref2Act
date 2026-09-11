@@ -9,6 +9,8 @@ def _register_default_envs() -> None:
 
     register_envs()
     register_locomotion_envs()
+    from .envs.stand_up.registry import register_envs as register_stand_up_envs
+    register_stand_up_envs()
 
 
 _register_default_envs()

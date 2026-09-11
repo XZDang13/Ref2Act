@@ -1,6 +1,13 @@
 # Ref2Act
 
-Ref2Act provides custom legged-robot reinforcement-learning environments for Isaac Lab 3.0. It currently supports G1 23-DoF motion tracking and blind flat-ground velocity locomotion. Motion retargeting is intentionally outside this repository; training and sim2sim consume the current Retargeter output directly.
+Ref2Act provides custom legged-robot reinforcement-learning environments for Isaac Lab 3.0. It currently supports G1 23-DoF motion tracking, blind velocity locomotion, and stand-up. Motion retargeting is intentionally outside this repository; training and sim2sim consume the current Retargeter output directly.
+
+## Stand-up task
+
+`G1StandUp-v0` uses `G1StandUpEnvCfg` and inherits the shared robot environment
+directly. V12 staged rewards are the default. Support measurements, actor history, privileged critic observations,
+contact sensing, assistance and episode sampling live in `ref2act.envs.stand_up`.
+See [the stand-up task guide](docs/STAND_UP.md) for configuration and compatibility.
 
 ## Runtime contract
 

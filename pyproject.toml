@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "Ref2Act"
 version = "0.2.1"
-description = "Motion-tracking environments built on Isaac Lab."
+description = "Motion tracking, locomotion, and stand-up environments built on Isaac Lab."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [

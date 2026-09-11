@@ -1,0 +1,212 @@
+{
+  "standup": {
+    "critic_observation": "privileged_single_frame_v1",
+    "actor_observation_noise": {
+      "enabled": true,
+      "orientation_6d": 0.05,
+      "angular_velocity": 0.2,
+      "joint_position": 0.01,
+      "joint_velocity": 0.5
+    },
+    "episode_length_s": 10.0,
+    "settling_s": 0.6,
+    "episode_sampling": {
+      "enabled": true,
+      "initial_timeout_range_s": [
+        2.0,
+        10.0
+      ],
+      "timeout_range_s": [
+        9.0,
+        11.0
+      ],
+      "grace_s": 3.0,
+      "stagnation_s": 3.0,
+      "stagnation_jitter_s": 0.5,
+      "progress_epsilon": 0.04
+    },
+    "enabled_self_collisions": true,
+    "initial_state": {
+      "mode": "fixed_supine",
+      "root_position": [
+        0.0,
+        0.0,
+        0.45
+      ],
+      "root_euler_xyz": [
+        0.0,
+        -1.5707963267948966,
+        0.0
+      ],
+      "joint_position_noise": 0.0,
+      "state_library": null
+    },
+    "targets": {
+      "source": "default_standing",
+      "height_ratio": 1.0
+    },
+    "success_hold_s": 0.5,
+    "success_upright_projection": 0.85,
+    "success_max_base_linear_velocity": 0.25,
+    "success_max_base_angular_velocity": 0.5,
+    "success_max_joint_velocity": 2.0,
+    "max_joint_velocity": 80.0,
+    "max_base_angular_velocity": 50.0,
+    "support": {
+      "enabled": true,
+      "reward_mode": "staged",
+      "contact_force_ratio": 0.05,
+      "persistence_s": 0.08,
+      "sole_height_tolerance": 0.015,
+      "balance_sigma": 0.08,
+      "shaping_scale": 0.0,
+      "hip_collision_scale": 0.0,
+      "require_support_for_success": true,
+      "success_min_load": 0.65,
+      "success_min_per_foot_load": 0.1,
+      "preparation": {
+        "clearance_sigma": 0.15,
+        "clearance_tolerance": 0.01,
+        "flat_sigma": 0.35,
+        "flat_mode": "signed_linear",
+        "shank_min_cos": 0.7,
+        "shank_sigma": 0.5,
+        "load_filter_s": 0.1,
+        "hip_forward_min": -0.1,
+        "hip_forward_max": 0.25,
+        "hip_forward_sigma": 0.2,
+        "hip_lateral_tolerance": 0.1,
+        "hip_lateral_sigma": 0.1,
+        "sole_plant_tolerance": 0.008,
+        "sole_plant_sigma": 0.04,
+        "placement_xy_tolerance": 0.2,
+        "placement_xy_sigma": 0.25,
+        "placement_height_tolerance": 0.03,
+        "placement_height_sigma": 0.15
+      },
+      "stages": {
+        "rise_height_v3": true,
+        "foot_ground_retraction_v4": true,
+        "foot_stance_v5": true,
+        "rise_hold_v2": true,
+        "distance_full": 0.28,
+        "distance_start": 0.38,
+        "distance_zero": 0.8,
+        "plant_start": 0.35,
+        "plant_full": 0.85,
+        "touch_start": 0.02,
+        "touch_full": 0.08,
+        "load_full": 0.9,
+        "torso_start": 0.08,
+        "torso_full": 0.2,
+        "righting_projection": 0.5,
+        "standing_start": 0.85,
+        "standing_full": 1.0,
+        "upright_start": 0.7,
+        "upright_full": 0.9,
+        "com_sigma": 0.08,
+        "linear_speed_scale": 0.25,
+        "angular_speed_scale": 0.5,
+        "joint_speed_scale": 2.0,
+        "gate_assistance": true,
+        "preparation_righting_fraction": 0.4,
+        "rise_torso_start": 0.02,
+        "rise_torso_full": 0.08,
+        "rise_upright_start": 0.0,
+        "rise_upright_full": 0.25,
+        "stance": {
+          "fraction": 0.15,
+          "clearance_full": 0.02,
+          "clearance_sigma": 0.06,
+          "side_full": 0.04,
+          "side_sigma": 0.08,
+          "width_full": 0.36,
+          "width_zero": 0.5,
+          "width_sigma": 0.15
+        },
+        "rise_transfer": {
+          "unload_curve": "rational",
+          "minimum_ground_weight": 0.2,
+          "unload_fraction": 0.07,
+          "lean_fraction": 0.03,
+          "hand_load_full": 0.02,
+          "hand_load_zero": 0.25,
+          "lean_start_deg": 0.0,
+          "lean_full_deg": 15.0,
+          "lean_upper_deg": 25.0,
+          "lean_zero_deg": 50.0,
+          "fade_start": 0.34,
+          "fade_full": 0.55
+        },
+        "hands": {
+          "enabled": true,
+          "body_names": [
+            "left_rubber_hand_link",
+            "right_rubber_hand_link"
+          ],
+          "contact_load": 0.02,
+          "full_load": 0.1,
+          "persistence_s": 0.08,
+          "slip_sigma": 0.15,
+          "approach_height": 0.04,
+          "height_sigma": 0.12,
+          "release_height": 0.08,
+          "preparation_fraction": 0.08,
+          "release_fraction": 0.05
+        },
+        "weights": {
+          "preparation": 1.0,
+          "rise": 3.0,
+          "stand": 5.0
+        }
+      }
+    },
+    "reward": {
+      "mode": "simple_v13",
+      "action_rate_weight": 0.05,
+      "joint_limit_weight": 10.0,
+      "soft_joint_position_limit": 0.9,
+      "failure_penalty": 100.0,
+      "hip_collision_weight": 0.5,
+      "posture": {
+        "weight": 0.15,
+        "waist_sigma": 1.0,
+        "shoulder_pitch_sigma": 0.6,
+        "shoulder_roll_sigma": 0.5,
+        "shoulder_yaw_sigma": 0.8,
+        "elbow_sigma": 0.6
+      }
+    },
+    "assistance": {
+      "enabled": true,
+      "body_name": "torso_link",
+      "schedule": "performance",
+      "maximum_gravity_ratio": 0.6,
+      "orientation_gate_start": 0.6,
+      "orientation_gate_full": 0.8,
+      "minimum_draw": 0.8,
+      "probe_fraction": 0.1,
+      "decrement": 0.05,
+      "minimum_outcomes": 256,
+      "required_windows": 3,
+      "stable_rate": 0.6,
+      "minimum_probe_outcomes": 32,
+      "probe_stable_rate": 0.3,
+      "height_gate_start": 0.65,
+      "height_gate_full": 0.85
+    }
+  },
+  "ref2act": {
+    "action_delay_range": [
+      0,
+      0
+    ],
+    "disable_startup_randomization": false,
+    "gpu_max_rigid_patch_count": 2097152,
+    "gpu_max_rigid_contact_count": 8388608
+  },
+  "ppo": {
+    "gamma": 0.99,
+    "bootstrap_timeouts": true
+  }
+}
