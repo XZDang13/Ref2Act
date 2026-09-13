@@ -247,6 +247,10 @@ class StandUpEnv(LeggedRobotEnv):
                     self._hand_reader = HandContactReader(self, support_cfg['stages']['hands']['body_names'])
                     self._hand_contact_steps = torch.zeros(self.num_envs,2,dtype=torch.long,device=self.device)
                 self._hand_force_sum = torch.zeros(self.num_envs,2,3,device=self.device)
+        if getattr(self.cfg,'pair_standup_support_cfg',{}).get('stages',{}).get('crouch_transfer'):
+            if not hasattr(self,'_pelvis_ground_reader'):
+                self._pelvis_ground_reader=HandContactReader(self,['pelvis'])
+            self._pelvis_ground_sum=torch.zeros(self.num_envs,device=self.device)
         previous_previous = getattr(self, "_standup_previous_previous_action", None)
         if previous_previous is None or previous_previous.shape != actions.shape:
             previous_previous = torch.zeros_like(actions)
@@ -274,6 +278,9 @@ class StandUpEnv(LeggedRobotEnv):
         super()._apply_action()
 
     def _sample_support_contact(self) -> None:
+        if hasattr(self,'_pelvis_ground_reader'):
+            self._pelvis_ground_last=self._pelvis_ground_reader.read()[:,0,2].clamp_min(0)
+            self._pelvis_ground_sum+=self._pelvis_ground_last
         feet, hips = self._support_reader.read()
         self._support_force_sum += feet
         self._support_hip_sum += hips
@@ -289,6 +296,11 @@ class StandUpEnv(LeggedRobotEnv):
         data = self.robot.data
         cfg = self.cfg.pair_standup_support_cfg
         mass = _to_torch(data.body_mass)
+        if hasattr(self,'_pelvis_ground_reader'):
+            # Conservative contact decision: either sustained or final-substep load counts.
+            self._pelvis_ground_load=torch.maximum(self._pelvis_ground_sum/self._support_substeps,self._pelvis_ground_last)/(mass.sum(-1)*9.81)
+            self.extras.setdefault('log',{})['Crouch/pelvis_ground_load']=self._pelvis_ground_load.mean().detach()
+
         com = (_to_torch(data.body_com_pos_w) * mass[..., None]).sum(1) / mass.sum(1, keepdim=True)
         feet_ids = [self.robot.body_names.index(f"{s}_ankle_roll_link") for s in ("left", "right")]
         feet = _to_torch(data.body_link_pos_w)[:, feet_ids]
@@ -329,6 +341,9 @@ class StandUpEnv(LeggedRobotEnv):
         fz = self._support_force_sum / self._support_substeps
         hips = self._support_hip_sum / self._support_substeps
         finite = standup_finite_state(fz, hips, points, com, mass)
+        if hasattr(self,'_pelvis_ground_load'):
+            finite &= standup_finite_state(self._pelvis_ground_load)
+
         if hasattr(self, '_hand_reader'):
             hand_ids = self._hand_reader.body_ids
             hand_pos = _to_torch(data.body_link_pos_w)[:, hand_ids]
@@ -369,6 +384,13 @@ class StandUpEnv(LeggedRobotEnv):
             persistence_steps=standup_hold_steps(cfg["persistence_s"], self.step_dt),
             balance_sigma=cfg["balance_sigma"], sole_height_tolerance=cfg["sole_height_tolerance"])
         self._support_contact_steps.copy_(self._support_state["contact_steps"])
+        if 'posture_completion' in cfg.get('stages',{}):
+            from .posture_completion import support_frame_up
+            torso_q = _to_torch(data.body_link_quat_w)[:,self.robot.body_names.index('torso_link')]
+            finite_torso = torch.isfinite(torso_q).all(-1)
+            self._standup_finite_this_step &= finite_torso
+            up = quat_apply(torso_q,torch.tensor([0.,0.,1.],device=self.device).expand(self.num_envs,-1))
+            self._torso_up_support = support_frame_up(torch.nan_to_num(up),safe_points)
         if cfg.get('stages',{}).get('rise_hold_v2',False):
             from .rise_hold import support_margin, support_frame_lean
             valid = (safe_points[...,2].abs()<cfg['sole_height_tolerance']) & (
@@ -612,15 +634,17 @@ class StandUpEnv(LeggedRobotEnv):
             torso_forward_lean=lean,
             assistance_ratio=getattr(self, '_standup_assistance_actual_ratio', torch.zeros_like(root_height)),
             filtered_ground_fraction=getattr(self, '_transfer_ground_fraction_filter', None),
+            pelvis_ground_load=getattr(self,'_pelvis_ground_load',None),
             foot_low=q.get('feet_low_per_foot'),
             foot_clearance=q.get('foot_clearance_per_foot'),
             foot_flat=q.get('feet_signed_flat_per_foot'),
             com_margin=getattr(self,'_rise_com_margin',None),
             torso_upright=getattr(self,'_rise_torso_upright',None),
+            torso_up_support=getattr(self,'_torso_up_support',None),
             sole_heading_xy=getattr(self, '_stance_sole_heading_xy', None))
         return stage_rewards(inputs, self.cfg.pair_standup_support_cfg["stages"], step_dt=self.step_dt,
             hand_state=getattr(self, "_hand_state", None),
-            reward_form=("positive" if self.cfg.pair_standup_reward_cfg.get("mode") == "simple_v13" else "deficit"))
+            reward_form=self.cfg.pair_standup_reward_cfg.get("stage_reward_form", ("positive" if self.cfg.pair_standup_reward_cfg.get("mode") == "simple_v13" else "deficit")))
 
     def _get_rewards(self):
         if self.cfg.pair_standup_reward_cfg.get('mode') == 'simple_v13':
@@ -687,7 +711,7 @@ class StandUpEnv(LeggedRobotEnv):
 
         body_score = self._body_height_score(root_height, shoulder_height)
         standing = standup_stable_state(
-            body_height_score=body_score,
+            body_height_score=(torch.ones_like(body_score) if getattr(self.cfg,'pair_standup_goal','stand')=='crouch' else body_score),
             upright_projection=upright,
             base_linear_velocity=root_state[:, 7:10],
             base_angular_velocity=root_state[:, 10:13],
@@ -725,6 +749,15 @@ class StandUpEnv(LeggedRobotEnv):
             standing &= self._transfer_usable_foot_load.amin(-1)>=.2
             if 'stance' in support_cfg['stages']:
                 standing &= stance_geometry(self._stance_sole_heading_xy,support_cfg['stages']['stance'])['ready']>=.99
+        if getattr(self.cfg,'pair_standup_goal','stand')=='crouch':
+            from .crouch import crouch_stable
+            staged=self._staged_reward_result(root_height,shoulder_height,upright,
+                base_linear_velocity,base_angular_velocity,joint_velocity)
+            standing &= crouch_stable(root_height,shoulder_height,upright,
+                staged.diagnostics['crouch_ready'],self._transfer_usable_foot_load,
+                self._hand_state,self._support_state['distance'],
+                self._standup_assistance_actual_ratio,support_cfg['stages']['crouch_goal'],
+                pelvis_ground_load=getattr(self,'_pelvis_ground_load',None))
         hold = getattr(self, "_standup_success_hold", None)
         if hold is None or hold.shape != self.episode_length_buf.shape:
             hold = torch.zeros_like(self.episode_length_buf)
@@ -792,6 +825,11 @@ class StandUpEnv(LeggedRobotEnv):
             outcomes & success_now & ~terminated
         ).float().sum().detach()
         log["StandUp/nonfinite_fraction"] = (~finite).float().mean().detach()
+        if getattr(self.cfg,'pair_standup_goal','stand')=='crouch':
+            for key in ('success_fraction','stable_fraction','success_events','outcomes','successful_outcomes','stable_outcomes'):
+                log['Crouch/'+key]=log['StandUp/'+key]
+            log['Crouch/root_height']=root_height.mean().detach()
+            log['Crouch/shoulder_height']=shoulder_height.mean().detach()
         # Exclude episodes spanning a global force-level change. Probe episodes
         # have zero force throughout, not just after the height fade-out.
         episode_ratio = getattr(self, "_standup_assistance_episode_ratio", None)

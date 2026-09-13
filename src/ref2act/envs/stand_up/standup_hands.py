@@ -6,6 +6,10 @@ from .standup_support import ground_normal_force
 
 
 def validate_hands(c):
+    if 'bilateral_preparation' in c:
+        if c['bilateral_preparation'] is not True:
+            raise ValueError('bilateral_preparation must be true when specified')
+        c={k:v for k,v in c.items() if k!='bilateral_preparation'}
     expected={'enabled','body_names','contact_load','full_load','persistence_s','slip_sigma',
         'approach_height','height_sigma','release_height','preparation_fraction','release_fraction'}
     if set(c)!=expected or type(c['enabled']) is not bool:
@@ -74,3 +78,23 @@ class HandContactReader:
         self.last_net_force = torch.stack(net_forces,1)
         self.last_robot_force = torch.stack(self_forces,1)
         return torch.stack(forces,1)
+
+
+def bilateral_hand_help(state, righting, cfg):
+    """Reward both persistent, nonslipping hands; retain single-hand discovery.
+
+    Balance redistributes a given load; increasing total force beyond support
+    saturation is not itself rewarded. The weaker hand must provide real support.
+    """
+    support=state['support'].clamp(0,1)
+    loads=state['load'].clamp_min(0)
+    total=loads.sum(-1)
+    support_balance=2*support.amin(-1)/support.sum(-1).clamp_min(1.e-6)
+    load_balance=2*loads.amin(-1)/total.clamp_min(1.e-6)
+    balance=torch.minimum(support_balance,load_balance).clamp(0,1)
+    gate=((total-2*cfg['contact_load'])/(2*cfg['full_load']-2*cfg['contact_load'])).clamp(0,1)
+    gate=gate.square()*(3-2*gate)
+    quality=support.sum(-1).clamp(0,1)*(1-.4*gate*(1-balance))
+    help_credit=.15*state['approach'].mean(-1)+.85*quality*righting
+    return help_credit,dict(hand_bilateral_support_quality=quality,
+        hand_load_balance=load_balance,hand_support_balance=balance,hand_balance_gate=gate)

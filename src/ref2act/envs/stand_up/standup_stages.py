@@ -32,9 +32,11 @@ class StageInputs:
     sole_heading_xy: torch.Tensor | None = None
     com_margin: torch.Tensor | None = None
     torso_upright: torch.Tensor | None = None
+    pelvis_ground_load: torch.Tensor | None = None
     foot_low: torch.Tensor | None = None
     foot_flat: torch.Tensor | None = None
     foot_clearance: torch.Tensor | None = None
+    torso_up_support: torch.Tensor | None = None
 
 
 @dataclass(frozen=True)
@@ -45,6 +47,53 @@ class StageRewards:
 
 
 def validate_stages(cfg):
+    if 'crouch_transfer' in cfg:
+        c=cfg['crouch_transfer'];g=cfg.get('crouch_goal',{})
+        if not cfg.get('preparation_only') or 'maximum_pelvis_load' not in g or set(c)!={'weight','root_start','shoulder_start','pelvis_load_scale','hand_load_scale'} or any(not math.isfinite(float(v)) or v<=0 for v in c.values()):
+            raise ValueError('Invalid crouch transfer settings')
+        if c['root_start']>=g['root_min'] or c['shoulder_start']>=g['shoulder_min']:
+            raise ValueError('Crouch transfer starts must precede target height bands')
+        cfg={k:v for k,v in cfg.items() if k!='crouch_transfer'}
+    if 'preparation_only' in cfg:
+        if cfg['preparation_only'] is not True or 'crouch_goal' not in cfg:
+            raise ValueError('Preparation-only objective requires a crouch goal')
+        cfg = {k:v for k,v in cfg.items() if k != 'preparation_only'}
+    if 'rise_height_coefficient' in cfg:
+        value = float(cfg['rise_height_coefficient'])
+        if not math.isfinite(value) or value <= 0 or 'crouch_goal' in cfg or cfg.get('rise_hold_v2', False):
+            raise ValueError('Rise height coefficient requires the V12 rise objective and a positive finite value')
+        cfg = {k:v for k,v in cfg.items() if k != 'rise_height_coefficient'}
+    if 'crouch_goal' in cfg:
+        from .crouch import validate_crouch
+        validate_crouch(cfg['crouch_goal'])
+        if not cfg.get('hands',{}).get('enabled') or 'stance' not in cfg or 'posture_completion' in cfg:
+            raise ValueError('Crouch requires hands and stance, without stand completion overrides')
+        cfg={k:v for k,v in cfg.items() if k!='crouch_goal'}
+    if 'ground_approach' in cfg:
+        c=cfg['ground_approach']
+        if (set(c)!={'clearance_free','clearance_scale'}
+                or any(not math.isfinite(float(v)) for v in c.values())
+                or not 0<=c['clearance_free']<=.15 or c['clearance_scale']<=0
+                or any(cfg.get(k,False) for k in ('foot_discovery_v2','foot_retraction_v3','foot_ground_retraction_v4','foot_stance_v5'))):
+            raise ValueError('Invalid ground approach settings or conflicting discovery mode')
+        cfg={k:v for k,v in cfg.items() if k!='ground_approach'}
+    if 'posture_completion' in cfg:
+        c=cfg['posture_completion']
+        if 'staged_hand_unload' in c:
+            if c['staged_hand_unload'] is not True or not c.get('shared_target_hold',False):
+                raise ValueError('staged_hand_unload requires shared_target_hold')
+            c={k:v for k,v in c.items() if k!='staged_hand_unload'}
+        if 'shared_target_hold' in c:
+            if c['shared_target_hold'] is not True:
+                raise ValueError('shared_target_hold must be true when specified')
+            c={k:v for k,v in c.items() if k!='shared_target_hold'}
+        keys={'low_lean_deg','lean_transition_start','tilt_sigma_deg','completion_fraction'}
+        if (set(c)!=keys or any(not math.isfinite(float(v)) for v in c.values())
+                or not 0<c['low_lean_deg']<45 or not 0<c['lean_transition_start']<1
+                or not 0<c['tilt_sigma_deg']<90 or not 0<c['completion_fraction']<1
+                or 'rise_transfer' not in cfg or cfg.get('rise_hold_v2',False)):
+            raise ValueError('Invalid continuous posture completion settings')
+        cfg={k:v for k,v in cfg.items() if k!='posture_completion'}
     if 'foot_stance_v5' in cfg:
         if cfg['foot_stance_v5'] is not True or not cfg.get('foot_ground_retraction_v4',False) or 'stance' not in cfg:
             raise ValueError('foot_stance_v5 requires ground retraction and stance geometry')
@@ -180,6 +229,19 @@ def stage_rewards(x: StageInputs, cfg, *, step_dt: float, hand_state=None, rewar
     # Constant improvement per metre within the discovery range. Independent
     # of sole height/contact: moving a lifted foot inward still earns credit.
     geometry = ((cfg['distance_zero']-distance)/(cfg['distance_zero']-cfg['distance_full'])).clamp(0,1)
+    ground_diagnostics = {}
+    if 'ground_approach' in cfg:
+        if x.foot_clearance is None:
+            raise ValueError('Ground approach requires measured per-foot clearance')
+        c=cfg['ground_approach']
+        # A low approach region, not an infinite vertical column over the hips.
+        # A rational envelope keeps lowering feedback even for the failed high-leg pose.
+        clearance_factor=1/(1+((x.foot_clearance.clamp_min(0)-c['clearance_free']).clamp_min(0)/c['clearance_scale']).square())
+        horizontal_geometry=geometry
+        geometry=geometry*clearance_factor
+        ground_diagnostics=dict(foot_horizontal_distance_credit=_both_score(horizontal_geometry),
+            foot_approach_height_factor=_both_score(clearance_factor),
+            foot_ground_approach_credit=_both_score(geometry))
     plant = x.sole_plant.clamp(0,1)
     planted = _gate(plant, cfg['plant_start'], cfg['plant_full'])
     touch = _gate(x.usable_load, cfg['touch_start'], cfg['touch_full'])
@@ -251,7 +313,8 @@ def stage_rewards(x: StageInputs, cfg, *, step_dt: float, hand_state=None, rewar
     load = (x.filtered_load/cfg['load_full']).clamp(0,1)
     com = 1/(1+(x.com_distance.clamp_min(0)/cfg['com_sigma']).square())
     # No required full load or CoM alignment before lifting; improve together.
-    rise = ready*(.2*load+.6*height+.2*com)
+    height_coefficient = cfg.get("rise_height_coefficient", .6)
+    rise = ready*(.2*load+height_coefficient*height+.2*com)
     transfer_diagnostics = {}
     if 'rise_transfer' in cfg:
         if hand_state is None or x.torso_forward_lean is None:
@@ -276,14 +339,32 @@ def stage_rewards(x: StageInputs, cfg, *, step_dt: float, hand_state=None, rewar
         # credit. Removing a target must not penalize successful extension.
         fade = _gate(x.root_height/x.root_target,c['fade_start'],c['fade_full'])
         lean_credit = fade+(1-fade)*lean
+        posture_diagnostics = {}
+        if 'posture_completion' in cfg:
+            if x.torso_up_support is None:
+                raise ValueError('Posture completion requires full measured torso up axis')
+            from .posture_completion import posture_scores
+            lean_credit, upright_quality, target = posture_scores(x.torso_up_support,height,cfg['posture_completion'])
+            lean = lean_credit
+            fade = 1-target/math.radians(cfg['posture_completion']['low_lean_deg'])
+            angle = torch.rad2deg(torch.atan2(x.torso_up_support[:,0],x.torso_up_support[:,2]))
+            posture_diagnostics=dict(torso_target_lean_deg=torch.rad2deg(target),
+                torso_side_lean_deg=torch.rad2deg(torch.atan2(x.torso_up_support[:,1],x.torso_up_support[:,2])),
+                torso_upright_quality=upright_quality, torso_guidance_quality=lean_credit)
+        unload_gate=torch.ones_like(height)
+        if cfg.get('posture_completion',{}).get('staged_hand_unload',False):
+            from .posture_completion import hold_height_gate
+            unload_gate=hold_height_gate(height,cfg['posture_completion'])
         u,l = c['unload_fraction'],c['lean_fraction']
         budget_remaining = .4-u-l
-        rise = ready*(.6*height + .5*budget_remaining*(load+com) + u*takeover + l*lean_credit)
+        rise = ready*(height_coefficient*height + .5*budget_remaining*(load+com) + u*unload_gate*takeover + l*lean_credit)
         transfer_diagnostics = dict(torso_forward_lean_deg=angle, rise_load_credit=load,
             remaining_ground_weight=remaining, foot_load_target_mg=cfg['load_full']*remaining,
             foot_ground_fraction=ground_fraction, hand_ground_fraction=hand_load,
             hand_unload_quality=unload, foot_takeover_credit=ready*takeover,
+            unload_height_gate=unload_gate, rise_unload_credit=ready*unload_gate*takeover,
             lean_quality=lean, lean_fade=fade, lean_guidance_credit=ready*lean_credit)
+        transfer_diagnostics.update(posture_diagnostics)
     standing = _gate(height,cfg['standing_start'],cfg['standing_full'])*_gate(
         x.upright,cfg['upright_start'],cfg['upright_full'])
     motion = 1/(1+(x.linear_speed/cfg['linear_speed_scale']).square()
@@ -299,23 +380,72 @@ def stage_rewards(x: StageInputs, cfg, *, step_dt: float, hand_state=None, rewar
         h = cfg['hands']
         # Either hand can help. Modest approach credit precedes real support.
         help_credit = .15*hand_state['approach'].amax(-1) + .85*hand_state['support'].amax(-1)*righting
+        bilateral_diagnostics={}
+        if h.get('bilateral_preparation',False):
+            from .standup_hands import bilateral_hand_help
+            help_credit,bilateral_diagnostics=bilateral_hand_help(hand_state,righting,h)
         # Foot takeover preserves earned support credit when hands unload.
         support_credit = torch.maximum(help_credit, ready)
         preparation = (1-h['preparation_fraction'])*preparation + h['preparation_fraction']*support_credit
         release = hand_state['release'].amin(-1)
         stand *= (1-h['release_fraction']) + h['release_fraction']*release
         hand_diagnostics = dict(hand_help=help_credit, hand_support_credit=support_credit, hand_release=release)
+        hand_diagnostics.update(bilateral_diagnostics)
+    if 'posture_completion' in cfg:
+        from .posture_completion import stand_completion, hold_height_gate
+        # Autonomous quality uses actual loads; assistance cannot inflate it.
+        actual_load=(torch.minimum(x.filtered_ground_fraction*remaining,
+            x.usable_load.clamp_min(0).sum(-1))/cfg['load_full']).clamp(0,1)
+        bilateral=_gate(x.usable_load.amin(-1),cfg['touch_start'],.2)
+        actual_unload=hand_unload_quality(hand_state['load'].clamp_min(0).sum(-1),cfg['rise_transfer'])
+        autonomous=actual_load*bilateral*actual_unload*com*motion*(1-x.assistance_ratio).clamp(0,1)
+        posture_cfg=cfg['posture_completion']
+        completion_quality=lean_credit if posture_cfg.get('shared_target_hold',False) else upright_quality
+        stand,completion=stand_completion(height,completion_quality,ready,autonomous,posture_cfg)
+        standing=height.square()*completion_quality
+        transfer_diagnostics.update(stand_completion=completion,stand_height_completion=height.square(),
+            stand_posture_quality=completion_quality,hold_height_gate=hold_height_gate(height,posture_cfg),
+            autonomous_hold_quality=autonomous,hold_actual_load_quality=actual_load,
+            hold_bilateral_quality=bilateral,hold_hand_unload_quality=actual_unload,
+            hold_motion_quality=motion)
     if cfg.get('rise_hold_v2',False):
         from .rise_hold import rise_hold_credit
         rise,stand,new_diagnostics=rise_hold_credit(
             x,cfg,ready,load,takeover,hand_state['load'].clamp_min(0).sum(-1))
         transfer_diagnostics.update(new_diagnostics)
+    if 'crouch_goal' in cfg:
+        from .crouch import crouch_credit
+        crouch,goal_diagnostics=crouch_credit(x,cfg['crouch_goal'],ready,hand_state,com,motion)
+        credits=dict(preparation=preparation,crouch=crouch)
+        weights=dict(preparation=cfg['weights']['preparation'],crouch=cfg['crouch_goal']['weight'])
+        if cfg.get('preparation_only', False):
+            credits = dict(preparation=preparation)
+            weights = dict(preparation=cfg['weights']['preparation'])
+        if 'crouch_transfer' in cfg:
+            from .crouch_transfer import transfer_credit
+            value, transfer_diagnostics = transfer_credit(x,hand_state,ready,cfg['crouch_transfer'],cfg['crouch_goal'])
+            credits['crouch_transfer']=value
+            weights['crouch_transfer']=cfg['crouch_transfer']['weight']
+            goal_diagnostics.update(transfer_diagnostics)
+        if reward_form not in ('deficit','positive'):
+            raise ValueError('Unknown reward form')
+        rewards={k:step_dt*weights[k]*(v if reward_form=='positive' else v-1) for k,v in credits.items()}
+        diagnostics={f'credit_{k}':v for k,v in credits.items()}
+        diagnostics.update(goal_diagnostics)
+        diagnostics.update(hand_diagnostics)
+        diagnostics.update(stance_diagnostics)
+        diagnostics.update(credit_righting=righting,credit_feet=feet,loaded_rise=ready,
+            crouch_ready=ready,body_ready=body_ready,support_ready=support_ready,
+            placement_ready=placement_ready,phase_preparation=1-ready,phase_crouch=ready,
+            com_quality=com)
+        return StageRewards(rewards,diagnostics,torch.zeros_like(ready))
     credits = dict(preparation=preparation, rise=rise, stand=stand)
     if reward_form not in ('deficit','positive'):
         raise ValueError('Unknown stage reward form')
     rewards = {k: step_dt*cfg['weights'][k]*(v if reward_form == 'positive' else v-1)
                for k,v in credits.items()}
     diagnostics = {f'credit_{k}':v for k,v in credits.items()}
+    diagnostics.update(ground_diagnostics)
     diagnostics.update(discovery_diagnostics)
     diagnostics.update(hand_diagnostics)
     diagnostics.update(transfer_diagnostics)

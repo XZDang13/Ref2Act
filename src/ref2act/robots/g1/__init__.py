@@ -6,6 +6,7 @@ from .spec import G1_23_DOF_JOINT_ORDER, G1_23_DOF_SPEC
 
 __all__ = [
     "G1StandUpEnvCfg",
+    "G1GroundToCrouchEnvCfg",
     "G1_CFG",
     "G1_23_DOF_JOINT_ORDER",
     "G1_23_DOF_SPEC",
@@ -24,6 +25,7 @@ __all__ = [
 
 _EXPORT_MODULES = {
     "G1StandUpEnvCfg": ".stand_up_env_cfg",
+    "G1GroundToCrouchEnvCfg": ".ground_to_crouch_env_cfg",
     "G1_CFG": ".articulation",
     "G1DomainRandCfg": ".randomization_presets",
     "G1FlatLocomotionEnvCfg": ".locomotion_env_cfg",

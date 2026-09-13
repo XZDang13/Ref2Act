@@ -259,6 +259,15 @@ def configure_task(
                     if not 0 <= transfer[f"{prefix}_start"] < transfer[f"{prefix}_full"] <= 1:
                         raise ValueError(f"Invalid support.transfer.{prefix} interval.")
 
+    goal=standup.get('goal','stand')
+    if goal not in ('stand','crouch'):
+        raise ValueError('Unknown ground recovery goal')
+    cfg.pair_standup_goal=goal
+    crouch=cfg.pair_standup_support_cfg.get('stages',{}).get('crouch_goal')
+    if (goal=='crouch') != (crouch is not None):
+        raise ValueError('Crouch goal and stage configuration must agree')
+    if goal=='crouch' and standup.get('assistance',{}).get('enabled',False):
+        raise ValueError('Autonomous crouch does not use external assistance')
     targets = standup["targets"]
     target_source = str(targets.get("source", "default_standing"))
     if target_source != "default_standing":
@@ -293,6 +302,23 @@ def configure_task(
         full = float(reward_cfg["upright_gate_full"])
         if not 0.0 <= start < full <= 1.0:
             raise ValueError("Stand-up upright gate must satisfy 0 <= start < full <= 1.")
+    if 'default_pose_penalty' in reward_cfg:
+        from .default_pose_penalty import validate_default_pose_penalty
+        validate_default_pose_penalty(reward_cfg['default_pose_penalty'])
+        if reward_cfg.get('mode')=='simple_v13':
+            raise ValueError('default_pose_penalty requires legacy reward path')
+    if reward_cfg.get('stage_reward_form', 'deficit') not in ('positive', 'deficit'):
+        raise ValueError('Invalid stage reward form')
+    if 'v12_targeted_style' in reward_cfg:
+        from .v12_targeted_style import validate_targeted_style
+        validate_targeted_style(reward_cfg['v12_targeted_style'])
+        if reward_cfg.get('mode')=='simple_v13' or cfg.pair_standup_support_cfg.get('reward_mode')!='staged' or not cfg.pair_standup_support_cfg['stages'].get('hands',{}).get('enabled'):
+            raise ValueError('Targeted style requires staged rewards and hand sensors')
+    if 'supported_style' in reward_cfg:
+        from .supported_style import validate_supported_style
+        validate_supported_style(reward_cfg['supported_style'])
+        if reward_cfg.get('mode')=='simple_v13' or cfg.pair_standup_support_cfg.get('reward_mode')!='staged' or not cfg.pair_standup_support_cfg['stages'].get('hands',{}).get('enabled'):
+            raise ValueError('Supported style requires V12 staged rewards and measured hands')
     cfg.pair_standup_reward_cfg = reward_cfg
     cfg.pair_standup_success_hold_s = float(
         standup["success_hold_s"] if "success_hold_s" in standup

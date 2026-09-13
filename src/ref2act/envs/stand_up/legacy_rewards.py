@@ -72,7 +72,7 @@ def get_rewards(self) -> torch.Tensor:
         previous_previous_action=previous_previous_action,
         step_dt=float(self.step_dt),
         valid_state=self._standup_finite_this_step,
-        **reward_cfg,
+        **{k:v for k,v in reward_cfg.items() if k not in ('supported_style','default_pose_penalty','v12_targeted_style','stage_reward_form')},
     )
     support_cfg = getattr(self.cfg, "pair_standup_support_cfg", {})
     transfer_cfg = support_cfg.get("transfer") if support_cfg.get("enabled", False) and support_cfg.get("reward_mode") == "transfer" else None
@@ -135,6 +135,37 @@ def get_rewards(self) -> torch.Tensor:
         active = self._standup_finite_this_step & ~failed & ~self._standup_is_settling()
         self._stage_assistance_gate = torch.where(active, staged.assistance_gate, 0.).detach()
     reward = terms.total
+    if 'default_pose_penalty' in reward_cfg:
+        from .default_pose_penalty import environment_default_pose_penalty
+        pose_cost=environment_default_pose_penalty(self)
+        active=self._standup_finite_this_step & ~failed & ~self._standup_is_settling()
+        pose_cost=torch.where(active,pose_cost,0.)
+        pose_reward=self.step_dt*reward_cfg['default_pose_penalty']['weight']*pose_cost
+        reward+=pose_reward
+        self.extras.setdefault('log',{})['Pose/default_offset_cost']=pose_cost.mean().detach()
+        self.extras['log']['Pose/reward_default_offset']=pose_reward.mean().detach()
+    if 'v12_targeted_style' in reward_cfg:
+        from .v12_targeted_style import environment_targeted_style
+        style, diagnostics = environment_targeted_style(self, staged)
+        active = self._standup_finite_this_step & ~failed & ~self._standup_is_settling()
+        log = self.extras.setdefault('log', {})
+        for key, value in style.items():
+            masked = torch.where(active, value, 0.)
+            reward += masked
+            log['V12Style/reward_' + key] = masked.mean().detach()
+        for key, value in diagnostics.items():
+            log['V12Style/' + key] = torch.where(active, value, 0.).mean().detach()
+    if 'supported_style' in self.cfg.pair_standup_reward_cfg:
+        from .supported_style import environment_supported_style
+        style,diagnostics=environment_supported_style(self,staged)
+        active=self._standup_finite_this_step & ~failed & ~self._standup_is_settling()
+        log=self.extras.setdefault('log',{})
+        for key,value in style.items():
+            masked=torch.where(active,value,0.)
+            reward+=masked
+            log['Style/reward_'+key]=masked.mean().detach()
+        for key,value in diagnostics.items():
+            log['Style/'+key]=torch.where(active,value,0.).mean().detach()
     if support_cfg.get("enabled", False):
         if transfer_cfg is not None:
             transfer_terms, peak, preparation_weight = support_transfer_rewards(
