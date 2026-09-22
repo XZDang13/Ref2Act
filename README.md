@@ -124,3 +124,7 @@ env -u DISPLAY -u XAUTHORITY python tests/integration/isaac_locomotion_headless_
 ```
 
 See `docs/runtime-environment.md` for the exact install and validation contract.
+
+## Single-leg balance
+
+`G1SingleLegBalance-v0` is an independent fixed-left, robot-history-only stabilization task under horizontal force pulses. See [task contract, commands and validation](docs/SINGLE_LEG_BALANCE.md).

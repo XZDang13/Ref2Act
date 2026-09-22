@@ -11,6 +11,8 @@ def _register_default_envs() -> None:
     register_locomotion_envs()
     from .envs.stand_up.registry import register_envs as register_stand_up_envs
     register_stand_up_envs()
+    from .envs.single_leg_balance.registry import register_envs as register_single_leg_balance_envs
+    register_single_leg_balance_envs()
 
 
 _register_default_envs()

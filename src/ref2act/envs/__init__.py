@@ -1,9 +1,12 @@
 from __future__ import annotations
 
-__all__ = ["LeggedRobotEnv", "LocomotionEnv", "MotionTrackingEnv", "StandUpEnv"]
+__all__ = ["SingleLegBalanceEnv", "LeggedRobotEnv", "LocomotionEnv", "MotionTrackingEnv", "StandUpEnv"]
 
 
 def __getattr__(name: str):
+    if name == "SingleLegBalanceEnv":
+        from .single_leg_balance.env import SingleLegBalanceEnv
+        return SingleLegBalanceEnv
     if name == "LeggedRobotEnv":
         from .base import LeggedRobotEnv
 

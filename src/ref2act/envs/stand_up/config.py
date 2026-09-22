@@ -54,6 +54,10 @@ def configure_task(
             raise ValueError('Episode sampling requires staged rewards and privileged single-frame critic')
     cfg.joint_position_reset_noise = 0.0
     cfg.action.mode = "offset"
+    from .action_safety import validate_safety
+    cfg.pair_standup_action_safety = validate_safety(standup.get('action_safety'))
+    if cfg.pair_standup_action_safety and tuple(cfg.action.latency_range or (0, 0)) != (0, 0):
+        raise ValueError('Crouch action safety currently requires zero action delay')
     cfg.action.noise_scale = 0.0
     cfg.robot.spawn.articulation_props.enabled_self_collisions = bool(
         standup.get("enabled_self_collisions", True)
@@ -61,6 +65,8 @@ def configure_task(
 
     cfg.pair_standup_enabled = True
     cfg.pair_standup_initial_state_mode = initial_mode
+    from .reset_pose import validate_reset_pose
+    cfg.pair_standup_reset_joint_positions = validate_reset_pose(initial)
     cfg.pair_standup_initial_root_position = root_position
     cfg.pair_standup_initial_root_euler_xyz = root_euler
     cfg.pair_standup_initial_joint_noise = float(

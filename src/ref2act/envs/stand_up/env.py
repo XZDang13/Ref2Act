@@ -262,13 +262,41 @@ class StandUpEnv(LeggedRobotEnv):
         if settling.any():
             actions = actions.clone()
             actions[settling] = 0.0
+            if getattr(self.cfg, 'pair_standup_reset_joint_positions', None) is not None:
+                from .reset_pose import target_to_offset_action
+                proc = self.action_processor
+                held = target_to_offset_action(self._standup_reset_joint_target,
+                                              proc.offset, proc.scale, proc.offset_noise)
+                actions[settling] = self._sim_to_policy_order(held)[settling]
             if hasattr(self,'_mixed_group'):
                 selected=settling & (self._mixed_group>0)
                 proc=self.action_processor
                 held=(self._mixed_target-proc.offset-proc.offset_noise)/proc.scale
                 actions[selected]=self._sim_to_policy_order(held)[selected]
-        self.action_processor.pre_process_action(self._policy_to_sim_order(actions))
+        sim_actions = self._policy_to_sim_order(actions)
+        guard_settings = getattr(self.cfg, 'pair_standup_action_safety', None)
+        if guard_settings is not None:
+            guard = self._ensure_target_guard()
+            proc = self.action_processor
+            requested = sim_actions * proc.scale + proc.offset + proc.offset_noise
+            safe, finite = guard.apply(requested, proc.target_joint_position)
+            applied = (safe - proc.offset - proc.offset_noise) / proc.scale
+            correction = torch.where(finite[:, None], sim_actions - applied, torch.zeros_like(applied))
+            self._safety_intervention_cost = correction.square().mean(-1)
+            self._safety_invalid = ~finite
+            self._safety_requested_target = requested.detach().clone()
+            self._safety_changed = (correction.abs() > 1.e-6).float().mean(-1)
+            sim_actions = applied
+        self.action_processor.pre_process_action(sim_actions)
         self._apply_standup_assistance()
+
+    def _ensure_target_guard(self):
+        if not hasattr(self, '_target_guard'):
+            from .action_safety import TargetGuard
+            proc = self.action_processor
+            self._target_guard = TargetGuard(list(self.robot.joint_names), proc.joint_low_limit,
+                proc.joint_up_limit, self.cfg.pair_standup_action_safety, self.step_dt)
+        return self._target_guard
 
     def _apply_action(self) -> None:
         if getattr(self.cfg, "pair_standup_support_cfg", {}).get("enabled", False):
@@ -651,7 +679,18 @@ class StandUpEnv(LeggedRobotEnv):
             from .simple_rewards import get_rewards
         else:
             from .legacy_rewards import get_rewards
-        return get_rewards(self)
+        reward = get_rewards(self)
+        settings = getattr(self.cfg, 'pair_standup_action_safety', None)
+        if settings is not None and hasattr(self, '_safety_intervention_cost'):
+            cost = torch.nan_to_num(self._safety_intervention_cost, nan=1.e3, posinf=1.e3).clamp_max(1.e3)
+            penalty = -self.step_dt * settings['intervention_weight'] * cost
+            reward = reward + penalty
+            log = self.extras['log']
+            log['Safety/intervention_fraction'] = self._safety_changed.mean().detach()
+            log['Safety/invalid_action_fraction'] = self._safety_invalid.float().mean().detach()
+            log['Safety/reward_intervention'] = penalty.mean().detach()
+            log['StandUp/reward_total'] = reward.mean().detach()
+        return reward
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         root_state = _to_torch(self.robot.data.root_link_state_w)
@@ -666,6 +705,8 @@ class StandUpEnv(LeggedRobotEnv):
             self.action_processor.applied_action,
             self.action_processor.previous_applied_action,
         )
+        if hasattr(self, '_safety_invalid'):
+            finite &= ~self._safety_invalid
         self._standup_finite_this_step = finite
         support_cfg = getattr(self.cfg, "pair_standup_support_cfg", {})
         if support_cfg.get("enabled", False):
@@ -902,6 +943,14 @@ class StandUpEnv(LeggedRobotEnv):
         root_state[:, 3:7] = quat_from_euler_xyz(angles, pitches, yaws)
         root_state[:, 7:] = 0.0
         joint_position = _to_torch(self.robot.data.default_joint_pos)[normalized].clone()
+        reset_pose = getattr(self.cfg, 'pair_standup_reset_joint_positions', None)
+        if reset_pose is not None:
+            from .reset_pose import reset_joint_targets
+            joint_position = reset_joint_targets(joint_position, list(self.robot.joint_names),
+                _to_torch(self.robot.data.joint_pos_limits)[normalized], reset_pose)
+            if not hasattr(self, '_standup_reset_joint_target'):
+                self._standup_reset_joint_target = _to_torch(self.robot.data.default_joint_pos).clone()
+            self._standup_reset_joint_target[normalized] = joint_position
         joint_velocity = torch.zeros_like(joint_position)
         state = getattr(self.cfg, "pair_standup_crouch_state", None)
         if state is not None:
@@ -930,10 +979,16 @@ class StandUpEnv(LeggedRobotEnv):
         self.robot.write_joint_velocity_to_sim_index(
             velocity=joint_velocity, env_ids=normalized
         )
+        if getattr(self.cfg, 'pair_standup_action_safety', None) is not None:
+            self._ensure_target_guard().validate_reset(joint_position)
+            if hasattr(self, '_safety_invalid'):
+                self._safety_invalid[normalized] = False
+                self._safety_intervention_cost[normalized] = 0.
+                self._safety_changed[normalized] = 0.
         self.action_processor.target_joint_position[normalized] = joint_position
         self.action_processor.applied_action[normalized] = 0.0
         self.action_processor.previous_applied_action[normalized] = 0.0
-        if state is not None:
+        if state is not None or reset_pose is not None:
             offset = self.action_processor.offset.expand(self.num_envs, -1)[normalized]
             scale = self.action_processor.scale.expand(self.num_envs, -1)[normalized]
             initial_action = (joint_position - offset
